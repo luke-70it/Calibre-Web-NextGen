@@ -73,7 +73,11 @@ const TAG_ALIASES: Record<string, string> = {
 };
 
 function isSafeUrl(raw: string): boolean {
-  const url = raw.trim();
+  // Strip ASCII whitespace and control characters before looking for a scheme.
+  // Browsers drop tabs and newlines inside a URL, so "java&#9;script:alert(1)"
+  // resolves as javascript: while a naive scheme regex sees no scheme at all
+  // and waves it through as a relative link.
+  const url = raw.replace(/[\u0000-\u0020]/g, '');
   if (!url) return false;
   // Relative and anchor links carry no scheme and are left alone, matching
   // bleach (its protocol check only fires when a scheme is present).

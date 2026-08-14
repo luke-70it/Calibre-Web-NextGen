@@ -187,6 +187,40 @@ test.describe('New UI description editor (#919)', () => {
     expect(saved.comments).not.toContain('javascript:');
   });
 
+  test('a hostile stored description cannot run script when the editor loads it', async ({ page }) => {
+    const errors = collectPageErrors(page);
+    // /api/v1/books/<id>/metadata returns the stored description RAW on purpose
+    // (you edit what is stored), so anything an edit-capable user or a metadata
+    // provider put there arrives untrusted. The <textarea> this replaced was
+    // inert; innerHTML is not. <img onerror> DOES fire on an innerHTML write
+    // even though <script> does not.
+    await mockBook(page, '<p>Hi</p><img src=x onerror="window.__xss=1"><script>window.__xss2=1</script>');
+    await page.goto(`/app/book/${TARGET_ID}/edit`);
+
+    await expect(editor(page)).toContainText('Hi');
+    expect(await page.evaluate(() => (window as unknown as { __xss?: number }).__xss)).toBeUndefined();
+    expect(await page.evaluate(() => (window as unknown as { __xss2?: number }).__xss2)).toBeUndefined();
+    await expect(editor(page).locator('img')).toHaveCount(0);
+    assertNoPageErrors(errors);
+  });
+
+  test('a scheme hidden behind a tab is not treated as a relative link', async ({ page }) => {
+    // Browsers strip tabs and newlines inside a URL, so "java<TAB>script:" runs.
+    // A scheme regex that does not normalise first sees no scheme and lets it
+    // through as a relative href.
+    await mockBook(page, '');
+    await page.goto(`/app/book/${TARGET_ID}/edit`);
+    const box = editor(page);
+    await box.click();
+    await box.evaluate((el) => {
+      const data = new DataTransfer();
+      data.setData('text/html', '<a href="java\tscript:window.__xss3=1">click</a>');
+      el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: data, bubbles: true, cancelable: true }));
+    });
+    await expect(box).toContainText('click');
+    await expect(box.locator('a')).toHaveCount(0);
+  });
+
   test('HTML mode previews the markup as it is typed', async ({ page }) => {
     await mockBook(page, '');
     await page.goto(`/app/book/${TARGET_ID}/edit`);
