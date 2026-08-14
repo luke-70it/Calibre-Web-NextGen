@@ -70,7 +70,13 @@ export function RichTextEditor({ value, onChange, ariaLabel, id }: Props) {
     const el = editorRef.current;
     if (!el || mode !== 'rich') return;
     if (value !== lastEmitted.current) {
-      el.innerHTML = value;
+      // Sanitize INBOUND as well as outbound. /api/v1/books/<id>/metadata
+      // returns the stored description raw and unsanitized on purpose (you
+      // edit what is stored, cps/api/edit.py), and unlike the <textarea> this
+      // replaced, innerHTML is a live sink: <img onerror> from a description
+      // written by any edit-capable user or pulled in by a metadata provider
+      // would run in the next editor's session.
+      el.innerHTML = sanitizeDescriptionHtml(value);
       lastEmitted.current = value;
     }
   }, [value, mode]);
