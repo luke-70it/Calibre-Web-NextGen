@@ -8,7 +8,7 @@
 
 Cache layout::
 
-    /config/.cwa-preview-cache/<aa>/<rest>.jpg
+    <state-dir>/.cwa-preview-cache/<aa>/<rest>.jpg
 
 where ``<aa><rest>`` = ``sha256(book_id|cover_mtime|preset|fill|color)``
 truncated to 16 hex chars. The 2-char prefix is the git-style sharding so
@@ -49,10 +49,10 @@ Design notes / non-obvious choices
   defaultdict factory is not atomic across the get-or-set boundary. The
   master-lock dance is explicit and correct under contention.
 
-* **``CACHE_ROOT`` is a module-level variable, not a computed constant.**
-  Tests need to monkeypatch it to ``tmp_path``; production reads
-  ``/config/.cwa-preview-cache`` directly. Keeping it as a simple
-  assignment (not ``Path.from_env(...)`` or similar) makes
+* **``CACHE_ROOT`` is a module-level override.** Tests need to monkeypatch it
+  to ``tmp_path``; production resolves ``.cwa-preview-cache`` under the
+  configured state directory lazily. Keeping the override as a simple
+  attribute makes
   ``monkeypatch.setattr(mod, "CACHE_ROOT", ...)`` the obvious
   isolation pattern.
 
@@ -91,9 +91,15 @@ def _default_cache_root() -> Path:
     return preview_cache_root()
 
 
-# Default production cache root. Module-level (not constant) so tests can
+# Module-level override so tests can
 # `monkeypatch.setattr(mod, "CACHE_ROOT", tmp_path / ".cwa-preview-cache")`.
-CACHE_ROOT: Path = _default_cache_root()
+CACHE_ROOT: Path | None = None
+
+
+def _cache_root() -> Path:
+    if CACHE_ROOT is not None:
+        return Path(CACHE_ROOT)
+    return _default_cache_root()
 
 # 16 hex chars = 64 bits of key space. Birthday-collision probability is
 # ~1 in 2^32 at 4 billion entries; we're nowhere near that scale
@@ -150,7 +156,7 @@ def cache_path(key: str) -> Path:
     # not a runtime input — fail loudly.
     if len(key) <= 2:
         raise ValueError(f"cache key too short for 2-char prefix layout: {key!r}")
-    return CACHE_ROOT / key[:2] / f"{key[2:]}.jpg"
+    return _cache_root() / key[:2] / f"{key[2:]}.jpg"
 
 
 def cache_hit(key: str) -> Optional[Path]:

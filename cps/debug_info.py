@@ -182,13 +182,16 @@ _IPV6_PATTERN = re.compile(
     r")"
 )
 
-# Per-install absolute paths likely to identify the user. The container mount
-# remains unconditional so bundles from custom/mixed environments stay safe.
+# Redact the conventional container mount unconditionally, plus usable raw and
+# normalized configured paths. Invalid broad candidates are ignored.
 def _config_path_pattern():
-    patterns = [r"/config/"]
-    configured = os.path.normpath(state_paths.config_dir())
-    if configured != patterns[0].rstrip(os.sep):
-        patterns.append(re.escape(configured.rstrip(os.sep) + os.sep))
+    configured = state_paths.config_dir()
+    candidates = {"/config/"}
+    for candidate in (configured, os.path.normpath(configured) if configured else ""):
+        if not candidate or candidate in (os.curdir, os.sep):
+            continue
+        candidates.add(candidate.rstrip(os.sep) + os.sep)
+    patterns = [re.escape(candidate) for candidate in sorted(candidates, key=len, reverse=True)]
     return re.compile("|".join(patterns))
 
 

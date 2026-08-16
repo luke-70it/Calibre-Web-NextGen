@@ -20,12 +20,10 @@ Designed to be invoked from:
 Design notes / non-obvious choices
 ----------------------------------
 
-* **Imports ``CACHE_ROOT`` from the cache module, doesn't redefine it.**
-  Tests monkeypatch ``cover_preview_cache.CACHE_ROOT`` to ``tmp_path``;
-  the sweeper has to see the same redirected root for tests to be
-  meaningful. We import the module (not the symbol) and read
-  ``mod.CACHE_ROOT`` at call time so monkeypatching either the cache
-  module *or* this module works.
+* **Resolves through the cache module, doesn't redefine the root.** Tests
+  monkeypatch ``cover_preview_cache.CACHE_ROOT`` to ``tmp_path``; importing
+  the module (rather than a value) makes the sweeper resolve that override
+  at call time.
 
 * **Single-pass, no locks.** Cache writes are atomic
   (write-tempfile-then-rename); a race where the sweeper deletes a file
@@ -145,10 +143,9 @@ def sweep(dry_run: bool = False) -> Dict[str, int]:
             }
     """
     cap = _cap_bytes()
-    # Read CACHE_ROOT from the module at call time so monkeypatching
-    # works in tests (test redirects cover_preview_cache.CACHE_ROOT to
-    # tmp_path, and we want to see that change here).
-    root: Path = _cache_mod.CACHE_ROOT
+    # Resolve from the module at call time so its lazy production default and
+    # the tests' CACHE_ROOT override share one path.
+    root: Path = _cache_mod._cache_root()
 
     if not root.is_dir():
         return {

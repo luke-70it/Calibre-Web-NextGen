@@ -2,7 +2,12 @@
 # Copyright (C) 2024-2026 Calibre-Web-NextGen contributors
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Paths for application state stored beside ``app.db``."""
+"""Resolve application-state paths that live beside ``app.db``.
+
+``config_dir()`` prefers the explicit ``CALIBRE_DBPATH`` process setting,
+normalizes a database-file value to its parent directory, and otherwise falls
+back to :mod:`cps.constants`' configured directory.
+"""
 
 from __future__ import annotations
 
@@ -11,10 +16,24 @@ from pathlib import Path
 
 
 def config_dir() -> str:
-    """Return the configured state directory without importing Flask eagerly."""
-    from .constants import CONFIG_DIR
+    """Return the state directory shared by ``app.db`` and sibling files.
 
-    return CONFIG_DIR
+    The constants module has legacy frozen-build handling that may rewrite its
+    value to a parent directory. An explicit environment setting is therefore
+    authoritative here. Importing constants remains lazy for low-dependency
+    consumers and is only necessary when the setting is absent.
+    """
+    configured = os.environ.get("CALIBRE_DBPATH")
+    if configured is None:
+        from .constants import CONFIG_DIR
+
+        configured = CONFIG_DIR
+
+    configured = os.fspath(configured)
+    if configured.endswith(".db"):
+        return os.path.dirname(configured) or os.curdir
+
+    return configured
 
 
 def state_path(*parts: str) -> str:

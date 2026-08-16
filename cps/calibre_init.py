@@ -4,7 +4,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # See CONTRIBUTORS for full list of authors.
 
-import os
 import sqlite3
 
 from cps import db, logger
@@ -20,23 +19,11 @@ DEFAULT_READ_COLUMN = 0
 DEFAULT_RESTRICTED_COLUMN = 0
 
 
-def _config_dir():
-    from cps.state_paths import config_dir
-
-    return config_dir()
-
-
 def _resolve_app_db_path(app_db_path=None):
     if app_db_path is None:
-        # Docker sets CALIBRE_DBPATH to its state mount, so this remains a no-op there.
-        base_path = _config_dir()
-        if base_path.endswith(".db"):
-            if os.path.basename(base_path) != "app.db":
-                app_db_path = os.path.join(os.path.dirname(base_path), "app.db")
-            else:
-                app_db_path = base_path
-        else:
-            app_db_path = os.path.join(base_path, "app.db")
+        from cps.state_paths import app_db_path as resolved_app_db_path
+
+        app_db_path = resolved_app_db_path()
     return app_db_path
 
 

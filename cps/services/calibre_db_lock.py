@@ -14,9 +14,9 @@ fail, surfacing as ``apsw.BusyError: database is locked`` from
 calibredb and stranding the import in /processed_books/failed.
 
 This module provides a ``metadata_db_write_lock`` context manager that
-both actors acquire before touching metadata.db. The lock lives in
-/config (a local Docker volume) where fcntl flock always works, so
-coordination is reliable even when the library volume is not.
+both actors acquire before touching metadata.db. The lock lives in the
+configured application-state directory (the local config volume in the
+container), so coordination does not depend on the library filesystem.
 
 The lock is intentionally exclusive — concurrency at this layer is
 already serial because there's only one inotify watcher, one ingest
@@ -87,9 +87,9 @@ def metadata_db_write_lock(
     Parameters
     ----------
     lock_dir
-        Directory to place the lock file in. Defaults to /config, the
-        local Docker volume that always supports fcntl. Override via
-        the ``CWA_METADATA_LOCK_DIR`` env var or for tests.
+        Directory to place the lock file in. Defaults to the configured
+        application-state directory. Override via the
+        ``CWA_METADATA_LOCK_DIR`` env var or for tests.
     timeout
         Seconds to wait for the lock before raising ``TimeoutError``.
         Default 120s — long enough to ride out the kindle-epub-fixer
@@ -108,8 +108,8 @@ def metadata_db_write_lock(
     lock_path = _resolve_lock_path(lock_dir)
 
     # The directory must exist. We deliberately do NOT create the lock
-    # directory on demand — that would mask a misconfiguration (e.g.
-    # /config not mounted). If the directory is missing, the
+    # directory on demand — that would mask a misconfiguration. If the
+    # configured directory is missing, the
     # ENOENT-from-open below surfaces clearly.
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
     try:

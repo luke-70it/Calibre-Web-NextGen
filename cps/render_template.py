@@ -32,12 +32,12 @@ log = logger.create()
 # Where the "update available" banner remembers the date it last fired, so it
 # can hold itself to once per calendar day.
 #
-# This has to live under /config. That is the declared VOLUME; /app is part of
-# the image and its writable layer is thrown away whenever the container is
-# recreated, which is precisely what a user does when they pull a new image.
-# Keeping the throttle there reset it at the one moment the banner had most
-# likely already been shown (#1333, @chloeroform). Siblings on the same volume:
-# cwa_ingest_status, cwa_ingest_retry_queue, and the logs.
+# This has to live in the configured state directory. In the container that is
+# the persistent config volume; /app is part of the image and its writable
+# layer is thrown away whenever the container is recreated. Keeping the
+# throttle there reset it at the one moment the banner had most likely already
+# been shown (#1333, @chloeroform). Siblings in the state directory include the
+# ingest status, retry queue, and service logs.
 CWA_UPDATE_NOTICE_PATH = state_paths.update_notice_path()
 
 

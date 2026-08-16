@@ -8,11 +8,11 @@
 
 When ``CWA_CALIBRE_USER_PLUGINS`` is set to a truthy value (``1`` /
 ``true`` / ``yes`` / ``on``), Calibre subprocess invocations launched by
-the ingest pipeline run with ``HOME=/config`` and
-``CALIBRE_CONFIG_DIRECTORY=/config/.config/calibre`` so that the
-embedded Calibre process loads any plugins the operator has placed under
-``/config/.config/calibre/plugins/``. The plugins directory is created
-on first use if missing.
+the ingest pipeline use the configured application-state directory as
+``HOME`` and its ``.config/calibre`` child as
+``CALIBRE_CONFIG_DIRECTORY``. The embedded Calibre process therefore
+loads plugins from that tree; the plugins directory is created on first
+use if missing.
 
 ``CALIBRE_CONFIG_DIRECTORY`` is Calibre's documented configuration
 variable and is authoritative; ``HOME`` is kept alongside it for any
@@ -35,8 +35,9 @@ Public API:
     apply_to_env(env: dict[str, str]) -> dict[str, str]
     ensure_plugins_dir() -> Path | None
 
-The module has no Flask / SQLAlchemy dependencies — safe to import from
-any layer (cps/, scripts/) and from cont-init bootstrap code.
+The module has no module-level Flask / SQLAlchemy dependencies and is safe
+to import from any layer. State-path resolution is lazy; when no explicit
+``CALIBRE_DBPATH`` is set, resolving a path reaches ``cps.constants``.
 """
 
 from __future__ import annotations
@@ -73,10 +74,9 @@ def is_enabled() -> bool:
 
 
 def apply_to_env(env: dict[str, str]) -> dict[str, str]:
-    """If enabled, set ``HOME=/config`` and
-    ``CALIBRE_CONFIG_DIRECTORY=/config/.config/calibre`` on the given
-    env mapping in place and return it. If disabled, return the env
-    unchanged.
+    """If enabled, set ``HOME`` and ``CALIBRE_CONFIG_DIRECTORY`` from the
+    configured state tree on the given env mapping in place and return it.
+    If disabled, return the env unchanged.
 
     Designed to be called right before ``subprocess.run(..., env=env)``:
 
@@ -97,23 +97,23 @@ def apply_to_env(env: dict[str, str]) -> dict[str, str]:
 
 def config_dir() -> Path:
     """Absolute path to the Calibre configuration directory the opt-in
-    points subprocesses at (``/config/.config/calibre``). The plugins
-    directory lives directly beneath it."""
+    points subprocesses at. The plugins directory lives directly beneath
+    it."""
     return Path(_home()) / _PLUGINS_SUBPATH.rsplit("/", 1)[0]
 
 
 def plugins_dir() -> Path:
-    """Absolute path to where Calibre will look for user plugins when
-    HOME=/config. Always returns a path; doesn't check existence."""
+    """Absolute path to where Calibre will look for user plugins under the
+    configured state tree. Always returns a path; doesn't check existence."""
     return Path(_home()) / _PLUGINS_SUBPATH
 
 
 def ensure_plugins_dir() -> Path | None:
-    """If enabled, create ``/config/.config/calibre/plugins`` (with
-    parents) so the operator has a destination ready for their plugin
-    .zip files. Returns the path on success, ``None`` if disabled or on
-    permission error (logged, not raised — bootstrap should be best-
-    effort, not block the container start).
+    """If enabled, create the configured Calibre plugins directory (with
+    parents) so the operator has a destination ready for plugin ``.zip``
+    files. Returns the path on success, ``None`` if disabled or on permission
+    error (logged, not raised — bootstrap should be best-effort, not block the
+    container start).
 
     Idempotent: harmless when the dir already exists.
     """
@@ -126,12 +126,12 @@ def ensure_plugins_dir() -> Path | None:
     except (PermissionError, OSError):
         # Bootstrap is best-effort. The operator can mkdir manually if
         # the container is running with restricted FS perms; ingest will
-        # still see HOME=/config and use whatever the operator placed
+        # still see the configured HOME and use whatever the operator placed
         # there.
         return None
 
 
-# Path to the calibre customize.py.json registry under our HOME=/config.
+# Path to the calibre customize.py.json registry under the configured HOME.
 # When a plugin is added via `calibre-customize -a`, calibre records it
 # under the "plugins" key of this file. We use that to detect what's
 # already registered so we don't redundantly re-register on every boot.
@@ -166,9 +166,10 @@ def auto_register_plugins(
     calibre_customize_binary: str = "calibre-customize",
 ) -> list[str]:
     """If enabled, scan the plugins dir for ``*.zip`` files and call
-    ``calibre-customize -a`` on each one with HOME=/config so calibre
-    records it in customize.py.json. Returns the list of plugin names
-    successfully registered this call (could be empty if nothing new).
+    ``calibre-customize -a`` on each one with HOME set to the configured
+    state directory so calibre records it in customize.py.json. Returns the
+    list of plugin names successfully registered this call (could be empty if
+    nothing new).
 
     Idempotent across reboots — calibre's own internal dedup handles
     re-registration of the same .zip cleanly. We additionally short-
