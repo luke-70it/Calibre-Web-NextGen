@@ -13,7 +13,7 @@ from werkzeug.local import LocalProxy
 from .cw_login import current_user
 from sqlalchemy.sql.expression import or_
 
-from . import config, constants, logger, ub
+from . import config, constants, logger, state_paths, ub
 from .ub import User
 from .duplicate_notice import duplicate_setup_notice_dismissed
 from .translation_notice import last_notified, record_notified
@@ -38,7 +38,7 @@ log = logger.create()
 # Keeping the throttle there reset it at the one moment the banner had most
 # likely already been shown (#1333, @chloeroform). Siblings on the same volume:
 # cwa_ingest_status, cwa_ingest_retry_queue, and the logs.
-CWA_UPDATE_NOTICE_PATH = "/config/cwa_update_notice"
+CWA_UPDATE_NOTICE_PATH = state_paths.update_notice_path()
 
 
 def _duplicate_setup_notice_dismissed():

@@ -20,6 +20,26 @@ DEFAULT_READ_COLUMN = 0
 DEFAULT_RESTRICTED_COLUMN = 0
 
 
+def _config_dir():
+    from cps.state_paths import config_dir
+
+    return config_dir()
+
+
+def _resolve_app_db_path(app_db_path=None):
+    if app_db_path is None:
+        # Docker sets CALIBRE_DBPATH to its state mount, so this remains a no-op there.
+        base_path = _config_dir()
+        if base_path.endswith(".db"):
+            if os.path.basename(base_path) != "app.db":
+                app_db_path = os.path.join(os.path.dirname(base_path), "app.db")
+            else:
+                app_db_path = base_path
+        else:
+            app_db_path = os.path.join(base_path, "app.db")
+    return app_db_path
+
+
 class _MinimalConfig:
     def __init__(self, title_regex, calibre_dir, books_per_page=DEFAULT_BOOKS_PER_PAGE,
                  random_books=DEFAULT_RANDOM_BOOKS, read_column=DEFAULT_READ_COLUMN,
@@ -50,15 +70,7 @@ def init_calibre_db_from_config(config, settings_path):
 
 def init_calibre_db_from_app_db(app_db_path=None):
     """Initialize CalibreDB by reading config from app.db (for background workers)."""
-    if app_db_path is None:
-        base_path = os.environ.get("CALIBRE_DBPATH", "/config")
-        if base_path.endswith(".db"):
-            if os.path.basename(base_path) != "app.db":
-                app_db_path = os.path.join(os.path.dirname(base_path), "app.db")
-            else:
-                app_db_path = base_path
-        else:
-            app_db_path = os.path.join(base_path, "app.db")
+    app_db_path = _resolve_app_db_path(app_db_path)
     if db.CalibreDB.session_factory and getattr(db.CalibreDB.config, "config_title_regex", None):
         return True
     calibre_dir = None

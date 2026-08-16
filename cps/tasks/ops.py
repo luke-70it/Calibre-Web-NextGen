@@ -12,7 +12,7 @@ import re
 from flask_babel import lazy_gettext as N_
 
 from cps.services.worker import CalibreTask, STAT_CANCELLED, STAT_ENDED
-from cps import logger, helper
+from cps import helper, logger, state_paths
 
 log = logger.create()
 
@@ -26,7 +26,7 @@ class TaskConvertLibraryRun(CalibreTask):
 
     def __init__(self):
         super(TaskConvertLibraryRun, self).__init__(N_(u"Convert Library – full run"))
-        self.log_path = "/config/convert-library.log"
+        self.log_path = state_paths.convert_library_log_path()
         self._finished_marker = "NextGen Convert Library Service - Run Ended: "
 
     def run(self, worker_thread):
@@ -93,7 +93,7 @@ class TaskEpubFixerRun(CalibreTask):
 
     def __init__(self):
         super(TaskEpubFixerRun, self).__init__(N_(u"EPUB Fixer – full run"))
-        self.log_path = "/config/epub-fixer.log"
+        self.log_path = state_paths.epub_fixer_log_path()
         self._finished_marker = "NextGen Kindle EPUB Fixer Service - Run Ended: "
 
     def run(self, worker_thread):

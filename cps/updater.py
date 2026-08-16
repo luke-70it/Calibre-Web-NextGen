@@ -270,10 +270,13 @@ class Updater(threading.Thread):
         except Exception:
             nsm = False
 
+        configured_state_dir = os.path.normpath(constants.CONFIG_DIR)
+
         def should_chown(path):
             if not nsm:
                 return True
             return not (
+                path == configured_state_dir or path.startswith(configured_state_dir + os.sep) or
                 path == "/config" or path.startswith("/config/") or
                 path == "/calibre-library" or path.startswith("/calibre-library/") or
                 path == "/cwa-book-ingest" or path.startswith("/cwa-book-ingest/")

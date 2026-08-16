@@ -64,25 +64,20 @@ def test_notice_path_is_a_single_module_constant():
     )
 
     source = RENDER_PY.read_text()
-    # The filename should appear exactly once as a path literal: in the constant.
-    literals = re.findall(r"""["'][^"']*cwa_update_notice["']""", source)
-    assert len(literals) == 1, (
-        f"expected the cwa_update_notice path literal exactly once (the constant), "
-        f"found {len(literals)}: {literals}"
+    # The path should be resolved exactly once: in the module-level constant.
+    resolver_calls = re.findall(r"state_paths\.update_notice_path\(\)", source)
+    assert len(resolver_calls) == 1, (
+        "expected the update-notice resolver exactly once in the constant, "
+        f"found {len(resolver_calls)} calls"
     )
 
 
-def test_notice_lives_on_the_persistent_config_volume_not_app():
-    """The throttle file must survive container recreation.
-
-    ``/app`` is baked into the image and is wiped on recreate; ``/config`` is a
-    declared VOLUME. Writing the throttle to ``/app`` made it reset on every
-    image pull, which is precisely when the update banner matters.
-    """
+def test_notice_lives_in_the_configured_state_directory_not_app():
+    """The throttle file must live beside the rest of persistent state."""
     path = rt.CWA_UPDATE_NOTICE_PATH
 
-    assert path.startswith("/config/"), (
-        f"update notice must live on the persistent /config volume, got {path!r}"
+    assert path == os.path.join(rt.constants.CONFIG_DIR, "cwa_update_notice"), (
+        f"update notice must live under CONFIG_DIR, got {path!r}"
     )
     assert not path.startswith("/app"), (
         "regression: the update notice is back on the ephemeral /app layer, so "

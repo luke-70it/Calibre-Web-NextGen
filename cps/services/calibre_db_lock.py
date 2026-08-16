@@ -61,13 +61,18 @@ except ImportError:  # pragma: no cover — Windows
     HAS_FCNTL = False
 
 
-DEFAULT_LOCK_DIR = "/config"
 DEFAULT_LOCK_BASENAME = ".cwa-metadata-write.lock"
 DEFAULT_TIMEOUT_SECONDS = 120.0
 
 
+def _default_lock_dir() -> str:
+    from ..state_paths import config_dir
+
+    return config_dir()
+
+
 def _resolve_lock_path(lock_dir: str | None) -> str:
-    base = lock_dir or os.environ.get("CWA_METADATA_LOCK_DIR") or DEFAULT_LOCK_DIR
+    base = lock_dir or os.environ.get("CWA_METADATA_LOCK_DIR") or _default_lock_dir()
     return os.path.join(base, DEFAULT_LOCK_BASENAME)
 
 

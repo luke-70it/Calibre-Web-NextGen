@@ -32,7 +32,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.exc import IntegrityError, OperationalError, InvalidRequestError
 from sqlalchemy.sql.expression import func, or_, text
 
-from . import constants, converter, logger, helper, services, cli_param, apply_https_runtime_config
+from . import constants, converter, logger, helper, services, cli_param, state_paths, apply_https_runtime_config
 from . import user_book_data
 from . import db, calibre_db, ub, web_server, config, updater_thread, gdriveutils, \
     kobo_sync_status, schedule
@@ -3362,7 +3362,7 @@ def restore_calibre_db():
             flash(_("Restore failed: metadata.db not found at %(path)s", path=metadata_path), category="error")
             return redirect(url_for("admin.db_configuration"))
 
-        app_db_path = ub.app_DB_path or cli_param.settings_path or "/config/app.db"
+        app_db_path = ub.app_DB_path or cli_param.settings_path or state_paths.app_db_path()
         if not os.path.exists(app_db_path):
             flash(_("Restore failed: app.db not found at %(path)s", path=app_db_path), category="error")
             return redirect(url_for("admin.db_configuration"))
@@ -3372,7 +3372,7 @@ def restore_calibre_db():
             lock_file.write(str(os.getpid()))
 
         # 1. Backup both DBs
-        backup_dir = f"/config/backup/restore_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        backup_dir = state_paths.restore_backup_dir(datetime.now().strftime('%Y%m%d_%H%M%S'))
         os.makedirs(backup_dir, exist_ok=True)
         shutil.copy2(metadata_path, os.path.join(backup_dir, "metadata.db.bak"))
         shutil.copy2(app_db_path, os.path.join(backup_dir, "app.db.bak"))

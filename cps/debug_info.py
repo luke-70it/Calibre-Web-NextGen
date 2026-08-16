@@ -19,7 +19,7 @@ from io import BytesIO
 from flask import send_file
 from flask_babel.speaklater import LazyString
 
-from . import logger, config
+from . import logger, config, state_paths
 from .about import collect_stats
 
 log = logger.create()
@@ -182,8 +182,17 @@ _IPV6_PATTERN = re.compile(
     r")"
 )
 
-# Per-install absolute paths likely to identify the user.
-_CONFIG_PATH_PATTERN = re.compile(r"/config/")
+# Per-install absolute paths likely to identify the user. The container mount
+# remains unconditional so bundles from custom/mixed environments stay safe.
+def _config_path_pattern():
+    patterns = [r"/config/"]
+    configured = os.path.normpath(state_paths.config_dir())
+    if configured != patterns[0].rstrip(os.sep):
+        patterns.append(re.escape(configured.rstrip(os.sep) + os.sep))
+    return re.compile("|".join(patterns))
+
+
+_CONFIG_PATH_PATTERN = _config_path_pattern()
 _LIBRARY_PATH_PATTERN = re.compile(r"/calibre-library/")
 
 # Auth header values.

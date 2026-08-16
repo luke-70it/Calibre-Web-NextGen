@@ -50,8 +50,12 @@ class _FakeProc:
 
 
 def _run_convert_capture_env(monkeypatch, plugins_enabled):
+    from cps import constants
     from cps.tasks import convert as convert_mod
 
+    # This test pins the container contract; bare-metal path selection is
+    # covered separately by the CONFIG_DIR single-source-of-truth tests.
+    monkeypatch.setattr(constants, "CONFIG_DIR", "/config")
     if plugins_enabled:
         monkeypatch.setenv("CWA_CALIBRE_USER_PLUGINS", "1")
     else:

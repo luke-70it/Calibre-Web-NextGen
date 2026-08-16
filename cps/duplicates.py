@@ -1755,7 +1755,8 @@ def auto_resolve_duplicates(strategy='newest', dry_run=False, user_id=None, trig
         # Disk space check (strategy-dependent thresholds)
         try:
             import shutil as shutil_disk
-            stat = shutil_disk.disk_usage('/config')
+            from .state_paths import config_dir
+            stat = shutil_disk.disk_usage(config_dir())
             available_gb = stat.free / (1024**3)
             
             # Merge strategy needs more space (copies formats before deletion)
@@ -1904,7 +1905,11 @@ def auto_resolve_duplicates(strategy='newest', dry_run=False, user_id=None, trig
                 book_to_keep = book_to_keep_ref
 
                 deleted_ids = []
-                backup_dir = f"/config/processed_books/duplicate_resolutions/{datetime.now().strftime('%Y%m%d_%H%M%S')}_group_{group['group_hash'][:8]}"
+                from .state_paths import duplicate_resolution_dir
+                backup_dir = duplicate_resolution_dir(
+                    datetime.now().strftime('%Y%m%d_%H%M%S'),
+                    group['group_hash'][:8],
+                )
                 os.makedirs(backup_dir, exist_ok=True)
 
                 if strategy == 'merge':

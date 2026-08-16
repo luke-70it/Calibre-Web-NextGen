@@ -84,9 +84,16 @@ from typing import Dict, Optional
 
 log = logging.getLogger(__name__)
 
+
+def _default_cache_root() -> Path:
+    from ..state_paths import preview_cache_root
+
+    return preview_cache_root()
+
+
 # Default production cache root. Module-level (not constant) so tests can
 # `monkeypatch.setattr(mod, "CACHE_ROOT", tmp_path / ".cwa-preview-cache")`.
-CACHE_ROOT: Path = Path("/config/.cwa-preview-cache")
+CACHE_ROOT: Path = _default_cache_root()
 
 # 16 hex chars = 64 bits of key space. Birthday-collision probability is
 # ~1 in 2^32 at 4 billion entries; we're nowhere near that scale

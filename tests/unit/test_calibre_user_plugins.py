@@ -38,16 +38,18 @@ from pathlib import Path
 
 import pytest
 
+from cps import constants
 from cps.services import calibre_user_plugins
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     """Each test starts from a known-empty CWA_CALIBRE_USER_PLUGINS state."""
     monkeypatch.delenv("CWA_CALIBRE_USER_PLUGINS", raising=False)
+    monkeypatch.setattr(constants, "CONFIG_DIR", "/config")
     yield monkeypatch
 
 

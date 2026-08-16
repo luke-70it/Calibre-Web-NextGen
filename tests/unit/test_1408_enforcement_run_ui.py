@@ -670,7 +670,7 @@ def test_spawn_thread_publishes_a_result_even_if_the_log_cannot_be_opened():
     assert tries, "cover_enforcer_start() has no try block"
     outer = tries[0]
     body_src = ast.unparse(outer.body)
-    assert "cover-enforcer.log" in body_src and "open(" in body_src, (
+    assert "cover_enforcer_log_path" in body_src and "open(" in body_src, (
         "the log open() is outside the try; a failure there publishes nothing and the "
         "watcher waits forever"
     )

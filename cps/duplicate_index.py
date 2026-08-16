@@ -34,8 +34,24 @@ log = logger.create()
 NORMALIZATION_VERSION = "duplicate-index-v3"  # v3: + accent-fold (NFKD) + punctuation-to-space, precision-preserving (D6)
 MAX_INCREMENTAL_BOOK_IDS = 1000
 DUPLICATE_INDEX_REBUILD_BATCH_SIZE = 250
-INGEST_BATCH_DIRTY_FILE = "/config/cwa_ingest_batch_dirty"
-INGEST_BATCH_ACTIVE_FILE = "/config/cwa_ingest_batch_active"
+INGEST_BATCH_DIRTY_FILE = None
+INGEST_BATCH_ACTIVE_FILE = None
+
+
+def _ingest_batch_dirty_file():
+    if INGEST_BATCH_DIRTY_FILE is not None:
+        return INGEST_BATCH_DIRTY_FILE
+    from .state_paths import ingest_batch_dirty_path
+
+    return ingest_batch_dirty_path()
+
+
+def _ingest_batch_active_file():
+    if INGEST_BATCH_ACTIVE_FILE is not None:
+        return INGEST_BATCH_ACTIVE_FILE
+    from .state_paths import ingest_batch_active_path
+
+    return ingest_batch_active_path()
 
 CRITERIA_KEYS = (
     "duplicate_detection_title",
@@ -566,10 +582,12 @@ def has_valid_duplicate_index_baseline(settings, candidate_book_ids=None):
 
 
 def ingest_batch_follow_up_pending():
+    active_file = _ingest_batch_active_file()
+    dirty_file = _ingest_batch_dirty_file()
     return (
-        os.path.exists(INGEST_BATCH_ACTIVE_FILE)
-        or os.path.exists(INGEST_BATCH_DIRTY_FILE)
-        or os.path.exists(f"{INGEST_BATCH_DIRTY_FILE}.running")
+        os.path.exists(active_file)
+        or os.path.exists(dirty_file)
+        or os.path.exists(f"{dirty_file}.running")
     )
 
 

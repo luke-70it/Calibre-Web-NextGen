@@ -47,9 +47,17 @@ from typing import Mapping
 
 
 _ENV_VAR = "CWA_CALIBRE_USER_PLUGINS"
-_HOME = "/config"
+_HOME = None
 _PLUGINS_SUBPATH = ".config/calibre/plugins"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def _home() -> str:
+    if _HOME is not None:
+        return str(_HOME)
+    from ..state_paths import config_dir as state_config_dir
+
+    return state_config_dir()
 
 
 def is_enabled() -> bool:
@@ -82,7 +90,7 @@ def apply_to_env(env: dict[str, str]) -> dict[str, str]:
     do not load. That is the intended off-state.
     """
     if is_enabled():
-        env["HOME"] = _HOME
+        env["HOME"] = _home()
         env["CALIBRE_CONFIG_DIRECTORY"] = str(config_dir())
     return env
 
@@ -91,13 +99,13 @@ def config_dir() -> Path:
     """Absolute path to the Calibre configuration directory the opt-in
     points subprocesses at (``/config/.config/calibre``). The plugins
     directory lives directly beneath it."""
-    return Path(_HOME) / _PLUGINS_SUBPATH.rsplit("/", 1)[0]
+    return Path(_home()) / _PLUGINS_SUBPATH.rsplit("/", 1)[0]
 
 
 def plugins_dir() -> Path:
     """Absolute path to where Calibre will look for user plugins when
     HOME=/config. Always returns a path; doesn't check existence."""
-    return Path(_HOME) / _PLUGINS_SUBPATH
+    return Path(_home()) / _PLUGINS_SUBPATH
 
 
 def ensure_plugins_dir() -> Path | None:
@@ -127,7 +135,13 @@ def ensure_plugins_dir() -> Path | None:
 # When a plugin is added via `calibre-customize -a`, calibre records it
 # under the "plugins" key of this file. We use that to detect what's
 # already registered so we don't redundantly re-register on every boot.
-_CUSTOMIZE_JSON = Path(_HOME) / ".config" / "calibre" / "customize.py.json"
+_CUSTOMIZE_JSON = None
+
+
+def _customize_json() -> Path:
+    if _CUSTOMIZE_JSON is not None:
+        return Path(_CUSTOMIZE_JSON)
+    return Path(_home()) / ".config" / "calibre" / "customize.py.json"
 
 
 def _registered_plugin_names() -> set[str]:
@@ -135,10 +149,11 @@ def _registered_plugin_names() -> set[str]:
     calibre. Empty set if customize.py.json doesn't exist or can't be
     parsed."""
     import json
-    if not _CUSTOMIZE_JSON.is_file():
+    customize_json = _customize_json()
+    if not customize_json.is_file():
         return set()
     try:
-        data = json.loads(_CUSTOMIZE_JSON.read_text())
+        data = json.loads(customize_json.read_text())
     except (json.JSONDecodeError, OSError):
         return set()
     plugins = data.get("plugins", {})
@@ -191,7 +206,7 @@ def auto_register_plugins(
     # somewhere nothing reads, so the short-circuit never fires and the
     # running calibre never sees the plugins.
     env = os.environ.copy()
-    env["HOME"] = _HOME
+    env["HOME"] = _home()
 
     registered: list[str] = []
     # `calibre-customize -a` copies the source .zip into
@@ -250,4 +265,4 @@ def env_var_name() -> str:
 
 def home_path() -> str:
     """Public accessor for the HOME value injected when enabled."""
-    return _HOME
+    return _home()
