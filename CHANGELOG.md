@@ -16,6 +16,30 @@ is for things you can see or feel when running the app.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Highlights made on a Kobo now appear in more books.** When a book's table of
+  contents points *into* a chapter file rather than at the file itself —
+  `chapter.xhtml#ch1` rather than `chapter.xhtml` — a Kobo files every highlight
+  you make in that chapter under a name nothing on the device answers to, so the
+  marks are saved and drawn nowhere. Nothing looks wrong and no error appears;
+  the highlights simply never show up. On one 212-book library this affected 57
+  books. Where the anchor sits at the very top of the chapter it points at it
+  says nothing the file path does not already say, so conversion now drops it:
+  517 such targets across 25 of those books, with every table-of-contents entry
+  kept exactly as it was. Chapter files themselves are not rewritten, so
+  highlights you already hold keep their positions. Two honest limits: a table of
+  contents that points genuinely into the middle of a file — several chapters
+  packed into one document, common in Project Gutenberg editions — still needs
+  those files split, which is not part of this change; and highlights already
+  stored under the unmatched name stay invisible, because this stops new ones
+  being filed that way rather than repairing old ones.
+- **The log no longer overstates how many books cannot show highlights.** The
+  warning added in v4.1.37 counted page-number anchors alongside real chapter
+  entries, reporting 12,862 affected targets on a library whose true count is
+  1,821, and 516 for one book whose table of contents has 63 chapters. It now
+  counts only the entries a Kobo actually derives chapter identity from.
+
 ## [v4.1.38] - 2026-08-17
 
 ### Added

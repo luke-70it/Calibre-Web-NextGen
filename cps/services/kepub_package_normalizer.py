@@ -212,7 +212,13 @@ def _anchor_is_first_rendered_position(document_bytes, fragment):
     anchor's own content and the tails of its ancestors are correctly excluded:
     all of those render at or after the target position, never before it.
     """
-    document = etree.fromstring(document_bytes, parser=_XML_PARSER)
+    try:
+        document = etree.fromstring(document_bytes, parser=_XML_PARSER)
+    except etree.XMLSyntaxError:
+        # Recovery can discard or reorder malformed markup and thereby turn a
+        # genuinely mid-document anchor into an apparent first-rendered anchor.
+        # An unparseable target therefore fails only this conservative proof.
+        return False
     bodies = document.xpath("//*[local-name()='body']")
     if not bodies:
         return False
@@ -249,6 +255,7 @@ def _plan_toc_fragment_rewrites(archive, opf_path, opf_bytes):
     """Return TOC-member replacements for provably redundant fragments."""
     parsed_tocs = {}
     fragment_targets = []
+    malformed_toc = False
     for toc_path, kind in _toc_documents(opf_path, opf_bytes):
         key = (toc_path, kind)
         if key in parsed_tocs:
@@ -256,7 +263,13 @@ def _plan_toc_fragment_rewrites(archive, opf_path, opf_bytes):
         toc_bytes = _read_bounded_member(
             archive, toc_path, MAX_TOC_DOCUMENT_BYTES,
             "{} TOC document".format(kind))
-        document = etree.fromstring(toc_bytes, parser=_XML_PARSER)
+        try:
+            document = etree.fromstring(toc_bytes, parser=_XML_PARSER)
+        except etree.XMLSyntaxError as error:
+            log.warning("Could not parse %s TOC document %s: %s",
+                        kind, toc_path, error)
+            malformed_toc = True
+            continue
         parsed_tocs[key] = (document, toc_bytes)
         for element, attribute in _toc_target_elements(document, kind):
             target = _contained_toc_target(toc_path, element.get(attribute))
@@ -267,6 +280,12 @@ def _plan_toc_fragment_rewrites(archive, opf_path, opf_bytes):
                 fragment_targets.append(
                     (toc_path, element, attribute, parts, resolved_path,
                      unquote(parts.fragment)))
+
+    if malformed_toc:
+        # Distinct-fragment counting is package-wide. If even one declared TOC
+        # is unreadable, stripping from another would no longer satisfy the
+        # proof, but unrelated relocation work can still proceed.
+        return {}
 
     fragments_by_document = {}
     for _toc_path, _element, _attribute, _parts, resolved_path, fragment in fragment_targets:
@@ -301,7 +320,13 @@ def _toc_target_identities(opf_path, opf_bytes, read_member):
     identities = Counter()
     for toc_path, kind in _toc_documents(opf_path, opf_bytes):
         toc_bytes = read_member(toc_path, kind)
-        document = etree.fromstring(toc_bytes, parser=_XML_PARSER)
+        try:
+            document = etree.fromstring(toc_bytes, parser=_XML_PARSER)
+        except etree.XMLSyntaxError:
+            # Relocation may legitimately rewrite a malformed TOC as raw text.
+            # Compare its exact expected bytes instead of attempting semantics.
+            identities[(toc_path, kind, "unparseable", toc_bytes)] += 1
+            continue
         for element, attribute in _toc_target_elements(document, kind):
             value = element.get(attribute)
             target = _contained_toc_target(toc_path, value)

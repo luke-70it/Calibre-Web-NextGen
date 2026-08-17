@@ -113,6 +113,12 @@ def _normalize(path):
     return normalize_kepub_package(path)
 
 
+def _probe(path):
+    from cps.services.kepub_package_normalizer import kepub_package_needs_normalization
+
+    return kepub_package_needs_normalization(path)
+
+
 def _ncx(nav_targets=(), page_targets=(), nav_list_targets=()):
     nav_points = "".join(
         '<navPoint id="n{0}"><content src="{1}"/></navPoint>'.format(index, target)
@@ -351,6 +357,107 @@ def test_non_zip_counter_and_normalizer_never_raise(tmp_path):
 
     assert _count(package) == 0
     assert _normalize(package) is None
+
+
+@pytest.mark.unit
+def test_htmlish_target_parse_failure_is_skipped_without_retryable_probe(tmp_path):
+    from cps.services import kepub_package_normalizer as normalizer
+
+    malformed = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head>'
+        b'<meta name="generator" content="HTML"></head>'
+        b'<body><h1 id="top">Chapter</h1></body></html>'
+    )
+    package = _fragment_epub(
+        tmp_path, "htmlish-target.kepub", ["chapter.xhtml#top"],
+        {"chapter.xhtml": malformed})
+
+    assert _normalize(package) is False
+    assert _probe(package).status == normalizer.PROBE_CLEAN
+    assert _ncx_sources(package) == ["chapter.xhtml#top"]
+
+
+@pytest.mark.unit
+def test_htmlish_target_does_not_block_escaping_toc_relocation(tmp_path):
+    from cps.services import kepub_package_normalizer as normalizer
+
+    malformed = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head>'
+        b'<meta name="generator" content="HTML"></head>'
+        b'<body><h1 id="top">Chapter</h1></body></html>'
+    )
+    package = _write_epub(
+        tmp_path / "htmlish-with-relocation.kepub",
+        _opf(
+            '<item id="ncx" href="../toc.ncx" media-type="application/x-dtbncx+xml"/>',
+            '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>',
+            version="2.0", spine_toc="ncx", spine_ids=["chapter"],
+        ),
+        [("toc.ncx", _ncx(["OPS/chapter.xhtml#top"])),
+         ("OPS/chapter.xhtml", malformed)],
+    )
+
+    assert _probe(package).status == normalizer.PROBE_NEEDS_NORMALIZATION
+    assert _normalize(package) is True
+    with zipfile.ZipFile(package) as archive:
+        assert "toc.ncx" not in archive.namelist()
+        assert "OPS/toc.ncx" in archive.namelist()
+        rewritten = archive.read("OPS/toc.ncx")
+    assert b'src="chapter.xhtml#top"' in rewritten
+    assert _probe(package).status == normalizer.PROBE_CLEAN
+
+
+@pytest.mark.unit
+def test_htmlish_target_is_skipped_while_valid_target_is_stripped(tmp_path):
+    malformed = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head>'
+        b'<meta name="generator" content="HTML"></head>'
+        b'<body><h1 id="bad">Bad</h1></body></html>'
+    )
+    valid = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<h1 id="good">Good</h1></body></html>'
+    )
+    package = _fragment_epub(
+        tmp_path, "mixed-targets.kepub",
+        ["bad.xhtml#bad", "good.xhtml#good"],
+        {"bad.xhtml": malformed, "good.xhtml": valid})
+
+    assert _normalize(package) is True
+    assert _ncx_sources(package) == ["bad.xhtml#bad", "good.xhtml"]
+
+
+@pytest.mark.unit
+def test_absent_target_document_is_skipped_without_retryable_probe(tmp_path):
+    from cps.services import kepub_package_normalizer as normalizer
+
+    package = _fragment_epub(
+        tmp_path, "absent-target.kepub", ["missing.xhtml#top"], {})
+
+    assert _normalize(package) is False
+    assert _probe(package).status == normalizer.PROBE_CLEAN
+    assert _ncx_sources(package) == ["missing.xhtml#top"]
+
+
+@pytest.mark.unit
+def test_malformed_toc_does_not_block_escaping_href_relocation(tmp_path):
+    from cps.services import kepub_package_normalizer as normalizer
+
+    package = _write_epub(
+        tmp_path / "malformed-toc-with-relocation.kepub",
+        _opf(
+            '<item id="ncx" href="../toc.ncx" media-type="application/x-dtbncx+xml"/>',
+            version="2.0", spine_toc="ncx",
+        ),
+        [("toc.ncx", b"<ncx><navMap><navPoint>")],
+    )
+
+    assert _probe(package).status == normalizer.PROBE_NEEDS_NORMALIZATION
+    assert _normalize(package) is True
+    with zipfile.ZipFile(package) as archive:
+        assert "toc.ncx" not in archive.namelist()
+        assert archive.read("OPS/toc.ncx") == b"<ncx><navMap><navPoint>"
+    assert _probe(package).status == normalizer.PROBE_CLEAN
 
 
 @pytest.mark.unit
