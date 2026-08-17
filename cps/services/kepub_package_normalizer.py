@@ -77,6 +77,11 @@ MAX_TOTAL_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
 MAX_CONTAINER_XML_BYTES = 1 * 1024 * 1024
 MAX_PACKAGE_DOCUMENT_BYTES = 16 * 1024 * 1024
 MAX_TOC_DOCUMENT_BYTES = 16 * 1024 * 1024
+MAX_CONTENT_DOCUMENT_BYTES = 16 * 1024 * 1024
+
+_RENDERED_PREDECESSOR_ELEMENTS = frozenset({
+    "audio", "canvas", "embed", "iframe", "img", "object", "svg", "table", "video",
+})
 
 
 def _reject_oversized_archive(infos):
@@ -154,10 +159,14 @@ def _toc_documents(opf_path, opf_bytes):
         yield toc_path, kind
 
 
-def _toc_targets(toc_bytes, kind):
-    document = etree.fromstring(toc_bytes, parser=_XML_PARSER)
+def _toc_target_elements(document, kind):
     if kind == "NCX":
-        return document.xpath("//*[local-name()='content']/@src")
+        return [
+            (element, "src")
+            for nav_map in document.xpath("//*[local-name()='navMap']")
+            for element in nav_map.xpath(
+                ".//*[local-name()='navPoint']/*[local-name()='content'][@src]")
+        ]
 
     targets = []
     for nav in document.xpath("//*[local-name()='nav']"):
@@ -166,8 +175,144 @@ def _toc_targets(toc_bytes, kind):
             epub_types.update(value.split())
         roles = set(nav.get("role", "").split())
         if "toc" in epub_types or "doc-toc" in roles:
-            targets.extend(nav.xpath(".//*[local-name()='a']/@href"))
+            targets.extend(
+                (element, "href")
+                for element in nav.xpath(".//*[local-name()='a'][@href]")
+            )
     return targets
+
+
+def _toc_targets(toc_bytes, kind):
+    document = etree.fromstring(toc_bytes, parser=_XML_PARSER)
+    return [element.get(attribute)
+            for element, attribute in _toc_target_elements(document, kind)]
+
+
+def _contained_toc_target(toc_path, value):
+    split = _split_local_reference(value)
+    if split is None:
+        return None
+    parts, target_path = split
+    resolved_path = _resolve_reference(toc_path, target_path)
+    if resolved_path == ".." or resolved_path.startswith("../") or resolved_path.startswith("/"):
+        raise UnsupportedKepubPackage("EPUB TOC target escapes the archive")
+    return parts, resolved_path
+
+
+def _element_local_name(element):
+    if not isinstance(element.tag, str):
+        return ""
+    return etree.QName(element).localname.lower()
+
+
+def _anchor_is_first_rendered_position(document_bytes, fragment):
+    """Whether ``fragment`` starts before any rendered body content.
+
+    The traversal stops at the matching element's start tag. Consequently an
+    anchor's own content and the tails of its ancestors are correctly excluded:
+    all of those render at or after the target position, never before it.
+    """
+    document = etree.fromstring(document_bytes, parser=_XML_PARSER)
+    bodies = document.xpath("//*[local-name()='body']")
+    if not bodies:
+        return False
+    body = bodies[0]
+
+    def visit(element):
+        if element.get("id") == fragment or element.get("name") == fragment:
+            return 1  # found before any disqualifying predecessor
+        if (element is not body
+                and _element_local_name(element) in _RENDERED_PREDECESSOR_ELEMENTS):
+            return -1
+        if element.text and element.text.strip():
+            return -1
+        for child in element:
+            result = visit(child)
+            if result:
+                return result
+            if child.tail and child.tail.strip():
+                return -1
+        return 0
+
+    return visit(body) == 1
+
+
+def _serialize_xml_like_source(document, source_bytes):
+    return etree.tostring(
+        document.getroottree(),
+        encoding="utf-8",
+        xml_declaration=source_bytes.lstrip().startswith(b"<?xml"),
+    )
+
+
+def _plan_toc_fragment_rewrites(archive, opf_path, opf_bytes):
+    """Return TOC-member replacements for provably redundant fragments."""
+    parsed_tocs = {}
+    fragment_targets = []
+    for toc_path, kind in _toc_documents(opf_path, opf_bytes):
+        key = (toc_path, kind)
+        if key in parsed_tocs:
+            continue
+        toc_bytes = _read_bounded_member(
+            archive, toc_path, MAX_TOC_DOCUMENT_BYTES,
+            "{} TOC document".format(kind))
+        document = etree.fromstring(toc_bytes, parser=_XML_PARSER)
+        parsed_tocs[key] = (document, toc_bytes)
+        for element, attribute in _toc_target_elements(document, kind):
+            target = _contained_toc_target(toc_path, element.get(attribute))
+            if target is None:
+                continue
+            parts, resolved_path = target
+            if parts.fragment:
+                fragment_targets.append(
+                    (toc_path, element, attribute, parts, resolved_path,
+                     unquote(parts.fragment)))
+
+    fragments_by_document = {}
+    for _toc_path, _element, _attribute, _parts, resolved_path, fragment in fragment_targets:
+        fragments_by_document.setdefault(resolved_path, set()).add(fragment)
+
+    content_cache = {}
+    changed_tocs = set()
+    archive_names = set(archive.namelist())
+    for toc_path, element, attribute, parts, resolved_path, fragment in fragment_targets:
+        if len(fragments_by_document[resolved_path]) != 1:
+            continue
+        if resolved_path not in archive_names:
+            continue
+        if resolved_path not in content_cache:
+            content_cache[resolved_path] = _read_bounded_member(
+                archive, resolved_path, MAX_CONTENT_DOCUMENT_BYTES,
+                "TOC target document")
+        if not _anchor_is_first_rendered_position(content_cache[resolved_path], fragment):
+            continue
+        element.set(attribute, urlunsplit(parts._replace(fragment="")))
+        changed_tocs.add(toc_path)
+
+    rewrites = {}
+    for (toc_path, _kind), (document, toc_bytes) in parsed_tocs.items():
+        if toc_path in changed_tocs:
+            rewrites[toc_path] = _serialize_xml_like_source(document, toc_bytes)
+    return rewrites
+
+
+def _toc_target_identities(opf_path, opf_bytes, read_member):
+    """Semantic multiset used to validate that only planned TOC targets changed."""
+    identities = Counter()
+    for toc_path, kind in _toc_documents(opf_path, opf_bytes):
+        toc_bytes = read_member(toc_path, kind)
+        document = etree.fromstring(toc_bytes, parser=_XML_PARSER)
+        for element, attribute in _toc_target_elements(document, kind):
+            value = element.get(attribute)
+            target = _contained_toc_target(toc_path, value)
+            if target is None:
+                identities[(toc_path, kind, "external", value)] += 1
+                continue
+            parts, resolved_path = target
+            identities[(
+                toc_path, kind, resolved_path, parts.query, unquote(parts.fragment)
+            )] += 1
+    return identities
 
 
 def count_fragment_anchored_toc_targets(path):
@@ -425,11 +570,24 @@ def _validate_package_document_rewrite(
         raise ValueError("package rewrite introduced an escaping manifest href")
 
 
-def _validate_normalized_archive(path, expected_span_counts):
+def _validate_normalized_archive(
+        path, expected_span_counts, expected_toc_target_identities):
     opf_path, opf_bytes = _validate_rewritten_archive(
         path, expected_span_counts)
     if _escaping_manifest_references(opf_path, opf_bytes):
         raise ValueError("rewritten manifest still escapes the OPF directory")
+    if expected_toc_target_identities is None:
+        raise ValueError("could not determine the expected rewritten TOC targets")
+    with zipfile.ZipFile(path) as archive:
+        rewritten_toc_target_identities = _toc_target_identities(
+            opf_path,
+            opf_bytes,
+            lambda toc_path, kind: _read_bounded_member(
+                archive, toc_path, MAX_TOC_DOCUMENT_BYTES,
+                "{} TOC document".format(kind)),
+        )
+    if rewritten_toc_target_identities != expected_toc_target_identities:
+        raise ValueError("TOC targets changed unexpectedly during package rewrite")
 
 
 def rewrite_package_document(path, transform):
@@ -522,7 +680,7 @@ def rewrite_package_document(path, transform):
 
 
 def normalize_kepub_package(path):
-    """Normalize escaping OPF manifest items in ``path`` atomically.
+    """Normalize unsafe package paths and redundant TOC fragments atomically.
 
     Return ``True`` when the archive changed, ``False`` for a clean byte-identical
     no-op, and ``None`` when validation failed. Failures are logged and never
@@ -539,19 +697,35 @@ def normalize_kepub_package(path):
             # happen before the cheap declared-size rejection.
             _reject_oversized_archive(infos)
             names = [info.filename for info in infos]
+            if len(names) != len(set(names)):
+                raise ValueError("KEPUB contains duplicate ZIP member names")
             opf_path = _package_document_path(archive)
             opf_bytes = _read_bounded_member(
                 archive, opf_path, MAX_PACKAGE_DOCUMENT_BYTES, "package document")
             relocations = _plan_relocations(opf_path, opf_bytes, set(names))
-            if not relocations:
+            toc_rewrites = _plan_toc_fragment_rewrites(archive, opf_path, opf_bytes)
+            if not relocations and not toc_rewrites:
                 return False
-            if len(names) != len(set(names)):
-                raise ValueError("KEPUB contains duplicate ZIP member names")
             if archive.testzip() is not None:
                 raise ValueError("KEPUB failed its CRC check")
-            contents = {info.filename: archive.read(info) for info in infos}
+            source_contents = {info.filename: archive.read(info) for info in infos}
+            contents = dict(source_contents)
+            contents.update(toc_rewrites)
             entries = _rewritten_entries(infos, contents, relocations)
-            expected_span_counts = _span_counts(contents, relocations)
+            expected_span_counts = _span_counts(source_contents, relocations)
+            expected_contents = {info.filename: content for info, content in entries}
+            expected_opf_path = relocations.get(opf_path, opf_path)
+            try:
+                expected_toc_target_identities = _toc_target_identities(
+                    expected_opf_path,
+                    expected_contents[expected_opf_path],
+                    lambda toc_path, _kind: expected_contents[toc_path],
+                )
+            except KeyError:
+                # A faulty rewrite can leave a TOC href pointing at a member it
+                # just relocated. Let the archive postconditions report the
+                # primary containment defect before failing this added check.
+                expected_toc_target_identities = None
             comment = archive.comment
 
         descriptor, temporary_path = tempfile.mkstemp(
@@ -561,7 +735,8 @@ def normalize_kepub_package(path):
         )
         os.close(descriptor)
         _write_archive(temporary_path, entries, comment)
-        _validate_normalized_archive(temporary_path, expected_span_counts)
+        _validate_normalized_archive(
+            temporary_path, expected_span_counts, expected_toc_target_identities)
         os.chmod(temporary_path, stat.S_IMODE(original_stat.st_mode))
         os.replace(temporary_path, path)
         temporary_path = None
@@ -578,7 +753,7 @@ def normalize_kepub_package(path):
 
 
 def kepub_package_needs_normalization(path):
-    """Cheap read-only probe: inspect only container.xml and the package document.
+    """Bounded read-only probe for package paths and redundant TOC fragments.
 
     Only this normalizer's explicit ``UnsupportedKepubPackage`` refusals are
     terminal. ZIP, parser, decoding, EOF, I/O, and unexpected failures are
@@ -603,7 +778,8 @@ def kepub_package_needs_normalization(path):
             opf_bytes = _read_bounded_member(
                 archive, opf_path, MAX_PACKAGE_DOCUMENT_BYTES, "package document")
             needs_normalization = bool(
-                _plan_relocations(opf_path, opf_bytes, set(names)))
+                _plan_relocations(opf_path, opf_bytes, set(names))
+                or _plan_toc_fragment_rewrites(archive, opf_path, opf_bytes))
             return KepubPackageInspection(
                 PROBE_NEEDS_NORMALIZATION if needs_normalization else PROBE_CLEAN)
     except UnsupportedKepubPackage as error:

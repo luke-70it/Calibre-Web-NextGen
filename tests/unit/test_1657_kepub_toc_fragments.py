@@ -79,13 +79,14 @@ def _matching_dual_tocs(target_count):
     return ncx, nav
 
 
-def _opf(*manifest_items, version="3.0", spine_toc=""):
+def _opf(*manifest_items, version="3.0", spine_toc="", spine_ids=()):
     items = "\n".join(manifest_items)
     toc_attribute = f' toc="{spine_toc}"' if spine_toc else ""
+    itemrefs = "".join('<itemref idref="{}"/>'.format(item_id) for item_id in spine_ids)
     return f"""<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="{version}">
   <manifest>{items}</manifest>
-  <spine{toc_attribute}/>
+  <spine{toc_attribute}>{itemrefs}</spine>
 </package>
 """.encode()
 
@@ -106,6 +107,62 @@ def _count(path):
     return count_fragment_anchored_toc_targets(path)
 
 
+def _normalize(path):
+    from cps.services.kepub_package_normalizer import normalize_kepub_package
+
+    return normalize_kepub_package(path)
+
+
+def _ncx(nav_targets=(), page_targets=(), nav_list_targets=()):
+    nav_points = "".join(
+        '<navPoint id="n{0}"><content src="{1}"/></navPoint>'.format(index, target)
+        for index, target in enumerate(nav_targets)
+    )
+    pages = "".join(
+        '<pageTarget id="p{0}"><content src="{1}"/></pageTarget>'.format(index, target)
+        for index, target in enumerate(page_targets)
+    )
+    nav_targets_outside_map = "".join(
+        '<navTarget id="l{0}"><content src="{1}"/></navTarget>'.format(index, target)
+        for index, target in enumerate(nav_list_targets)
+    )
+    return (
+        '<?xml version="1.0"?>'
+        '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">'
+        '<navMap>{}</navMap><pageList>{}</pageList><navList>{}</navList></ncx>'.format(
+            nav_points, pages, nav_targets_outside_map)
+    ).encode()
+
+
+def _fragment_epub(
+        tmp_path, name, nav_targets, chapters, page_targets=(), nav_list_targets=()):
+    manifest = [
+        '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>'
+    ]
+    members = [("OPS/toc.ncx", _ncx(nav_targets, page_targets, nav_list_targets))]
+    spine_ids = []
+    for index, (chapter_path, chapter_bytes) in enumerate(chapters.items()):
+        item_id = "chapter{}".format(index)
+        spine_ids.append(item_id)
+        manifest.append(
+            '<item id="{}" href="{}" media-type="application/xhtml+xml"/>'.format(
+                item_id, chapter_path.replace(" ", "%20")))
+        members.append(("OPS/" + chapter_path, chapter_bytes))
+    return _write_epub(
+        tmp_path / name,
+        _opf(*manifest, version="2.0", spine_toc="ncx", spine_ids=spine_ids),
+        members,
+    )
+
+
+def _ncx_sources(path):
+    from lxml import etree
+
+    with zipfile.ZipFile(path) as archive:
+        document = etree.fromstring(archive.read("OPS/toc.ncx"))
+    return document.xpath("//*[local-name()='content']/@src")
+
+
 @pytest.mark.unit
 def test_ncx_only_toc_counts_fragment_anchored_targets(tmp_path):
     package = _write_epub(
@@ -119,6 +176,181 @@ def test_ncx_only_toc_counts_fragment_anchored_targets(tmp_path):
     )
 
     assert _count(package) == 2
+
+
+@pytest.mark.unit
+def test_single_fragment_at_first_rendered_position_is_stripped_safely(tmp_path):
+    chapter = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<section><h1 id="ch1">Chapter</h1></section>tail after the anchor ancestor'
+        b'</body></html>'
+    )
+    package = _fragment_epub(
+        tmp_path, "top-anchor.kepub", ["chapter.xhtml#ch1"],
+        {"chapter.xhtml": chapter})
+    with zipfile.ZipFile(package) as archive:
+        chapter_before = archive.read("OPS/chapter.xhtml")
+
+    assert _normalize(package) is True
+    assert _ncx_sources(package) == ["chapter.xhtml"]
+    with zipfile.ZipFile(package) as archive:
+        assert archive.read("OPS/chapter.xhtml") == chapter_before
+
+    first_rewrite = package.read_bytes()
+    assert _normalize(package) is False
+    assert package.read_bytes() == first_rewrite
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        b"<p>Rendered before the anchor</p>",
+        b'<img src="cover.jpg" alt=""/>',
+    ],
+    ids=["preceding-text", "preceding-image"],
+)
+def test_rendered_content_before_anchor_prevents_stripping(tmp_path, prefix):
+    chapter = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>' + prefix
+        + b'<h1 id="ch1">Chapter</h1></body></html>'
+    )
+    package = _fragment_epub(
+        tmp_path, "rendered-predecessor.kepub", ["chapter.xhtml#ch1"],
+        {"chapter.xhtml": chapter})
+    before = package.read_bytes()
+
+    assert _normalize(package) is False
+    assert package.read_bytes() == before
+    assert _ncx_sources(package) == ["chapter.xhtml#ch1"]
+
+
+@pytest.mark.unit
+def test_two_distinct_fragments_into_one_document_are_both_preserved(tmp_path):
+    chapter = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<h1 id="one">One</h1><h2 id="two">Two</h2></body></html>'
+    )
+    package = _fragment_epub(
+        tmp_path, "multiple-fragments.kepub",
+        ["chapter.xhtml#one", "chapter.xhtml#two"],
+        {"chapter.xhtml": chapter})
+
+    assert _normalize(package) is False
+    assert _ncx_sources(package) == ["chapter.xhtml#one", "chapter.xhtml#two"]
+
+
+@pytest.mark.unit
+def test_missing_anchor_is_preserved(tmp_path):
+    chapter = b'<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Chapter</h1></body></html>'
+    package = _fragment_epub(
+        tmp_path, "missing-anchor.kepub", ["chapter.xhtml#absent"],
+        {"chapter.xhtml": chapter})
+
+    assert _normalize(package) is False
+    assert _ncx_sources(package) == ["chapter.xhtml#absent"]
+
+
+@pytest.mark.unit
+def test_legacy_named_anchor_at_top_is_stripped(tmp_path):
+    chapter = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<a name="legacy"></a><p>Chapter</p></body></html>'
+    )
+    package = _fragment_epub(
+        tmp_path, "legacy-anchor.kepub", ["chapter.xhtml#legacy"],
+        {"chapter.xhtml": chapter})
+
+    assert _normalize(package) is True
+    assert _ncx_sources(package) == ["chapter.xhtml"]
+
+
+@pytest.mark.unit
+def test_percent_encoded_and_spaced_targets_resolve_to_the_same_anchor(tmp_path):
+    chapter = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<h1 id="ch 1">Chapter</h1></body></html>'
+    )
+    package = _fragment_epub(
+        tmp_path, "encoded-spaces.kepub",
+        ["Chapter%2001.xhtml#ch%201", "Chapter 01.xhtml#ch 1"],
+        {"Chapter 01.xhtml": chapter})
+
+    assert _normalize(package) is True
+    assert _ncx_sources(package) == ["Chapter%2001.xhtml", "Chapter 01.xhtml"]
+
+
+@pytest.mark.unit
+def test_page_list_and_nav_target_fragments_are_ignored(tmp_path):
+    chapter = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<h1 id="chapter">Chapter</h1><a id="page1"></a><p>Page one</p></body></html>'
+    )
+    package = _fragment_epub(
+        tmp_path, "page-list.kepub", ["chapter.xhtml#chapter"],
+        {"chapter.xhtml": chapter},
+        page_targets=["chapter.xhtml#page1"],
+        nav_list_targets=["chapter.xhtml#page1"])
+
+    assert _count(package) == 1
+    assert _normalize(package) is True
+    assert _ncx_sources(package) == [
+        "chapter.xhtml", "chapter.xhtml#page1", "chapter.xhtml#page1"]
+
+
+@pytest.mark.unit
+def test_qualifying_targets_are_stripped_independently_within_a_book(tmp_path):
+    package = _fragment_epub(
+        tmp_path, "partial-safe-rewrite.kepub",
+        ["top.xhtml#top", "middle.xhtml#middle"],
+        {
+            "top.xhtml": (
+                b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                b'<h1 id="top">Top</h1></body></html>'),
+            "middle.xhtml": (
+                b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                b'<p>Earlier</p><h1 id="middle">Middle</h1></body></html>'),
+        },
+    )
+
+    assert _normalize(package) is True
+    assert _ncx_sources(package) == ["top.xhtml", "middle.xhtml#middle"]
+
+
+@pytest.mark.unit
+def test_epub3_doc_toc_is_rewritten_but_landmarks_are_not(tmp_path):
+    nav = b"""<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+  <nav role="doc-toc"><a href="chapter.xhtml#top">Chapter</a></nav>
+  <nav role="doc-landmarks"><a href="chapter.xhtml#top">Landmark</a></nav>
+</body></html>"""
+    chapter = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<h1 id="top">Top</h1></body></html>'
+    )
+    package = _write_epub(
+        tmp_path / "epub3-nav.kepub",
+        _opf(
+            '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
+            '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>',
+        ),
+        [("OPS/nav.xhtml", nav), ("OPS/chapter.xhtml", chapter)],
+    )
+
+    assert _normalize(package) is True
+    with zipfile.ZipFile(package) as archive:
+        rewritten = archive.read("OPS/nav.xhtml")
+    assert rewritten.count(b'href="chapter.xhtml"') == 1
+    assert rewritten.count(b'href="chapter.xhtml#top"') == 1
+
+
+@pytest.mark.unit
+def test_non_zip_counter_and_normalizer_never_raise(tmp_path):
+    package = tmp_path / "truncated.kepub"
+    package.write_bytes(b"PK\x03\x04truncated")
+
+    assert _count(package) == 0
+    assert _normalize(package) is None
 
 
 @pytest.mark.unit
