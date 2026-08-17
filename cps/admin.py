@@ -3022,9 +3022,10 @@ def _handle_edit_user(to_save, content, languages, translations, kobo_support):
         # the setting, so the two cannot disagree.
         kobo_sync_status.update_on_sync_shelfs(content.id)
     content.opds_only_shelves_sync = int(to_save.get("opds_only_shelves_sync") == "on") or 0
-    content.kobo_two_way_annotation_sync = int(
-        to_save.get("kobo_two_way_annotation_sync") == "on"
-    ) or 0
+    if "kobo_two_way_annotation_sync_present" in to_save:
+        content.kobo_two_way_annotation_sync = int(
+            to_save.get("kobo_two_way_annotation_sync") == "on"
+        ) or 0
     # Auto-send and metadata fetch settings
     content.auto_send_enabled = to_save.get("auto_send_enabled") == "on"
     content.auto_metadata_fetch = to_save.get("auto_metadata_fetch") == "on"

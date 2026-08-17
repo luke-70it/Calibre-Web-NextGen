@@ -11,6 +11,7 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -133,6 +134,7 @@ def test_models_declare_stage0_schema_and_constraints():
         "kobo_annotation_seed_capture_page",
         "kobo_annotation_page_snapshot",
         "kobo_annotation_page_cursor",
+        "kobo_opaque_content_present_guard",
     }
     assert expected_tables <= set(ub.Base.metadata.tables)
     assert ub.KoboAnnotationMaterialization.__table__.c.raw_annotation_json.type.python_type is bytes
@@ -298,6 +300,186 @@ def test_raw_lexical_capture_and_projection_preserve_location_bytes():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("raw_body", [
+    (
+        b'{"updatedAnnotations":[{"id":"ann-1",'
+        b'"clientLastModifiedUtc":"t","location":{"old":1},'
+        b'"location":{"new":2}}]}'
+    ),
+    (
+        b'{"updatedAnnotations":[{"id":"ann-1",'
+        b'"clientLastModifiedUtc":"t","location":{}}],'
+        b'"updatedAnnotations":[{"id":"ann-1",'
+        b'"clientLastModifiedUtc":"t","location":{"new":2}}]}'
+    ),
+    (
+        b'{"updatedAnnotations":[{"id":"old","id":"new",'
+        b'"clientLastModifiedUtc":"t","location":{}}]}'
+    ),
+    (
+        b'{"updatedAnnotations":[{"id":"ann-1",'
+        b'"clientLastModifiedUtc":"t","location":{"span":1,"span":2}}]}'
+    ),
+])
+def test_raw_capture_rejects_duplicate_object_keys(raw_body):
+    from cps.services import kobo_annotation_capture as capture
+
+    with pytest.raises(capture.LexicalCaptureError, match="duplicate JSON object key"):
+        capture.extract_updated_annotation_materializations(raw_body)
+
+
+@pytest.mark.unit
+def test_legacy_book_state_content_id_is_never_chapter_scoped():
+    from cps import ub
+
+    engine = create_engine("sqlite:///:memory:", future=True)
+    with engine.begin() as conn:
+        _create_gate_tables(conn)
+        _create_old_annotation_table(conn)
+        conn.execute(text(
+            "UPDATE annotation SET content_id='book-uuid!!chapter.xhtml'"
+        ))
+
+    ub.migrate_kobo_two_way_annotation_sync(engine, None)
+
+    with engine.connect() as conn:
+        content_id = conn.execute(text(
+            "SELECT content_id FROM kobo_annotation_book_state "
+            "WHERE user_id=7 AND book_id=348"
+        )).scalar_one()
+    assert content_id.startswith("legacy-book:")
+    assert "!!" not in content_id
+
+
+@pytest.mark.unit
+def test_sticky_present_guard_survives_delete_replace_and_schema_lifecycle():
+    from cps import config_sql, ub
+    from cps.services import kobo_annotation_stage0
+
+    engine = create_engine("sqlite:///:memory:", future=True)
+    ub.Base.metadata.create_all(engine)
+    config_sql._Settings.__table__.create(engine, checkfirst=True)
+    assert kobo_annotation_stage0.schema_capable(engine) is True
+
+    with engine.begin() as conn:
+        trigger_names = {
+            row[0] for row in conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='trigger' "
+                "AND tbl_name='kobo_annotation_book_state'"
+            ))
+        }
+        assert {
+            "trg_kabs_opaque_present_sticky",
+            "trg_kabs_opaque_present_guard_insert",
+        } <= trigger_names
+        conn.execute(text(
+            "INSERT INTO kobo_annotation_book_state "
+            "(id,user_id,book_id,content_id,authority_status,authority_revision,"
+            "generation_id,opaque_content_status,updated_at) VALUES "
+            "(1,7,348,'book-content','authoritative',1,'generation','present',"
+            "CURRENT_TIMESTAMP)"
+        ))
+        conn.execute(text(
+            "DELETE FROM kobo_annotation_book_state WHERE id=1"
+        ))
+        with pytest.raises(Exception):
+            conn.execute(text(
+                "INSERT INTO kobo_annotation_book_state "
+                "(id,user_id,book_id,content_id,authority_status,authority_revision,"
+                "generation_id,opaque_content_status,updated_at) VALUES "
+                "(1,7,348,'book-content','authoritative',1,'generation','absent',"
+                "CURRENT_TIMESTAMP)"
+            ))
+
+        conn.execute(text(
+            "INSERT INTO kobo_annotation_book_state "
+            "(id,user_id,book_id,content_id,authority_status,authority_revision,"
+            "generation_id,opaque_content_status,updated_at) VALUES "
+            "(1,7,348,'book-content','authoritative',1,'generation','present',"
+            "CURRENT_TIMESTAMP)"
+        ))
+        with pytest.raises(Exception):
+            conn.execute(text(
+                "INSERT OR REPLACE INTO kobo_annotation_book_state "
+                "(id,user_id,book_id,content_id,authority_status,authority_revision,"
+                "generation_id,opaque_content_status,updated_at) VALUES "
+                "(1,7,348,'book-content','authoritative',1,'generation','absent',"
+                "CURRENT_TIMESTAMP)"
+            ))
+
+    with engine.begin() as conn:
+        conn.execute(text("DROP TRIGGER trg_kabs_opaque_present_sticky"))
+    assert kobo_annotation_stage0.schema_capable(engine) is False
+    ub.migrate_kobo_two_way_annotation_sync(engine, None)
+    assert kobo_annotation_stage0.schema_capable(engine) is True
+
+
+@pytest.mark.unit
+def test_stage0_orm_parent_deletes_remove_all_owned_children():
+    from cps import ub
+
+    engine = create_engine("sqlite:///:memory:", future=True)
+    ub.Base.metadata.create_all(engine)
+    session = sessionmaker(bind=engine, future=True)()
+    annotation = ub.Annotation(
+        user_id=7, annotation_id="ann", book_id=348, source="kobo",
+    )
+    state = ub.KoboAnnotationBookState(
+        user_id=7, book_id=348, content_id="book-content",
+        generation_id="generation", authority_status="unseeded",
+        authority_revision=0, opaque_content_status="unknown",
+    )
+    session.add_all([annotation, state])
+    session.commit()
+    materialization = ub.KoboAnnotationMaterialization(
+        annotation_id=annotation.id, raw_annotation_json=b'{}',
+        raw_location_json=b'{}', raw_client_modified_utc="t",
+        payload_sha256="0" * 64, provenance="kobo_patch",
+        attachments_state="missing", serveable=False,
+    )
+    capture = ub.KoboAnnotationSeedCapture(
+        book_state_id=state.id, result="pending",
+    )
+    snapshot = ub.KoboAnnotationPageSnapshot(
+        snapshot_id="snapshot", book_state_id=state.id,
+        authority_revision=0, etag="etag", ordered_payload_gzip=b"payload",
+        annotation_count=0, page_size=10,
+        expires_at=datetime(2026, 8, 17, tzinfo=timezone.utc),
+    )
+    session.add_all([
+        materialization,
+        ub.KoboDeviceBookAnnotationState(device_id=99, book_state_id=state.id),
+        capture,
+        snapshot,
+    ])
+    session.commit()
+    session.add_all([
+        ub.KoboAnnotationSeedCapturePage(
+            seed_capture_id=capture.id, page_number=0,
+            response_body_gzip=b"page", response_sha256="1" * 64,
+        ),
+        ub.KoboAnnotationPageCursor(
+            token="cursor", snapshot_id=snapshot.snapshot_id, page_offset=0,
+        ),
+    ])
+    session.commit()
+
+    session.delete(annotation)
+    session.delete(state)
+    session.commit()
+
+    for model in (
+        ub.KoboAnnotationMaterialization,
+        ub.KoboDeviceBookAnnotationState,
+        ub.KoboAnnotationSeedCapture,
+        ub.KoboAnnotationSeedCapturePage,
+        ub.KoboAnnotationPageSnapshot,
+        ub.KoboAnnotationPageCursor,
+    ):
+        assert session.query(model).count() == 0, model.__name__
+
+
+@pytest.mark.unit
 def test_dispatch_persists_raw_sidecar_without_rewriting_parsed_location(monkeypatch):
     from cps import ub
     from cps.services import annotation_backup, kobo_annotation_capture
@@ -362,19 +544,30 @@ def test_patch_raw_capture_failure_logs_but_keeps_proxy_bytes_and_response(caplo
         lambda **_kwargs: forwarded.append(rs.request.get_data()) or
         make_response(response_body, 207, {"X-Upstream": "same"}),
     )
-    malformed_for_capture = b'{"updatedAnnotations":[{"id":"ann-1","location":null}]}'
-    with app.test_request_context(
-        "/api/v3/content/book/annotations", method="PATCH",
-        data=malformed_for_capture, content_type="application/json",
-    ):
-        response = rs.handle_annotations.__wrapped__("book")
+    rejected_capture_bodies = (
+        b'{"updatedAnnotations":[{"id":"ann-1","location":null}]}',
+        (
+            b'{"updatedAnnotations":[{"id":"ann-1",'
+            b'"clientLastModifiedUtc":"t","location":{"old":1},'
+            b'"location":{"new":2}}]}'
+        ),
+    )
+    for rejected_body in rejected_capture_bodies:
+        forwarded.clear()
+        dispatched.clear()
+        caplog.clear()
+        with app.test_request_context(
+            "/api/v3/content/book/annotations", method="PATCH",
+            data=rejected_body, content_type="application/json",
+        ):
+            response = rs.handle_annotations.__wrapped__("book")
 
-    assert dispatched
-    assert forwarded == [malformed_for_capture]
-    assert response.status_code == 207
-    assert response.get_data() == response_body
-    assert response.headers["X-Upstream"] == "same"
-    assert "raw lexical capture failed" in caplog.text.lower()
+        assert dispatched
+        assert forwarded == [rejected_body]
+        assert response.status_code == 207
+        assert response.get_data() == response_body
+        assert response.headers["X-Upstream"] == "same"
+        assert "raw lexical capture failed" in caplog.text.lower()
 
     forwarded.clear()
     dispatched.clear()
@@ -426,23 +619,186 @@ def test_gates_default_off_and_environment_can_only_disable(monkeypatch):
 
 
 @pytest.mark.unit
-def test_admin_and_user_gate_controls_are_wired_to_persistence():
+def test_user_gate_real_save_paths_preserve_hidden_and_apply_visible(monkeypatch):
     from pathlib import Path
+    import cps.admin as admin
+    import cps.web as web
+    from cps import app
 
-    root = Path(__file__).resolve().parents[2]
-    config_template = (root / "cps/templates/config_edit.html").read_text(encoding="utf-8")
-    user_template = (root / "cps/templates/user_edit.html").read_text(encoding="utf-8")
-    admin_source = (root / "cps/admin.py").read_text(encoding="utf-8")
-    web_source = (root / "cps/web.py").read_text(encoding="utf-8")
+    template = (
+        Path(__file__).resolve().parents[2] / "cps/templates/user_edit.html"
+    ).read_text(encoding="utf-8")
+    assert 'name="kobo_two_way_annotation_sync_present"' in template
 
-    assert 'name="config_kobo_two_way_annotation_sync"' in config_template
-    assert "config.config_kobo_two_way_annotation_sync" in config_template
-    assert 'name="kobo_two_way_annotation_sync"' in user_template
-    assert "content.kobo_two_way_annotation_sync" in user_template
-    assert '_config_checkbox_int(to_save, "config_kobo_two_way_annotation_sync")' in admin_source
-    assert "content.kobo_two_way_annotation_sync" in admin_source
-    assert "current_user.kobo_two_way_annotation_sync" in web_source
+    class QueryResult:
+        def filter(self, *_args, **_kwargs):
+            return self
 
+        def all(self):
+            return []
+
+        def count(self):
+            return 1
+
+        def delete(self):
+            return 0
+
+    class SessionStub:
+        def __init__(self):
+            self.committed = False
+
+        def query(self, *_entities):
+            return QueryResult()
+
+        def add(self, _row):
+            return None
+
+        def delete(self, _row):
+            return None
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            return None
+
+    def user_record():
+        return SimpleNamespace(
+            id=7, name="reader", email="reader@example.invalid", password="x",
+            kindle_mail="", kindle_mail_subject="", default_language="all",
+            locale="en", random_books=0, sidebar_view=0, role=0,
+            kobo_only_shelves_sync=0, opds_only_shelves_sync=0,
+            kobo_two_way_annotation_sync=True, hardcover_token=None,
+            auto_send_enabled=False, auto_metadata_fetch=False,
+            allow_additional_ereader_emails=False, view_settings={},
+            is_anonymous=False,
+            role_passwd=lambda: False, role_admin=lambda: False,
+            role_anonymous=lambda: False,
+            check_visibility=lambda _value: False,
+        )
+
+    session = SessionStub()
+    profile_user = user_record()
+    monkeypatch.setattr(web, "current_user", profile_user)
+    monkeypatch.setattr(web.ub, "session", session)
+    monkeypatch.setattr(web, "valid_email", lambda value: value)
+    monkeypatch.setattr(web, "check_email", lambda value: value)
+    monkeypatch.setattr(web, "flag_modified", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(web, "flash", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(web, "redirect", lambda location: location)
+    monkeypatch.setattr(web, "url_for", lambda *_args, **_kwargs: "/me")
+    monkeypatch.setattr(web, "_", lambda value, **kwargs: value % kwargs if kwargs else value)
+    monkeypatch.setattr(
+        web.kobo_sync_status, "update_on_sync_shelfs",
+        lambda *_args, **_kwargs: None,
+    )
+
+    with app.test_request_context(
+        "/me", method="POST", data={"email": profile_user.email},
+    ):
+        web.change_profile(False, False, {}, None, [], [])
+    assert profile_user.kobo_two_way_annotation_sync is True
+
+    with app.test_request_context(
+        "/me", method="POST",
+        data={"email": profile_user.email, "kobo_two_way_annotation_sync_present": "1"},
+    ):
+        web.change_profile(True, False, {}, None, [], [])
+    assert profile_user.kobo_two_way_annotation_sync == 0
+
+    admin_user = user_record()
+    monkeypatch.setattr(admin.ub, "session", session)
+    monkeypatch.setattr(admin.ub, "session_commit", lambda: session.commit())
+    monkeypatch.setattr(admin, "get_sidebar_config", lambda: ([], None))
+    monkeypatch.setattr(admin.constants, "selected_roles", lambda _form: 0)
+    monkeypatch.setattr(admin, "valid_email", lambda value: value)
+    monkeypatch.setattr(admin, "check_email", lambda value: value)
+    monkeypatch.setattr(admin, "flag_modified", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(admin, "flash", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(admin, "_", lambda value, **kwargs: value % kwargs if kwargs else value)
+    monkeypatch.setattr(
+        admin.kobo_sync_status, "update_on_sync_shelfs",
+        lambda *_args, **_kwargs: None,
+    )
+
+    admin._handle_edit_user({
+        "email": admin_user.email, "kindle_mail": "",
+        "kindle_mail_subject": "",
+    }, admin_user, [], [], False)
+    assert bool(admin_user.kobo_two_way_annotation_sync) is True
+
+    admin._handle_edit_user({
+        "email": admin_user.email,
+        "kindle_mail": "",
+        "kindle_mail_subject": "",
+        "kobo_two_way_annotation_sync_present": "1",
+        "kobo_two_way_annotation_sync": "on",
+    }, admin_user, [], [], True)
+    assert bool(admin_user.kobo_two_way_annotation_sync) is True
+
+
+@pytest.mark.unit
+def test_instance_gate_executes_real_admin_configuration_save(monkeypatch):
+    import cps.admin as admin
+    from cps import app
+
+    saved = {}
+
+    def checkbox_int(form, key):
+        saved[key] = 1 if form.get(key) == "on" else 0
+        return False
+
+    monkeypatch.setattr(admin, "_config_checkbox_int", checkbox_int)
+    monkeypatch.setattr(admin, "_config_checkbox", lambda *_args: False)
+    monkeypatch.setattr(admin, "_config_string", lambda *_args: False)
+    monkeypatch.setattr(admin, "_config_int", lambda *_args: False)
+    monkeypatch.setattr(admin, "_configuration_logfile_helper", lambda _form: (False, None))
+    monkeypatch.setattr(admin, "_configuration_result", lambda *_args, **_kwargs: {"saved": True})
+    monkeypatch.setattr(admin, "apply_https_runtime_config", lambda: None)
+    monkeypatch.setattr(
+        admin.schedule, "reconcile_hardcover_configuration",
+        lambda: (False, "database"),
+    )
+    monkeypatch.setattr(admin.schedule, "refresh_hardcover_auto_fetch", lambda: None)
+    monkeypatch.setattr(admin.services, "goodreads_support", None)
+    monkeypatch.setattr(admin.config, "save", lambda: None)
+    monkeypatch.setattr(admin.config, "hardcover_sync_enabled", lambda: False)
+    monkeypatch.setattr(admin.config, "resolved_hardcover_token", lambda: None)
+    monkeypatch.setattr(admin.config, "hardcover_sync_source", lambda: "database")
+    for name, value in {
+        "config_keyfile": "", "config_certfile": "", "config_login_type": 0,
+        "config_remote_login": False, "config_kobo_sync": False,
+        "config_kobo_prefer_kepub": False,
+        "config_reverse_proxy_auto_create_users": False,
+        "config_allow_reverse_proxy_header_login": False,
+        "config_reverse_proxy_login_header_name": "",
+    }.items():
+        monkeypatch.setattr(admin.config, name, value, raising=False)
+
+    class Query:
+        def filter(self, *_args):
+            return self
+
+        def delete(self):
+            return 0
+
+    monkeypatch.setattr(
+        admin.ub, "session",
+        SimpleNamespace(query=lambda *_args: Query(), rollback=lambda: None),
+    )
+
+    with app.test_request_context(
+        "/admin/config", method="POST",
+        data={
+            "config_kobo_two_way_annotation_sync": "on",
+            "config_password_min_length": "8",
+            "config_session": "0",
+        },
+    ):
+        result = admin._configuration_update_helper()
+
+    assert result == {"saved": True}
+    assert saved["config_kobo_two_way_annotation_sync"] == 1
 
 @pytest.mark.unit
 def test_observability_is_structured_and_never_logs_annotation_text(caplog):

@@ -22,6 +22,15 @@ class LexicalCaptureError(ValueError):
     """The wire body cannot produce a bounded, exact materialization."""
 
 
+def _reject_duplicate_object_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise LexicalCaptureError(f"duplicate JSON object key: {key}")
+        result[key] = value
+    return result
+
+
 @dataclass(frozen=True)
 class RawKoboAnnotation:
     annotation_id: str
@@ -132,6 +141,7 @@ def _object_members(raw: bytes):
     cursor = _skip_ws(raw, start + 1)
     if cursor < end and raw[cursor] == ord('}'):
         return
+    seen_keys = set()
     while cursor < end:
         key_start = _skip_ws(raw, cursor)
         key_end = _scan_string(raw, key_start)
@@ -139,6 +149,9 @@ def _object_members(raw: bytes):
             key = json.loads(raw[key_start:key_end])
         except (ValueError, UnicodeDecodeError) as error:
             raise LexicalCaptureError("invalid JSON object key") from error
+        if key in seen_keys:
+            raise LexicalCaptureError(f"duplicate JSON object key: {key}")
+        seen_keys.add(key)
         cursor = _skip_ws(raw, key_end)
         if cursor >= end or raw[cursor] != ord(':'):
             raise LexicalCaptureError("missing JSON object colon")
@@ -155,10 +168,13 @@ def _object_members(raw: bytes):
 
 
 def extract_object_member_value(raw_object: bytes, member_name: str) -> bytes:
+    match = None
     for key, start, end in _object_members(raw_object):
         if key == member_name:
-            return raw_object[start:end]
-    raise LexicalCaptureError(f"missing required {member_name} member")
+            match = raw_object[start:end]
+    if match is None:
+        raise LexicalCaptureError(f"missing required {member_name} member")
+    return match
 
 
 def _array_values(raw_array: bytes):
@@ -193,6 +209,15 @@ def extract_updated_annotation_materializations(raw_request: bytes) -> list[RawK
     """Extract exact annotation/location slices from one Kobo PATCH body."""
     if not isinstance(raw_request, bytes):
         raise LexicalCaptureError("request body must be bytes")
+    # Validate duplicate keys recursively before selecting any lexical span.
+    # The normal parsed pipeline uses Python's last-wins decoder; storing a
+    # first lexical match would make the sidecar disagree silently.
+    try:
+        json.loads(raw_request, object_pairs_hook=_reject_duplicate_object_keys)
+    except LexicalCaptureError:
+        raise
+    except (ValueError, UnicodeDecodeError) as error:
+        raise LexicalCaptureError("request body is invalid UTF-8 JSON") from error
     raw_array = extract_object_member_value(raw_request, "updatedAnnotations")
     records = []
     for raw_object in _array_values(raw_array):

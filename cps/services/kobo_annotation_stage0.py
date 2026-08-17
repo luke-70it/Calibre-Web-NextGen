@@ -24,6 +24,7 @@ REQUIRED_TABLES = {
     "kobo_annotation_seed_capture_page",
     "kobo_annotation_page_snapshot",
     "kobo_annotation_page_cursor",
+    "kobo_opaque_content_present_guard",
 }
 REQUIRED_ANNOTATION_COLUMNS = {
     "annotation_type", "content_revision", "server_modified_at",
@@ -37,6 +38,12 @@ REQUIRED_INDEXES = {
     "kobo_annotation_seed_capture_page": {"ix_kascp_capture"},
     "kobo_annotation_page_snapshot": {"ix_kaps_expiry"},
     "kobo_annotation_page_cursor": {"ix_kapc_snapshot"},
+}
+REQUIRED_TRIGGERS = {
+    "trg_kabs_opaque_present_sticky",
+    "trg_kabs_opaque_present_guard_insert",
+    "trg_kabs_opaque_present_record_insert",
+    "trg_kabs_opaque_present_record_update",
 }
 
 
@@ -92,6 +99,15 @@ def schema_capable(engine) -> bool:
             actual = {index["name"] for index in inspector.get_indexes(table_name)}
             if not required <= actual:
                 return False
+        with engine.connect() as connection:
+            triggers = {
+                row[0] for row in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='trigger' "
+                    "AND tbl_name='kobo_annotation_book_state'"
+                )
+            }
+        if not REQUIRED_TRIGGERS <= triggers:
+            return False
         return True
     except Exception:
         log.exception("Kobo Stage 0 schema capability check failed")
