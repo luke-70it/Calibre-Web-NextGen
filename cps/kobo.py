@@ -33,7 +33,7 @@ from flask import (
 )
 from .cw_login import current_user
 from werkzeug.datastructures import Headers
-from sqlalchemy import func
+from sqlalchemy import String, case, cast, func, literal
 from sqlalchemy.sql.expression import and_, or_
 from sqlalchemy.exc import StatementError
 from sqlalchemy.orm import joinedload
@@ -63,6 +63,61 @@ kobo_auth.disable_failed_auth_redirect_for_blueprint(kobo)
 kobo_auth.register_url_value_preprocessor(kobo)
 
 log = logger.create()
+
+
+def normalized_books_last_modified(value):
+    """Return a UTC, fixed-width SQL key for calibre's mixed timestamp text.
+
+    ``metadata.db`` declares ``books.last_modified`` as TIMESTAMP but stores
+    TEXT.  Calibre includes a UTC offset while SQLAlchemy writes a naive value,
+    so comparing the raw strings makes the suffix decide the keyset result.
+
+    SQLite's ``strftime('%f')`` stops at milliseconds.  Extract consecutive
+    fractional digits only, right-pad with zeroes, and truncate to six digits
+    so this SQL key has the same microsecond precision as the Python datetime
+    carried by SyncToken. ``strftime`` supplies the UTC-normalized whole-second
+    portion; timezone offsets therefore cannot affect comparison or ordering.
+    """
+    raw_value = cast(value, String)
+    fraction_start = func.instr(raw_value, ".")
+    fraction_tail = func.substr(raw_value, fraction_start + 1)
+
+    # ltrim removes the leading digit run; the length difference is therefore
+    # exactly the fraction's width up to its first non-digit. Offset digits can
+    # never leak back in after their leading '+' or '-' stops the run.
+    fraction_width = (
+        func.length(fraction_tail)
+        - func.length(func.ltrim(fraction_tail, "0123456789"))
+    )
+    fraction_digits = func.substr(fraction_tail, 1, fraction_width)
+
+    microseconds = case(
+        (fraction_start > 0,
+         func.substr(fraction_digits + literal("000000"), 1, 6)),
+        else_="000000",
+    )
+    return (
+        func.strftime("%Y-%m-%d %H:%M:%S", value)
+        + literal(".")
+        + microseconds
+    )
+
+
+def books_keyset_after_cursor(cursor_lm, cursor_id):
+    """Build the normalized ``(last_modified, id)`` Kobo keyset predicate."""
+    normalized_stored = normalized_books_last_modified(db.Books.last_modified)
+    normalized_cursor = normalized_books_last_modified(cursor_lm)
+    return or_(
+        normalized_stored > normalized_cursor,
+        and_(normalized_stored == normalized_cursor, db.Books.id > cursor_id),
+    )
+
+
+def books_cursor_datetime(value):
+    """Put a dialect-parsed datetime on the cursor's UTC-naive basis."""
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value
 
 
 def get_store_url_for_current_request():
@@ -308,7 +363,9 @@ def HandleSyncRequest():
         # detection on the next sync treats the cache as fresh.
         sync_token.magic_shelf_membership_at = datetime.min
 
-    new_books_last_modified = sync_token.books_last_modified  # needed for sync selected shelfs only
+    new_books_last_modified = books_cursor_datetime(
+        sync_token.books_last_modified
+    )  # needed for sync selected shelfs only
     new_books_last_created = sync_token.books_last_created  # needed to distinguish between new and changed entitlement
     new_reading_state_last_modified = sync_token.reading_state_last_modified
 
@@ -403,10 +460,7 @@ def HandleSyncRequest():
     # the first post-upgrade sync.
     cursor_lm = sync_token.books_last_modified
     cursor_id = sync_token.books_last_id
-    composite_keyset_books_only = or_(
-        db.Books.last_modified > cursor_lm,
-        and_(db.Books.last_modified == cursor_lm, db.Books.id > cursor_id),
-    )
+    composite_keyset_books_only = books_keyset_after_cursor(cursor_lm, cursor_id)
 
     # Magic-shelf membership arm (fork #359): magic-shelf-only books are not in
     # book_shelf_link, so BookShelf.date_added is NULL and Books.last_modified is
@@ -510,7 +564,7 @@ def HandleSyncRequest():
                            .filter(inner_cursor_filter_with_bookshelf)
                            .filter(db.Data.format.in_(KOBO_FORMATS))
                            .filter(calibre_db.common_filters(allow_show_archived=True))
-                           .order_by(db.Books.last_modified)
+                           .order_by(normalized_books_last_modified(db.Books.last_modified))
                            .order_by(db.Books.id)
                            .outerjoin(ub.BookShelf, db.Books.id == ub.BookShelf.book_id)
                            .outerjoin(ub.Shelf, ub.Shelf.id == ub.BookShelf.shelf)
@@ -546,7 +600,7 @@ def HandleSyncRequest():
                            .filter(inner_cursor_filter_sync_all)
                            .filter(calibre_db.common_filters(allow_show_archived=True))
                            .filter(db.Data.format.in_(KOBO_FORMATS))
-                           .order_by(db.Books.last_modified)
+                           .order_by(normalized_books_last_modified(db.Books.last_modified))
                            .order_by(db.Books.id)
                            .options(joinedload(db.Books.authors),
                                     joinedload(db.Books.publishers),
@@ -584,7 +638,7 @@ def HandleSyncRequest():
     # the joined-load query twice per sync request.
     books_list = changed_entries.limit(SYNC_ITEM_LIMIT).all()
     log.debug("Kobo Sync: selected to sync: {}".format(len(books_list)))
-    synced_book_ids = []
+    delivered_book_identities = []
     for book in books_list:
         kobo_reading_state = book.KoboReadingState  # None when no record exists yet
         entitlement = {
@@ -606,7 +660,7 @@ def HandleSyncRequest():
             sync_results.append({"ChangedEntitlement": entitlement})
 
         new_books_last_modified = max(
-            book.Books.last_modified.replace(tzinfo=None), new_books_last_modified
+            books_cursor_datetime(book.Books.last_modified), new_books_last_modified
         )
 
         # Also advance the cursor by BookShelf.date_added when the row
@@ -627,12 +681,12 @@ def HandleSyncRequest():
             new_books_last_modified = max(date_added, new_books_last_modified)
 
         new_books_last_created = max(ts_created, new_books_last_created)
-        synced_book_ids.append(book.Books.id)
+        delivered_book_identities.append((book.Books.id, str(book.Books.uuid)))
 
     # Persist the whole emitted page before response/token construction.  In
     # particular, the next request must not observe zero synced rows and reset
     # its token.  The batch helper also avoids one SQLite fsync per book.
-    kobo_sync_status.add_synced_books_batch(synced_book_ids)
+    kobo_sync_status.add_synced_books_batch(delivered_book_identities)
 
     # Magic-shelf sub-cursor: advance to the highest magic-shelf book id
     # emitted this round. magic_shelf_book_ids may be empty when the arm
@@ -670,9 +724,7 @@ def HandleSyncRequest():
     #   - If the batch was empty, keep the existing cursor id (no emission).
     if books_list:
         last_book = books_list[-1]
-        last_book_lm = last_book.Books.last_modified
-        if hasattr(last_book_lm, "replace") and getattr(last_book_lm, "tzinfo", None) is not None:
-            last_book_lm = last_book_lm.replace(tzinfo=None)
+        last_book_lm = books_cursor_datetime(last_book.Books.last_modified)
         if new_books_last_modified == last_book_lm:
             new_books_last_id = last_book.Books.id
         else:
