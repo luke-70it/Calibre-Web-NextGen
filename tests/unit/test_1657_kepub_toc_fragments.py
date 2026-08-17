@@ -460,6 +460,303 @@ def test_malformed_toc_does_not_block_escaping_href_relocation(tmp_path):
     assert _probe(package).status == normalizer.PROBE_CLEAN
 
 
+def _assert_nonterminal_probe(package):
+    from cps.services import kepub_package_normalizer as normalizer
+
+    assert _probe(package).status in {
+        normalizer.PROBE_CLEAN,
+        normalizer.PROBE_NEEDS_NORMALIZATION,
+    }
+
+
+@pytest.mark.unit
+def test_missing_manifest_declared_toc_skips_fragment_transform(tmp_path):
+    package = _write_epub(
+        tmp_path / "missing-declared-toc.kepub",
+        _opf(
+            '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
+            version="2.0", spine_toc="ncx"),
+    )
+
+    _assert_nonterminal_probe(package)
+    assert _normalize(package) is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "target",
+    [r"sub\ch1.xhtml#top", "/ch1.xhtml#top", "../ch1.xhtml#top"],
+    ids=["backslash", "absolute", "escaping"],
+)
+def test_uncontained_toc_target_skips_fragment_transform(tmp_path, target):
+    package = _fragment_epub(
+        tmp_path, "uncontained-target.kepub", [target],
+        {"ch1.xhtml": (
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b'<h1 id="top">Top</h1></body></html>')})
+
+    _assert_nonterminal_probe(package)
+    assert _normalize(package) is False
+    assert _ncx_sources(package) == [target]
+
+
+@pytest.mark.unit
+def test_oversized_target_document_skips_fragment_transform(tmp_path):
+    from cps.services import kepub_package_normalizer as normalizer
+
+    oversized = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body><h1 id="top">Top</h1>'
+        + b"x" * normalizer.MAX_CONTENT_DOCUMENT_BYTES
+        + b"</body></html>"
+    )
+    package = _fragment_epub(
+        tmp_path, "oversized-content.kepub", ["chapter.xhtml#top"],
+        {"chapter.xhtml": oversized})
+
+    _assert_nonterminal_probe(package)
+    assert _normalize(package) is False
+    assert _ncx_sources(package) == ["chapter.xhtml#top"]
+
+
+@pytest.mark.unit
+def test_spine_nav_rewrite_changes_only_the_selected_href_bytes(tmp_path):
+    nav = (
+        b'\xef\xbb\xbf<?xml version="1.0" encoding="UTF-8"?>\n'
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<script src="s.js"></script><div class="x"></div>'
+        b'<span class="koboSpan" id="kobo.1.1"></span>'
+        b'<nav role="doc-toc"><a href="chapter.xhtml#top">Chapter</a></nav>'
+        b'</body></html>'
+    )
+    chapter = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<h1 id="top">Top</h1></body></html>'
+    )
+    package = _write_epub(
+        tmp_path / "spine-nav.kepub",
+        _opf(
+            '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
+            '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>',
+            spine_ids=["nav", "chapter"]),
+        [("OPS/nav.xhtml", nav), ("OPS/chapter.xhtml", chapter)],
+    )
+
+    assert _normalize(package) is True
+    with zipfile.ZipFile(package) as archive:
+        rewritten = archive.read("OPS/nav.xhtml")
+        assert archive.read("OPS/chapter.xhtml") == chapter
+    assert rewritten == nav.replace(
+        b'href="chapter.xhtml#top"', b'href="chapter.xhtml"')
+    assert rewritten.startswith(b"\xef\xbb\xbf<?xml")
+    assert b'<script src="s.js"></script>' in rewritten
+    assert b'<div class="x"></div>' in rewritten
+    assert b'<span class="koboSpan" id="kobo.1.1"></span>' in rewritten
+
+
+@pytest.mark.unit
+def test_validation_rejects_planner_that_drops_a_toc_target(
+        tmp_path, monkeypatch):
+    from cps.services import kepub_package_normalizer as normalizer
+
+    package = _fragment_epub(
+        tmp_path, "planner-corruption.kepub", ["chapter.xhtml#top"],
+        {"chapter.xhtml": (
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b'<h1 id="top">Top</h1></body></html>')})
+    original = package.read_bytes()
+    real_plan = normalizer._plan_toc_fragment_rewrites
+
+    def corrupt_plan(*args, **kwargs):
+        rewrites, edits = real_plan(*args, **kwargs)
+        rewrites["OPS/toc.ncx"] = rewrites["OPS/toc.ncx"].replace(
+            b'<navPoint id="n0"><content src="chapter.xhtml"/></navPoint>', b"")
+        return rewrites, edits
+
+    monkeypatch.setattr(normalizer, "_plan_toc_fragment_rewrites", corrupt_plan)
+
+    assert normalizer.normalize_kepub_package(package) is None
+    assert package.read_bytes() == original
+
+
+@pytest.mark.unit
+def test_probe_reads_fragment_targets_with_the_planners_bounded_cache(
+        tmp_path, monkeypatch):
+    from cps.services import kepub_package_normalizer as normalizer
+
+    package = _fragment_epub(
+        tmp_path, "cheap-probe.kepub", ["chapter.xhtml#top"],
+        {"chapter.xhtml": (
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b'<h1 id="top">Top</h1></body></html>')})
+    real_read = normalizer._read_bounded_member
+    reads = []
+
+    def recording_read(archive, name, limit, description):
+        reads.append(name)
+        return real_read(archive, name, limit, description)
+
+    monkeypatch.setattr(normalizer, "_read_bounded_member", recording_read)
+
+    assert _probe(package).status == normalizer.PROBE_NEEDS_NORMALIZATION
+    assert reads.count("OPS/toc.ncx") == 1
+    assert reads.count("OPS/chapter.xhtml") == 1
+
+
+def _assert_probe_normalize_fixed_point(package):
+    from cps.services import kepub_package_normalizer as normalizer
+
+    rewrite_count = 0
+    for _round in range(3):
+        inspection = _probe(package)
+        if inspection.status == normalizer.PROBE_CLEAN:
+            assert rewrite_count <= 1
+            return
+        assert inspection.status == normalizer.PROBE_NEEDS_NORMALIZATION
+        # A needs-normalization answer is a promise that the planner will
+        # actually change the package, never a request for an endless rescan.
+        assert _normalize(package) is True
+        rewrite_count += 1
+    pytest.fail("probe and normalizer did not reach a fixed point in three rounds")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "skip_reason",
+    [
+        "oversized-target",
+        "absent-target",
+        "unparseable-target",
+        "unparseable-toc",
+        "malformed-href",
+        "multiple-distinct-fragments",
+    ],
+)
+def test_probe_and_normalizer_converge_for_fragment_skip_reasons(
+        tmp_path, monkeypatch, skip_reason):
+    from cps.services import kepub_package_normalizer as normalizer
+
+    valid_target = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<h1 id="top">Top</h1></body></html>'
+    )
+    if skip_reason == "oversized-target":
+        monkeypatch.setattr(normalizer, "MAX_CONTENT_DOCUMENT_BYTES", 64)
+        package = _fragment_epub(
+            tmp_path, "oversized-target.kepub", ["chapter.xhtml#top"],
+            {"chapter.xhtml": valid_target})
+    elif skip_reason == "absent-target":
+        package = _fragment_epub(
+            tmp_path, "absent-target-convergence.kepub",
+            ["missing.xhtml#top"], {})
+    elif skip_reason == "unparseable-target":
+        package = _fragment_epub(
+            tmp_path, "unparseable-target.kepub", ["chapter.xhtml#top"],
+            {"chapter.xhtml": b"<html><body><h1 id='top'>"})
+    elif skip_reason == "unparseable-toc":
+        package = _write_epub(
+            tmp_path / "unparseable-toc.kepub",
+            _opf(
+                '<item id="ncx" href="toc.ncx" '
+                'media-type="application/x-dtbncx+xml"/>',
+                version="2.0", spine_toc="ncx"),
+            [("OPS/toc.ncx", b"<ncx><navMap><navPoint>")],
+        )
+    elif skip_reason == "malformed-href":
+        package = _fragment_epub(
+            tmp_path, "malformed-href.kepub", [r"chapter\file.xhtml#top"],
+            {"chapter.xhtml": valid_target})
+    else:
+        package = _fragment_epub(
+            tmp_path, "multiple-fragments-convergence.kepub",
+            ["chapter.xhtml#top", "chapter.xhtml#second"],
+            {"chapter.xhtml": valid_target.replace(
+                b"</body>", b'<h2 id="second">Second</h2></body>')})
+
+    _assert_probe_normalize_fixed_point(package)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("element", ["hr", "br", "input", "select", "button", "picture"])
+def test_additional_rendered_elements_prevent_stripping(tmp_path, element):
+    prefix = ("<{}></{}>".format(element, element)).encode()
+    package = _fragment_epub(
+        tmp_path, "rendered-element.kepub", ["chapter.xhtml#top"],
+        {"chapter.xhtml": (
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>' + prefix
+            + b'<h1 id="top">Top</h1></body></html>')})
+
+    assert _normalize(package) is False
+    assert _ncx_sources(package) == ["chapter.xhtml#top"]
+
+
+@pytest.mark.unit
+def test_comments_and_processing_instructions_do_not_prevent_stripping(tmp_path):
+    package = _fragment_epub(
+        tmp_path, "comment-before-anchor.kepub", ["chapter.xhtml#top"],
+        {"chapter.xhtml": (
+            b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+            b'<!-- generated by calibre --><?generator calibre?>'
+            b'<h1 id="top">Top</h1></body></html>')})
+
+    assert _normalize(package) is True
+    assert _ncx_sources(package) == ["chapter.xhtml"]
+
+
+@pytest.mark.unit
+def test_bom_prefixed_ncx_preserves_bom_and_all_non_target_bytes(tmp_path):
+    ncx = b"\xef\xbb\xbf" + _ncx(["chapter.xhtml#top"])
+    chapter = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<h1 id="top">Top</h1></body></html>'
+    )
+    package = _write_epub(
+        tmp_path / "bom-ncx.kepub",
+        _opf(
+            '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
+            '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>',
+            version="2.0", spine_toc="ncx", spine_ids=["chapter"]),
+        [("OPS/toc.ncx", ncx), ("OPS/chapter.xhtml", chapter)],
+    )
+
+    assert _normalize(package) is True
+    with zipfile.ZipFile(package) as archive:
+        rewritten = archive.read("OPS/toc.ncx")
+    assert rewritten == ncx.replace(
+        b'src="chapter.xhtml#top"', b'src="chapter.xhtml"')
+
+
+@pytest.mark.unit
+def test_same_toc_path_declared_under_two_kinds_applies_both_edits(tmp_path):
+    dual = b"""<?xml version="1.0"?>
+<html xmlns="http://www.w3.org/1999/xhtml"><body>
+  <navMap><navPoint><content src="one.xhtml#one"/></navPoint></navMap>
+  <nav role="doc-toc"><a href="two.xhtml#two">Two</a></nav>
+</body></html>"""
+    package = _write_epub(
+        tmp_path / "dual-kind-one-path.kepub",
+        _opf(
+            '<item id="ncx" href="nav.xhtml" media-type="application/x-dtbncx+xml"/>',
+            '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
+            '<item id="one" href="one.xhtml" media-type="application/xhtml+xml"/>',
+            '<item id="two" href="two.xhtml" media-type="application/xhtml+xml"/>',
+            version="2.0", spine_toc="ncx", spine_ids=["one", "two"]),
+        [
+            ("OPS/nav.xhtml", dual),
+            ("OPS/one.xhtml", b'<html><body><h1 id="one">One</h1></body></html>'),
+            ("OPS/two.xhtml", b'<html><body><h1 id="two">Two</h1></body></html>'),
+        ],
+    )
+
+    assert _normalize(package) is True
+    with zipfile.ZipFile(package) as archive:
+        rewritten = archive.read("OPS/nav.xhtml")
+    assert b'src="one.xhtml"' in rewritten
+    assert b'href="two.xhtml"' in rewritten
+    assert b"#one" not in rewritten
+    assert b"#two" not in rewritten
+    assert _normalize(package) is False
+
+
 @pytest.mark.unit
 def test_toc_without_fragments_reports_zero(tmp_path):
     package = _write_epub(

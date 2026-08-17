@@ -27,8 +27,11 @@ is for things you can see or feel when running the app.
   books. Where the anchor sits at the very top of the chapter it points at it
   says nothing the file path does not already say, so conversion now drops it:
   517 such targets across 25 of those books, with every table-of-contents entry
-  kept exactly as it was. Chapter files themselves are not rewritten, so
-  highlights you already hold keep their positions. Two honest limits: a table of
+  kept exactly as it was. Chapter files themselves are left byte-for-byte
+  alone, so highlights you already hold keep their positions. In a few books the
+  contents page is part of the reading order and so is rewritten too — five of
+  the twenty-five here — but only its links change, and it carries none of the
+  markers a highlight attaches to. Two honest limits: a table of
   contents that points genuinely into the middle of a file — several chapters
   packed into one document, common in Project Gutenberg editions — still needs
   those files split, which is not part of this change; and highlights already

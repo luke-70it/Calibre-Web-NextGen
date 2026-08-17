@@ -78,9 +78,10 @@ Format: each row is one fork-PR, mapped to its upstream PR or issue (if any), wi
   `object`/`iframe`/`embed`/`canvas`/`table`. 690 targets qualify, fully fixing
   15 books; verified across the real 212-book library at 25 books rewritten and
   517 targets stripped with every non-TOC member byte-identical, no navMap
-  collapse, and a byte-identical second pass. Spine documents are never
-  rewritten, so KoboSpan ids do not move and existing highlights keep their
-  anchors. A document or TOC that will not parse fails only the redundancy
+  collapse, and a byte-identical second pass. Non-TOC spine documents are
+  byte-identical; the five books that declare the EPUB3 nav in the spine change
+  only `href` values there and carry zero KoboSpan ids, so ids never move and
+  existing highlights keep their anchors. A document or TOC that will not parse fails only the redundancy
   proof — the target is left alone and unrelated relocation work still runs —
   which keeps HTML-ish EPUBs (unclosed `<meta>`, 7 books in the library) at
   `clean` instead of regressing them to a `retryable` repair loop. Also narrows
@@ -89,7 +90,9 @@ Format: each row is one fork-PR, mapped to its upstream PR or issue (if any), wi
   where the true count is 1,821. Not covered: a TOC anchoring genuinely
   mid-document (several chapters per file), which needs spine splitting and a
   re-anchoring migration story — 1,126 targets across 40 books, tracked
-  separately. 21 tests in `tests/unit/test_1657_kepub_toc_fragments.py`.
+  separately. 46 tests in `tests/unit/test_1657_kepub_toc_fragments.py`, plus
+  probe/normalize convergence coverage in
+  `tests/unit/test_1696_kepub_repair_convergence.py`.
 
 - **RTL metadata renders right-to-left in both UIs** (fork #1073) — there was no
   `dir` attribute anywhere in the SPA or the classic templates, so Arabic,
