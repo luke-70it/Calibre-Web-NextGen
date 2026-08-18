@@ -67,9 +67,9 @@ const ANNOUNCEMENTS: readonly Announcement[] = [
         </span>
         <span className={styles.text}>
           {t('Need to report an issue? Try the new')} <strong>{t('Help menu')}</strong>
-          {/* The nudge belongs on this wrapper, NOT on the icon: a transform
-              animation targeting an SVG element cannot be composited and runs
-              on the main thread on every route. See HelpBanner.module.css
+          {/* The nudge belongs on this wrapper, NOT on the icon: in Chrome a
+              transform animation targeting an SVG element cannot be composited
+              and runs on the main thread on every route. See HelpBanner.module.css
               `.arrow`, and frontend/tests/unit/iconAnimationCompositing.test.ts
               which fails if the class moves back onto the SVG. */}
           <span className={styles.arrow}>
