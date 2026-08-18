@@ -95,7 +95,8 @@
 }
 .iconBtn:disabled { opacity: 0.6; cursor: default; }
 
-.spin { animation: discoverSpin 0.8s linear infinite; }
+/* wrapper span, not the glyph -- an SVG target does not get a compositor layer (see HelpBanner.module.css) */
+.spin { display: inline-flex; animation: discoverSpin 0.8s linear infinite; }
 @keyframes discoverSpin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
 

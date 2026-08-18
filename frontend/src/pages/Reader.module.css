@@ -48,7 +48,8 @@
   background: var(--bg);
 }
 
-.spin { animation: spin 0.9s linear infinite; color: var(--accent); }
+/* wrapper span, not the glyph -- an SVG target does not get a compositor layer (see HelpBanner.module.css) */
+.spin { display: inline-flex; animation: spin 0.9s linear infinite; color: var(--accent); }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
 

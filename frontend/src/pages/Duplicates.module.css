@@ -13,7 +13,8 @@
 }
 .scanBtn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .scanBtn:disabled { opacity: 0.6; cursor: default; }
-.spinning { animation: spin 1s linear infinite; }
+/* wrapper span, not the glyph -- an SVG target does not get a compositor layer (see HelpBanner.module.css) */
+.spinning { display: inline-flex; animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinning { animation: none; } }
 .status:empty { display: none; }
