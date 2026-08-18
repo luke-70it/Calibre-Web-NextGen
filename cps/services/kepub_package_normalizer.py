@@ -485,6 +485,24 @@ def count_fragment_anchored_toc_targets(path):
     Return zero when the archive or package document cannot be inspected.
     Malformed individual TOCs are logged and skipped. This diagnostic never
     modifies the EPUB and never lets user-file failures escape into conversion.
+
+    This counts books AT RISK, not annotations actually affected, and that is
+    not a shortcut -- it is the only server-side signal that exists. The device
+    derives its local ``Bookmark.ContentID`` from the TOC entry verbatim,
+    fragment included, and that value never crosses the wire. OBSERVED
+    2026-08-17 on a Kobo Clara BW (4.45.23792): a highlight whose device-local
+    ContentID ended ``...-h-3.htm.xhtml#pgepubid00038`` was uploaded with
+
+        {"span": {"chapterFilename": "OEBPS/...-h-3.htm.xhtml", ...}}
+
+    -- no fragment. The only ``#`` in the payload are the KoboSpan anchors in
+    ``startPath``/``endPath``, which are unrelated. So the stored annotation is
+    correct and always was: on this instance 0 of 622 rows carry a fragment.
+
+    Do not go looking for a query that counts orphaned annotations, and do not
+    "fix" ingestion to preserve a fragment it never receives. Whether a given
+    annotation renders is decidable only on the device, by checking its
+    ContentID against a ``ContentType=9`` row in ``KoboReader.sqlite``.
     """
     path = os.fspath(path)
     try:
