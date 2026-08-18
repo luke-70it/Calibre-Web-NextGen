@@ -87,7 +87,13 @@ Format: each row is one fork-PR, mapped to its upstream PR or issue (if any), wi
   `clean` instead of regressing them to a `retryable` repair loop. Also narrows
   `count_fragment_anchored_toc_targets` to navMap/`epub:type="toc"` targets; it
   had counted Gutenberg `pageList` page anchors, reporting 12,862 library-wide
-  where the true count is 1,821. Not covered: a TOC anchoring genuinely
+  where the true count is 1,821. Verified end-to-end on a Kobo Clara BW
+  (4.45.23792) through the real sync path: a highlight made in an unrepaired
+  fragment-anchored book stored a `ContentID` carrying `#` that matched 0
+  `ContentType=9` rows and did not render; after the server repaired the book and
+  the device re-downloaded it, the same highlight matched exactly 1 and is drawn
+  on the page, with no bookmark rows lost. Existing highlights are therefore
+  repaired, not merely prevented. Not covered: a TOC anchoring genuinely
   mid-document (several chapters per file), which needs spine splitting and a
   re-anchoring migration story — 1,126 targets across 40 books, tracked
   separately. 46 tests in `tests/unit/test_1657_kepub_toc_fragments.py`, plus

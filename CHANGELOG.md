@@ -33,12 +33,15 @@ is for things you can see or feel when running the app.
   alone, so highlights you already hold keep their positions. In a few books the
   contents page is part of the reading order and so is rewritten too — five of
   the twenty-five here — but only its links change, and it carries none of the
-  markers a highlight attaches to. Two honest limits: a table of
-  contents that points genuinely into the middle of a file — several chapters
-  packed into one document, common in Project Gutenberg editions — still needs
-  those files split, which is not part of this change; and highlights already
-  stored under the unmatched name stay invisible, because this stops new ones
-  being filed that way rather than repairing old ones.
+  markers a highlight attaches to. **Highlights you already made in an affected
+  book come back, too** — once your reader downloads the repaired book it files
+  them under the corrected name and draws them again. Measured on a Kobo Clara BW
+  (firmware 4.45.23792): a highlight that matched no chapter on the device before
+  the repair matched exactly one after it, and appears on the page. Your reader
+  picks the repaired book up the next time it syncs and you open it. One honest
+  limit remains: a table of contents that points genuinely into the middle of a
+  file — several chapters packed into one document, common in Project Gutenberg
+  editions — still needs those files split, which is not part of this change.
 - **The log no longer overstates how many books cannot show highlights.** The
   warning added in v4.1.37 counted page-number anchors alongside real chapter
   entries, reporting 12,862 affected targets on a library whose true count is
