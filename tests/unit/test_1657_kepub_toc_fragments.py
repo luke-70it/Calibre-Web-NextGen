@@ -726,6 +726,48 @@ def test_bom_prefixed_ncx_preserves_bom_and_all_non_target_bytes(tmp_path):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "internal_subset_item",
+    [
+        b'<!-- ]> <stray src="decoy.xhtml#wrong"/> -->',
+        b'<?trap ]> <stray src="decoy.xhtml#wrong"/> ?>',
+    ],
+    ids=["comment", "processing-instruction"],
+)
+def test_doctype_internal_subset_markup_cannot_desync_toc_edit(
+        tmp_path, internal_subset_item):
+    ncx = (
+        b'<?xml version="1.0"?>\n<!DOCTYPE ncx [ '
+        + internal_subset_item
+        + b' ]>\n<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap>'
+        b'<navPoint><navLabel><text src="SIBLING.xhtml#zzz">One</text></navLabel>'
+        b'<content src="chapter.xhtml#top"/></navPoint></navMap></ncx>'
+    )
+    chapter = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<h1 id="top">Top</h1></body></html>'
+    )
+    package = _write_epub(
+        tmp_path / "doctype-internal-subset.kepub",
+        _opf(
+            '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
+            '<item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>',
+            version="2.0", spine_toc="ncx", spine_ids=["chapter"]),
+        [("OPS/toc.ncx", ncx), ("OPS/chapter.xhtml", chapter)],
+    )
+
+    assert _probe(package).status == "needs_normalization"
+    assert _normalize(package) is True
+    with zipfile.ZipFile(package) as archive:
+        rewritten = archive.read("OPS/toc.ncx")
+    assert rewritten == ncx.replace(
+        b'src="chapter.xhtml#top"', b'src="chapter.xhtml"')
+    assert b'src="SIBLING.xhtml#zzz"' in rewritten
+    assert _probe(package).status == "clean"
+    assert _normalize(package) is False
+
+
+@pytest.mark.unit
 def test_same_toc_path_declared_under_two_kinds_applies_both_edits(tmp_path):
     dual = b"""<?xml version="1.0"?>
 <html xmlns="http://www.w3.org/1999/xhtml"><body>

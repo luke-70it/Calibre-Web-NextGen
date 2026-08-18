@@ -279,11 +279,27 @@ def _xml_start_tag_ranges(source):
         bracket_depth = 0
         cursor = start + 2 if closing or declaration else start + 1
         while cursor < length:
-            byte = source[cursor]
             if quote_byte is not None:
-                if byte == quote_byte:
+                if source[cursor] == quote_byte:
                     quote_byte = None
-            elif byte in (ord("'"), ord('"')):
+                cursor += 1
+                continue
+            # Comments and processing instructions inside a DOCTYPE internal
+            # subset may contain bracket characters and text shaped like start
+            # tags. Skip them as lexical units so they cannot change the subset
+            # depth or this scanner's element numbering relative to lxml's. A
+            # desync makes an edit land on the wrong element, which validation
+            # then rejects on every repair attempt instead of converging.
+            if declaration and source.startswith(b"<!--", cursor):
+                comment_end = source.find(b"-->", cursor + 4)
+                cursor = length if comment_end < 0 else comment_end + 3
+                continue
+            if declaration and source.startswith(b"<?", cursor):
+                instruction_end = source.find(b"?>", cursor + 2)
+                cursor = length if instruction_end < 0 else instruction_end + 2
+                continue
+            byte = source[cursor]
+            if byte in (ord("'"), ord('"')):
                 quote_byte = byte
             elif declaration and byte == ord("["):
                 bracket_depth += 1
