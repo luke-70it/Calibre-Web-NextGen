@@ -46,14 +46,19 @@ def _pid_exists(pid: int) -> bool:
 
 
 @pytest.mark.parametrize(
-    ("network_share_mode", "expected_watcher"),
-    [("true", "watch_fallback.py"), ("false", "inotifywait")],
-    ids=["polling-fallback", "inotify"],
+    ("network_share_mode", "expected_watcher", "ignore_term"),
+    [
+        ("true", "watch_fallback.py", False),
+        ("false", "inotifywait", False),
+        ("true", "watch_fallback.py", True),
+    ],
+    ids=["polling-fallback", "inotify", "unresponsive-watcher"],
 )
 def test_sigterm_stops_ingest_service_and_its_watcher_tree(
     tmp_path: Path,
     network_share_mode: str,
     expected_watcher: str,
+    ignore_term: bool,
 ):
     """TERM must stop both watcher paths without waiting for s6's SIGKILL.
 
@@ -73,6 +78,7 @@ def test_sigterm_stops_ingest_service_and_its_watcher_tree(
         "printf '%s\\n' \"$*\" > \"$WATCHER_READY_FILE\"\n"
         "printf '%s\\n' \"$*\" >> \"$WATCHER_INVOCATIONS_FILE\"\n"
         "printf '%s\\n' \"$BASHPID\" >> \"$WATCHER_PID_FILE\"\n"
+        "if [ \"${WATCHER_IGNORE_TERM:-0}\" = 1 ]; then trap '' TERM; fi\n"
         "sleep 30 &\n"
         "printf '%s\\n' \"$!\" >> \"$WATCHER_PID_FILE\"\n"
         "wait \"$!\"\n"
@@ -98,6 +104,7 @@ def test_sigterm_stops_ingest_service_and_its_watcher_tree(
             "WATCHER_READY_FILE": str(watcher_ready),
             "WATCHER_PID_FILE": str(watcher_pids),
             "WATCHER_INVOCATIONS_FILE": str(watcher_invocations),
+            "WATCHER_IGNORE_TERM": "1" if ignore_term else "0",
         }
     )
 

@@ -391,19 +391,22 @@ stop_process_group() {
         # and killing just the wrapper would orphan inotifywait/Python or a
         # processor currently handling an event.
         kill -TERM -- "-$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
 
-        # Close the small fork race between signalling the group and reaping
-        # its leader: a pipeline member can have started a child just after the
-        # first TERM was delivered. As long as the group still exists, repeat
-        # TERM briefly; only an unresponsive orphan is force-stopped after the
-        # service's direct child has already had its graceful wait.
+        # Close the small fork race between signalling the group and checking
+        # it: a pipeline member can have started a child just after the first
+        # TERM was delivered. Keep the grace bounded as well -- an unresponsive
+        # watcher must not turn this explicit wait into the original shutdown
+        # hang under a different spelling.
         for attempt in {1..20}; do
-                kill -0 -- "-$pid" 2>/dev/null || return 0
+                if ! kill -0 -- "-$pid" 2>/dev/null; then
+                        wait "$pid" 2>/dev/null || true
+                        return 0
+                fi
                 kill -TERM -- "-$pid" 2>/dev/null || true
                 sleep 0.05
         done
         kill -KILL -- "-$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
 }
 
 cleanup_background_jobs() {
