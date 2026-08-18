@@ -379,6 +379,7 @@ post_batch_follow_up_loop() {
 POST_BATCH_FOLLOW_UP_PID=""
 STALE_TEMP_CLEANUP_PID=""
 MAIN_WATCHER_PID=""
+SHUTDOWN_PENDING=0
 
 stop_process_group() {
         local pid="$1"
@@ -406,7 +407,20 @@ stop_process_group() {
                 sleep 0.05
         done
         kill -KILL -- "-$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
+
+        # SIGKILL is not proof that the group is already gone. In particular,
+        # a process blocked in uninterruptible filesystem I/O remains visible
+        # until the kernel operation returns. Poll the GROUP, not just its
+        # leader, but keep this bounded so a wedged network share cannot turn
+        # shutdown into another indefinite wait.
+        for attempt in {1..20}; do
+                if ! kill -0 -- "-$pid" 2>/dev/null; then
+                        wait "$pid" 2>/dev/null || true
+                        return 0
+                fi
+                sleep 0.05
+        done
+        echo "[cwa-ingest-service] WARNING: process group $pid remained after SIGKILL; leaving shutdown bounded" >&2
 }
 
 cleanup_background_jobs() {
@@ -427,6 +441,35 @@ cleanup_background_jobs() {
 terminate_service() {
         cleanup_background_jobs
         exit 0
+}
+
+defer_termination() {
+        # Bash has no signal-mask builtin. During the tiny `command &` -> `$!`
+        # publication window, record the request instead of running cleanup
+        # against an empty PID. finish_pid_publication restores the normal
+        # handler and replays the request after the group ID is published.
+        SHUTDOWN_PENDING=1
+}
+
+begin_pid_publication() {
+        trap defer_termination TERM HUP INT
+}
+
+finish_pid_publication() {
+        trap terminate_service TERM HUP INT
+        if [ "$SHUTDOWN_PENDING" = "1" ]; then
+                SHUTDOWN_PENDING=0
+                terminate_service
+        fi
+}
+
+pause_before_pid_publication_for_test() {
+        local stage="$1"
+        [ "${CWA_INGEST_PID_PUBLICATION_TEST_STAGE:-}" = "$stage" ] || return 0
+        : > "$CWA_INGEST_PID_PUBLICATION_TEST_READY"
+        while [ ! -e "$CWA_INGEST_PID_PUBLICATION_TEST_RELEASE" ]; do
+                sleep 0.01
+        done
 }
 
 process_retry_queue() {
@@ -670,10 +713,12 @@ fi
 # shell's own process group. Monitor mode gives each background job a distinct
 # group whose ID is $!, allowing the TERM handler to stop complete pipelines.
 set -m
-( set +m; post_batch_follow_up_loop ) &
-POST_BATCH_FOLLOW_UP_PID=$!
 trap cleanup_background_jobs EXIT
-trap terminate_service TERM HUP INT
+trap defer_termination TERM HUP INT
+( set +m; post_batch_follow_up_loop ) &
+pause_before_pid_publication_for_test post_batch
+POST_BATCH_FOLLOW_UP_PID=$!
+finish_pid_publication
 
 wait_for_main_watcher() {
         # An explicit PID is essential: bare `wait` returns when ANY helper
@@ -688,8 +733,11 @@ run_fallback_in_background() {
         # The parent has already put this subshell in its own process group.
         # Disable monitor mode inside it so run_fallback's pipeline and every
         # watcher grandchild remain in that same group.
+        begin_pid_publication
         ( set +m; run_fallback ) &
+        pause_before_pid_publication_for_test fallback
         MAIN_WATCHER_PID=$!
+        finish_pid_publication
         wait_for_main_watcher
 }
 
@@ -709,6 +757,7 @@ fi
 
 # Background cleanup loop for stale temp files
 if [ -n "$(get_stale_temp_interval_from_db)" ]; then
+        begin_pid_publication
         (
                 set +m
                 while true; do
@@ -721,7 +770,9 @@ if [ -n "$(get_stale_temp_interval_from_db)" ]; then
                         fi
                 done
         ) &
+        pause_before_pid_publication_for_test stale_cleanup
         STALE_TEMP_CLEANUP_PID=$!
+        finish_pid_publication
 fi
 
 run_inotify_with_fallback() {
@@ -760,6 +811,9 @@ run_inotify_with_fallback() {
 
 # Bash dispatches a trapped signal as soon as this PID-specific wait is
 # interrupted. The handler then stops this entire job group plus both helpers.
+begin_pid_publication
 run_inotify_with_fallback &
+pause_before_pid_publication_for_test inotify
 MAIN_WATCHER_PID=$!
+finish_pid_publication
 wait_for_main_watcher

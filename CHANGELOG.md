@@ -26,7 +26,9 @@ is for things you can see or feel when running the app.
   waited for Docker's final forced kill, severing any requests still in flight.
   The watcher now runs as a managed background process group, so the service can
   receive the signal immediately, stop its watcher and cleanup helpers, and let
-  the rest of the application finish shutting down normally.
+  the rest of the application finish shutting down normally. Signals arriving
+  during the instant a background process is started are held until its process
+  group ID has been recorded, so that startup edge cannot leave a watcher behind.
 - **The new UI no longer checks with the server for every book cover as you
   scroll, and the book page no longer fetches a 280KB cover to show it at
   postcard size.** Every cover was sent with instructions never to reuse it, so
