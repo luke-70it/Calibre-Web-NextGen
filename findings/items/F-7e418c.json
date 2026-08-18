@@ -1,0 +1,13 @@
+{
+  "area": "kobo",
+  "body": "VERIFIED against the code, 2026-08-18. Found during the annotations reconnaissance; no\nexisting finding covers it.\n\n`cps/annotations.py::ingest_bookmarks` (def at line 349) builds its row at line 424:\n\n    row = ub.Annotation(\n        user_id=..., annotation_id=..., book_id=...,\n        highlighted_text=..., highlight_color=..., note_text=...,\n        content_id=..., start_container_path=..., ... , source=\"kobo\",\n    )\n\nFifteen fields, and `annotation_type` is not among them. The LIVE capture path does set it\n— `cps/services/annotation_sync/__init__.py:315`, `ann.annotation_type = native_type`.\nSo the two paths that write the same table disagree: a row that arrives over the live\nPATCH carries a type, and the identical annotation recovered from the device's own sqlite\ncarries NULL.\n\nWhy this is worse than an untidy column, and why it is ORDERING-CRITICAL:\n\nF-b1004e is the finding that the importer drops every dogear and note-only bookmark\n(`WHERE Text IS NOT NULL AND Text != ''`). The obvious fix is to admit them. But the\nimporter is the ONLY recovery path that exists — the device uploads a delta and never\nre-offers (F-a66189, and both `kobo_annotation_seed_capture*` tables are measured at 0\nrows, so nothing has ever backfilled). So the moment F-b1004e lands, dogears begin\narriving through this constructor — and they will arrive TYPE-NULL, indistinguishable\nfrom highlights, in the one code path whose entire purpose is to recover data faithfully.\n\nFixing F-b1004e without this first therefore converts \"dogears are missing\" into \"dogears\nare present but mistyped\", which is harder to detect and harder to undo than the absence.\n\nFix direction: set `annotation_type` in `ingest_bookmarks` from the same derivation the\nlive path uses, so the two writers agree; then land F-b1004e. Consider a test that asserts\nthe two write paths produce the same column set for the same logical annotation — the\nclass here is \"two writers to one table drifted\", not this single column.",
+  "created": "2026-08-18",
+  "id": "F-7e418c",
+  "refs": [
+    "#1731"
+  ],
+  "severity": "data-integrity",
+  "source": "audit",
+  "status": "open",
+  "title": "The KoboReader.sqlite importer never sets annotation_type, so every recovered row is typed NULL"
+}
