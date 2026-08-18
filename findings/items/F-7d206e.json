@@ -1,0 +1,11 @@
+{
+  "area": "spa",
+  "body": "Found while auditing every compositor-property animation in `frontend/src/` (the\nSVG-target compositing sweep, PR fix/spa-svg-animation-main-thread).\n\nSix modules run an infinite `transform: rotate(360deg)` spinner. Four of them\nswitch it off under `@media (prefers-reduced-motion: reduce)`:\n\n- `frontend/src/components/HelpBanner.module.css` — `.arrow`, `.banner`\n- `frontend/src/components/DiscoverSection.module.css` — `.spin`\n- `frontend/src/pages/Catalog.module.css` — `.refreshIconSpin`\n- `frontend/src/pages/CoverPicker.module.css` — `.spin`\n- `frontend/src/pages/Duplicates.module.css` — `.spinning`\n\nTwo do not:\n\n- `frontend/src/pages/Reader.module.css` — `.spin` (`spin 0.9s linear infinite`)\n- `frontend/src/pages/Upload.module.css` — `.spin` (`spin 0.9s linear infinite`)\n\nOBSERVED 2026-08-18 by walking the live CSSOM in Chrome over the built\nstylesheet: the six `prefers-reduced-motion` rules present are `_banner_*`,\n`_arrow_*`, DiscoverSection `_spin_*`, `_refreshIconSpin_*`, CoverPicker\n`_spin_*` and `_spinning_*`. Reader's and Upload's `.spin` are absent.\n\nNot fixed in that PR on purpose: whether a *loading* spinner should stop under\nreduced-motion is a product call, not a mechanical one (a still spinner conveys\nless state), and the PR is a perf change that must not smuggle in a behaviour\nchange. But the fork is currently inconsistent with itself in both directions,\nwhich is the part that is certainly wrong. Pick one rule and apply it to all\nsix.",
+  "created": "2026-08-18",
+  "id": "F-7d206e",
+  "refs": [],
+  "severity": "ux",
+  "source": "audit",
+  "status": "open",
+  "title": "SPA loading spinners in Reader and Upload ignore prefers-reduced-motion"
+}
