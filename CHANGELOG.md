@@ -453,12 +453,13 @@ is for things you can see or feel when running the app.
   the rest of the application finish shutting down normally. Signals arriving
   during the instant a background process is started are held until its process
   group ID has been recorded, so that startup edge cannot leave a watcher behind.
-- **Every page of the new UI was quietly running an animation on the browser's
-  main thread, all the time, whether or not anything was moving on screen.** The
+- **On every page of the new UI, for as long as the "Try the new Help menu"
+  notice was on show, an animation was running on the browser's main thread —
+  whether or not anything was moving on screen.** The
   small arrow in the "Try the new Help menu" notice at the top of the app is
   nudged back and forth on a loop. Because that nudge was applied to the icon
-  drawing itself rather than to a box around it, browsers cannot hand it to the
-  graphics card and have to redraw it in the same place they run the page — so
+  drawing itself rather than to a box around it, Chrome cannot hand it to the
+  graphics card and has to redraw it in the same place it runs the page — so
   the app recalculated styles about sixty times a second on every screen, for as
   long as the notice was on show. On a phone that is the difference between a
   scroll that stutters and one that does not: measured on a book page at 390px
@@ -467,10 +468,12 @@ is for things you can see or feel when running the app.
   with that one animation switched off it was 399ms, 0 recalculations, 1 dropped
   frame and 12ms. The animation now runs on a wrapper around the icon, where the
   graphics card can take it — it looks exactly the same. The same mistake was
-  fixed on every loading spinner in the app (library refresh, Discover shuffle,
-  duplicate scan, cover picker, reader, upload), so a page that is loading no
-  longer competes with itself for the main thread. Reduced-motion settings are
-  honoured exactly as before.
+  found and fixed on thirteen more spinning icons (library refresh, Discover
+  shuffle, duplicate scan, cover picker, reader, upload), so a page that is
+  loading no longer competes with itself for the main thread. The app's shared
+  loading spinner was already built the right way and is unchanged. Reduced
+  motion is honoured exactly as before. Measurements are from Chrome; the fix
+  costs nothing on any other browser.
 - **The new UI no longer checks with the server for every book cover as you
   scroll, and the book page no longer fetches a 280KB cover to show it at
   postcard size.** Every cover was sent with instructions never to reuse it, so
