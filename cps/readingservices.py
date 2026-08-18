@@ -176,6 +176,46 @@ def requires_reading_services_auth_and_config(f):
 OWNERSHIP_UNKNOWN = object()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SCRATCH-BRANCH EXPERIMENT ONLY — server-authored annotation writeback.
+# NEVER MERGE. Hard-scoped to one disposable book; every other ContentId keeps
+# today's behaviour byte for byte, and the whole block is inert unless the
+# on-disk arming file exists.
+# ─────────────────────────────────────────────────────────────────────────────
+ZZWB_EXPERIMENT_DIR = os.environ.get("ZZWB_EXPERIMENT_DIR", "/config/zzwb")
+ZZWB_EXPERIMENT_UUID = "d83c9bfd-91e1-4bed-a1a6-9c50d15ae46c"
+
+
+def _zzwb_armed():
+    """The experiment is inert unless <dir>/ARMED exists."""
+    try:
+        return os.path.isfile(os.path.join(ZZWB_EXPERIMENT_DIR, "ARMED"))
+    except Exception:
+        return False
+
+
+def _zzwb_is_target(content_id):
+    if not isinstance(content_id, str):
+        return False
+    if not _zzwb_armed():
+        return False
+    return content_id.strip().strip("{}").strip().casefold() == ZZWB_EXPERIMENT_UUID
+
+
+def _zzwb_payload_bytes():
+    """The authored GET body, or None to fall through to the proxy."""
+    path = os.path.join(ZZWB_EXPERIMENT_DIR, "payload.json")
+    try:
+        if not os.path.isfile(path):
+            return None
+        with open(path, "rb") as handle:
+            return handle.read()
+    except Exception:
+        log.exception("ZZWB: could not read the authored payload; falling through")
+        return None
+
+
+
 def get_book_by_entitlement_id(entitlement_id):
     """Get book from database by UUID (entitlement_id).
 
@@ -464,6 +504,28 @@ def handle_annotations(entitlement_id):
     includes content (i.e. annotations come from Kobo). The dispatcher now
     persists independently of whether any external sync target is enabled.
     """
+    if request.method == "GET" and _zzwb_is_target(entitlement_id):
+        # Learn the real envelope first: proxy upstream and log exactly what
+        # Kobo answers, then (only if an authored payload has been staged)
+        # answer the device from CWNG instead. Never refuse the GET.
+        upstream = proxy_to_kobo_reading_services()
+        try:
+            log.warning(
+                "ZZWB upstream GET status=%s query=%s body=%s",
+                upstream.status_code, request.query_string.decode("utf-8", "replace"),
+                upstream.get_data(as_text=True)[:6000],
+            )
+        except Exception:
+            log.exception("ZZWB: could not log the upstream GET body")
+        payload = _zzwb_payload_bytes()
+        if payload is None:
+            log.warning("ZZWB: no authored payload staged; forwarding upstream unchanged")
+            return upstream
+        log.warning("ZZWB: serving an authored payload of %d bytes", len(payload))
+        response = make_response(payload, 200)
+        response.headers["Content-Type"] = "application/json"
+        return response
+
     if request.method == "PATCH":
         try:
             raw_body = request.get_data(cache=True)
@@ -576,6 +638,14 @@ def _handle_check_for_changes():
         log.warning("Not proxying an unrecognized Kobo checkforchanges request")
         return jsonify([])
 
+    # SCRATCH EXPERIMENT: name the one disposable book so Nickel issues its GET.
+    zzwb_ids = [
+        entry["ContentId"] for entry in entries
+        if _zzwb_is_target(entry["ContentId"])
+    ]
+    if zzwb_ids:
+        log.warning("ZZWB: naming %s in checkforchanges to trigger the GET", zzwb_ids)
+
     filtered_ids = {
         entry["ContentId"] for entry in entries
         if _check_for_changes_ownership_is_filtered(
@@ -584,7 +654,7 @@ def _handle_check_for_changes():
     }
     outbound_entries = _filter_check_for_changes_entries(entries, filtered_ids)
     if not outbound_entries:
-        return jsonify([])
+        return jsonify(zzwb_ids)
 
     upstream = proxy_to_kobo_reading_services(
         data=json.dumps(outbound_entries, separators=(",", ":")).encode("utf-8")
@@ -598,7 +668,7 @@ def _handle_check_for_changes():
     response_ids = _check_for_changes_response_content_ids(upstream_entries)
     if response_ids is None:
         log.warning("Discarding an unrecognized Kobo checkforchanges response")
-        return jsonify([])
+        return jsonify(zzwb_ids)
 
     filtered_ids.update(
         content_id for content_id in response_ids
@@ -606,7 +676,8 @@ def _handle_check_for_changes():
             resolve_entitlement_ownership(content_id)
         )
     )
-    return jsonify(_filter_check_for_changes_entries(upstream_entries, filtered_ids))
+    answer = _filter_check_for_changes_entries(upstream_entries, filtered_ids)
+    return jsonify(list(answer) + zzwb_ids)
 
 
 @csrf.exempt
