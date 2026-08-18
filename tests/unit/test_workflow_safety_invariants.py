@@ -189,10 +189,11 @@ _DANGEROUS_PERMS_EXEMPTIONS = {
         "GitHub OIDC for sigstore/cosign attestations on the container image; "
         "required for SLSA provenance. Issued per-job, expires immediately."
     ),
-    ("update-translations.yml", "actions"): (
-        "Workflow re-dispatches itself / downstream workflows after pushing "
-        "translation updates so dependent runs pick up fresh .po files."
-    ),
+    # update-translations.yml used to hold an ("…", "actions") exemption for
+    # its dev-build dispatch step. The dispatch was removed (it double-built
+    # every merge to main; see test_dev_image_build_exactly_once.py), and the
+    # exemption left with it — re-granting actions: write there is a red flag,
+    # not a routine edit.
 }
 
 
