@@ -471,8 +471,9 @@ is for things you can see or feel when running the app.
   found and fixed on thirteen more spinning icons (library refresh, Discover
   shuffle, duplicate scan, cover picker, reader, upload), so a page that is
   loading no longer competes with itself for the main thread. The app's shared
-  loading spinner was already built the right way and is unchanged. Reduced
-  motion is honoured exactly as before. Measurements are from Chrome; the fix
+  loading spinner already animated a box rather than an icon, so it needed no
+  change. Reduced motion is honoured exactly as before, wherever it was
+  honoured before. Measurements are from Chrome; the fix
   costs nothing on any other browser.
 - **The new UI no longer checks with the server for every book cover as you
   scroll, and the book page no longer fetches a 280KB cover to show it at

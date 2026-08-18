@@ -203,7 +203,7 @@ function namespaceImports(tsx: string): Array<{ local: string; spec: string }> {
 /** Walk forward from `<Name` to the `>` that closes the opening tag, skipping
  *  over braces, strings and template literals so `size={a > b ? 1 : 2}` and
  *  `onClick={() => …}` do not terminate the scan early. */
-function openingTagAttributes(text: string, tagStart: number): string | null {
+function openingTag(text: string, tagStart: number): { attrs: string; end: number } | null {
   let i = tagStart + 1;
   while (i < text.length && /[\w$.]/.test(text[i])) i++;
   const attrsStart = i;
@@ -220,10 +220,14 @@ function openingTagAttributes(text: string, tagStart: number): string | null {
     if (ch === '"' || ch === "'" || ch === '`') { quote = ch; i++; continue; }
     if (ch === '{') depth++;
     else if (ch === '}') depth--;
-    else if (ch === '>' && depth === 0) return text.slice(attrsStart, i);
+    else if (ch === '>' && depth === 0) return { attrs: text.slice(attrsStart, i), end: i };
     i++;
   }
   return null;
+}
+
+function openingTagAttributes(text: string, tagStart: number): string | null {
+  return openingTag(text, tagStart)?.attrs ?? null;
 }
 
 function balancedEnd(text: string, openIndex: number, open: string, close: string): number {
@@ -411,6 +415,129 @@ export function scanSource(input: ScanInput): Violation[] {
   return violations;
 }
 
+/* ------------------------------------------------- the wrapper contract --- */
+
+/* Moving the animation onto a wrapper is only safe while the wrapper stays a
+ * pure animation carrier that shrink-wraps exactly one icon. Those preservation
+ * properties were MEASURED once (identical rendered geometry at 1200px and
+ * 390px against the pre-fix markup); these assertions are what stops them
+ * drifting afterwards. The population is DERIVED from the sources -- a
+ * hand-maintained list of call sites is the false-green this project has been
+ * bitten by before. */
+
+/** Declarations a compositor-animation wrapper class may carry. Anything else
+ *  (width/height/padding/margin/border/position/overflow/transform/inset) would
+ *  change the box the icon used to occupy, which is exactly what the wrapper
+ *  must never do. */
+const WRAPPER_SAFE_PROPS = new Set([
+  'display', 'align-items', 'justify-content', 'color', 'line-height',
+  'flex', 'flex-grow', 'flex-shrink', 'flex-basis', 'flex-none', 'vertical-align',
+  'animation', 'animation-name', 'animation-duration', 'animation-timing-function',
+  'animation-delay', 'animation-iteration-count', 'animation-direction',
+  'animation-fill-mode', 'animation-play-state', 'will-change',
+]);
+
+export interface WrapperSite {
+  file: string;
+  line: number;
+  cls: string;
+  wrapperDecls: Array<[string, string]>;
+  innerHtml: string;
+  iconTags: string[];
+  nonIconChildren: string[];
+  iconAttrs: string[];
+}
+
+/** Every declaration of rules whose last compound is exactly `.cls`. */
+function declarationsForClass(css: string, cls: string): Array<[string, string]> {
+  const text = stripCssComments(css);
+  const out: Array<[string, string]> = [];
+  const rule = /([^{}]+)\{([^{}]*)\}/g;
+  let m: RegExpExecArray | null;
+  while ((m = rule.exec(text)) !== null) {
+    const selectorList = m[1].trim();
+    if (selectorList.startsWith('@')) continue;
+    for (const selector of selectorList.split(',')) {
+      const compound = selector.trim().split(/[\s>+~]+/).pop() ?? '';
+      const classes = [...compound.matchAll(/\.(-?[_a-zA-Z][\w-]*)/g)].map((c) => c[1]);
+      if (classes.length !== 1 || classes[0] !== cls) continue;
+      if (/[:[]/.test(compound.replace(/^\.[\w-]+/, ''))) continue; // skip :hover etc.
+      for (const decl of m[2].split(';')) {
+        const idx = decl.indexOf(':');
+        if (idx < 0) continue;
+        out.push([decl.slice(0, idx).trim(), decl.slice(idx + 1).trim()]);
+      }
+    }
+  }
+  return out;
+}
+
+/** Find `<span className={…animated class…}> … </span>` wrappers. */
+export function animationWrappers(input: ScanInput): WrapperSite[] {
+  const { path, tsx, readCss } = input;
+  const iconNames = new Set<string>(SVG_TAGS);
+  for (const imp of namedImports(tsx)) if (imp.spec === 'lucide-react') iconNames.add(imp.local);
+
+  const sites: WrapperSite[] = [];
+  for (const imp of defaultImports(tsx)) {
+    if (!/\.css$/.test(imp.spec)) continue;
+    const css = readCss(resolve(dirname(path), imp.spec));
+    if (css === null) continue;
+    const rules = compositorAnimatedRules(css);
+    const aliases = classAliases(tsx, imp.local);
+
+    const spanRe = /<span(?![\w$.-])/g;
+    let m: RegExpExecArray | null;
+    while ((m = spanRe.exec(tsx)) !== null) {
+      const tag = openingTag(tsx, m.index);
+      if (tag === null) continue;
+      const applied = new Set(
+        classNameExpressions(tag.attrs).flatMap((e) => styleClassRefs(e, imp.local, aliases)),
+      );
+      if (applied.size === 0) continue;
+      const rule = rules.find((r) => r.classes.every((c) => applied.has(c)));
+      if (!rule) continue;
+
+      // children, up to the matching </span>
+      let depth = 1;
+      let i = tag.end + 1;
+      const inner = /<\/?span(?![\w$.-])/g;
+      inner.lastIndex = i;
+      let close = tsx.length;
+      let child: RegExpExecArray | null;
+      while ((child = inner.exec(tsx)) !== null) {
+        if (tsx[child.index + 1] === '/') { depth--; if (depth === 0) { close = child.index; break; } }
+        else depth++;
+      }
+      const innerHtml = tsx.slice(tag.end + 1, close);
+      const iconTags: string[] = [];
+      const nonIconChildren: string[] = [];
+      const iconAttrs: string[] = [];
+      for (const el of innerHtml.matchAll(/<([A-Za-z][\w$.]*)/g)) {
+        if (iconNames.has(el[1])) {
+          iconTags.push(el[1]);
+          iconAttrs.push(openingTagAttributes(innerHtml, el.index ?? 0) ?? '');
+        } else nonIconChildren.push(el[1]);
+      }
+      // text that is not whitespace and not a JSX expression container
+      const bare = innerHtml.replace(/<[^>]*>/g, ' ').replace(/\{[^}]*\}/g, ' ').trim();
+      if (bare.length > 0) nonIconChildren.push(`text:${bare.slice(0, 30)}`);
+
+      sites.push({
+        file: path,
+        line: tsx.slice(0, m.index).split('\n').length,
+        cls: rule.classes.join('.'),
+        wrapperDecls: rule.classes.flatMap((c) => declarationsForClass(css, c)),
+        innerHtml,
+        iconTags,
+        nonIconChildren,
+        iconAttrs,
+      });
+    }
+  }
+  return sites;
+}
+
 function resolveModule(
   fromFile: string,
   spec: string,
@@ -460,6 +587,10 @@ const REAL_VIOLATIONS = TSX_FILES.flatMap((file) =>
     readCss: readCssFromDisk,
     svgComponentsByModule: SVG_COMPONENTS_BY_MODULE,
   }),
+);
+
+const REAL_WRAPPERS = TSX_FILES.flatMap((file) =>
+  animationWrappers({ path: file, tsx: readFileSync(file, 'utf8'), readCss: readCssFromDisk }),
 );
 
 /* ------------------------------------------------------------- fixtures --- */
@@ -671,6 +802,84 @@ describe('the SPA never animates a compositor property on an SVG element', () =>
         `Move the animation to a wrapper element.`,
     );
     assert.deepEqual(report, [], `\n${report.join('\n')}\n`);
+  });
+});
+
+describe('every animation wrapper keeps the contract that makes it safe', () => {
+  const named = (s: WrapperSite) => `${relative(FRONTEND, s.file)}:${s.line} .${s.cls}`;
+  const iconWrappers = REAL_WRAPPERS.filter((s) => s.iconTags.length > 0);
+
+  test('the wrapper population is derived and non-empty', () => {
+    // Derived from the sources, never a hand-maintained list of call sites --
+    // that is the false-green this project has shipped before.
+    // 14 = every call site this fix moved onto a wrapper. A floor rather than a
+    // list, so the population stays derived; lower it deliberately (and say why)
+    // if a wrapper is ever legitimately removed, so losing one cannot be silent.
+    assert.ok(
+      iconWrappers.length >= 14,
+      `expected at least the 14 icon-animation wrappers, found ${iconWrappers.length}:\n` +
+        iconWrappers.map(named).join('\n'),
+    );
+  });
+
+  test('each wrapper class shrink-wraps — display:inline-flex, so the box is the glyph', () => {
+    const bad = iconWrappers.filter(
+      (s) => !s.wrapperDecls.some(([prop, value]) => prop === 'display' && value === 'inline-flex'),
+    );
+    assert.deepEqual(bad.map(named), [], 'a wrapper without display:inline-flex is a new box around the icon');
+  });
+
+  test('each wrapper class stays a pure animation carrier and cannot change the box', () => {
+    const offenders: string[] = [];
+    for (const s of iconWrappers) {
+      for (const [prop] of s.wrapperDecls) {
+        if (!WRAPPER_SAFE_PROPS.has(prop) && !prop.startsWith('--')) {
+          offenders.push(`${named(s)} declares \`${prop}\``);
+        }
+      }
+    }
+    assert.deepEqual(
+      [...new Set(offenders)],
+      [],
+      'geometry-affecting declarations on an animation wrapper change the box the icon used to occupy',
+    );
+  });
+
+  test('a wrapper that holds an icon holds ONLY that icon', () => {
+    const bad = iconWrappers
+      .filter((s) => s.iconTags.length !== 1 || s.nonIconChildren.length > 0)
+      .map((s) => `${named(s)} -> icons=[${s.iconTags}] other=[${s.nonIconChildren}]`);
+    assert.deepEqual(bad, [], 'extra content inside the wrapper is animated along with the icon');
+  });
+
+  test('each wrapped icon keeps an explicit size', () => {
+    const bad = iconWrappers
+      .filter((s) => !s.iconAttrs.some((a) => /\bsize\s*=\s*\{/.test(a)) && !s.iconAttrs.some((a) => /\bwidth\s*=/.test(a)))
+      .map(named);
+    assert.deepEqual(bad, [], 'an icon with no explicit size takes its size from the wrapper instead');
+  });
+
+  test('a wrapped icon that is hidden from assistive tech is hidden consistently', () => {
+    // NOT an assertion that every wrapped icon is hidden: nine of them never
+    // carried these attributes (pre-existing, filed as F-6543d1, deliberately
+    // untouched by the compositing fix). What IS pinned is that an icon which
+    // declares one of the pair declares the other, so neither can be dropped
+    // on its own.
+    const bad: string[] = [];
+    for (const s of iconWrappers) {
+      for (const attrs of s.iconAttrs) {
+        const hidden = /aria-hidden\s*=\s*"true"/.test(attrs);
+        const unfocusable = /focusable\s*=\s*\{false\}/.test(attrs);
+        if (hidden !== unfocusable) bad.push(`${named(s)} aria-hidden=${hidden} focusable={false}=${unfocusable}`);
+      }
+    }
+    assert.deepEqual(bad, [], 'aria-hidden and focusable={false} must travel together');
+  });
+
+  test('every compositor-animated class applied to a wrapper is applied to a wrapper ONLY', () => {
+    // the mirror of the main gate: the class must not also be reachable on an
+    // SVG somewhere else in the tree
+    assert.deepEqual(REAL_VIOLATIONS, []);
   });
 });
 
