@@ -125,19 +125,26 @@ jobs:
       # since d7e22c6fc (2026-05-02), and a PAT push triggers workflows on
       # its own, so the translation commit has built itself since then. And
       # 4ce64df8e (2026-06-06) restored push: branches: [main] on
-      # docker-image-build-dev.yml, so every merge builds itself too. The
-      # dispatch therefore rebuilt an already-built SHA on every run — and,
-      # having no paths-ignore, even force-built commits the push trigger
-      # deliberately skips (docs-only, .github-only). Each redundant build
-      # pushed a new :dev image that the operator's household server
-      # auto-deploys via watchtower; measured 2026-08-18 at 2–3 builds per
-      # merge, i.e. duplicate user-visible restarts. The GITHUB_TOKEN it
-      # ran under also needed actions: write, which left with it.
-      # tests/unit/test_dev_image_build_exactly_once.py pins the
-      # exactly-one-build-per-commit matrix; if the push above ever falls
-      # back to GITHUB_TOKEN, that file's premise test goes red and a
-      # trigger belongs back here — that is the only shape in which one
-      # does.
+      # docker-image-build-dev.yml, so every merge touching image-relevant
+      # paths builds itself too. From then on the dispatch could only ever
+      # build a SHA the push trigger had already built — or one it had
+      # deliberately skipped: workflow_dispatch has no paths-ignore, so on
+      # a merge confined to the ignored paths (docs, tests, .github —
+      # editing this workflow is the live example) the dispatch force-built
+      # an image the push trigger correctly declines to build. Those merges
+      # now get ZERO dev builds, which is the intended behaviour, not a
+      # gap: the ignore list exists because such changes cannot alter image
+      # contents (the Dockerfile is not under .github/). Each redundant or
+      # unwanted build pushed a new :dev image that the operator's
+      # household server auto-deploys via watchtower; measured 2026-08-18
+      # at 2–3 builds per merge, i.e. duplicate user-visible restarts. The
+      # GITHUB_TOKEN the dispatch ran under also needed actions: write,
+      # which left with it.
+      # tests/unit/test_dev_image_build_once_when_image_relevant_never_when_ignored.py
+      # pins the policy: exactly one build per image-relevant merge, zero
+      # per ignored one. If the push above ever falls back to GITHUB_TOKEN,
+      # that file's premise test goes red and a trigger belongs back here —
+      # that is the only shape in which one does.
 
       # The per-language translation-status table lives in the repo README
       # (single source of truth) — see the "Translations" section of the

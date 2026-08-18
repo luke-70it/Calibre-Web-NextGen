@@ -190,10 +190,14 @@ _DANGEROUS_PERMS_EXEMPTIONS = {
         "required for SLSA provenance. Issued per-job, expires immediately."
     ),
     # update-translations.yml used to hold an ("…", "actions") exemption for
-    # its dev-build dispatch step. The dispatch was removed (it double-built
-    # every merge to main; see test_dev_image_build_exactly_once.py), and the
-    # exemption left with it — re-granting actions: write there is a red flag,
-    # not a routine edit.
+    # its dev-build dispatch step. The dispatch was removed: the dev
+    # workflow's push trigger already builds every image-relevant merge, so
+    # the dispatch could only double-build those — or, having no
+    # paths-ignore of its own, force-build merges the push trigger
+    # deliberately skips. See
+    # tests/unit/test_dev_image_build_once_when_image_relevant_never_when_ignored.py.
+    # The exemption left with it — re-granting actions: write there is a red
+    # flag, not a routine edit.
 }
 
 

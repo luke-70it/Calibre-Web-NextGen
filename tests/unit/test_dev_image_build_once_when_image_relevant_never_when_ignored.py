@@ -1,16 +1,36 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""One merge to main must produce exactly ONE dev image build per commit.
+"""Dev builds on main: exactly one per IMAGE-RELEVANT merge, zero per ignored one.
+
+The policy this file pins has two arms, and the filename is meant to be
+read literally:
+
+  * A merge to main whose paths are image-relevant — i.e. NOT wholly
+    covered by docker-image-build-dev.yml's ``paths-ignore``
+    (``**.md``, ``docs/**``, ``tests/**``, ``.github/**``) — must produce
+    EXACTLY ONE ``:dev`` build, from the push trigger.
+  * A merge confined to those ignored paths must produce ZERO builds,
+    from any route. The ignore list is a deliberate decision that such
+    changes cannot alter image contents (the Dockerfile is not under
+    ``.github/``), so the second arm is not a gap in coverage; it is the
+    optimization working. The invariant is "one when image-relevant,
+    never when ignored" — NOT "every merge builds exactly once".
 
 The defect this pins: ``update-translations.yml`` used to end with an
 unconditional ``workflow_dispatch`` POST to ``docker-image-build-dev.yml``
-on every run. The dev workflow already triggers on ``push: branches: [main]``,
-so every merge got built twice — and every redundant build pushed a new
-``:dev`` image, which the operator's household server auto-deploys via
-watchtower. A duplicate build is therefore not wasted CI minutes; it is a
-real user-visible restart. Measured on the live Actions log 2026-08-18:
-sha 2a644a04 got a push build at 15:25 and a dispatch build at 15:27;
-sha a33ed5f9 (an "Update translations" commit) got three builds for one
-logical change.
+on every run, which broke both arms. For an image-relevant merge, the dev
+workflow's push trigger had already built the commit, so the dispatch
+built the same SHA twice. For an ignored-paths merge that happened to run
+the translations workflow — an edit to ``update-translations.yml`` itself
+is the live example, since ``.github/**`` is ignored by the dev workflow
+but listed in the translations workflow's own ``paths`` — the dispatch
+force-built a commit the push trigger deliberately skipped, because
+``workflow_dispatch`` has no ``paths-ignore``. Every one of those builds
+pushed a new ``:dev`` image, which the operator's household server
+auto-deploys via watchtower: a duplicate or unwanted build is a real
+user-visible restart, not wasted CI minutes. Measured on the live Actions
+log 2026-08-18: sha 2a644a04 got a push build at 15:25 and a dispatch
+build at 15:27; sha a33ed5f9 (an "Update translations" commit) got three
+builds for one logical change.
 
 Why the dispatch existed, and why it became wrong: 218f2bc11 (2026-01-30)
 added it — and simultaneously excluded main from the dev workflow's push
@@ -21,15 +41,8 @@ ever got a dev image — correct code. Both premises later flipped:
 d7e22c6fc (2026-05-02) moved the push to ``GH_PAT`` (a PAT push DOES
 trigger workflows, so the translation commit has built itself since
 then), and 4ce64df8e (2026-06-06) restored ``push: branches: [main]`` on
-the dev workflow (so every merge builds itself too). The dispatch was
-never removed.
-
-There is a second, quieter harm: ``workflow_dispatch`` has no
-``paths-ignore``. A commit touching only ``.github/**`` (or docs, when the
-translations workflow happens to run) is deliberately skipped by the dev
-workflow's push trigger — its header comment documents that docs- and
-tests-only changes can't change image behavior — and the dispatch
-force-built exactly those commits.
+the dev workflow (so image-relevant merges build themselves). The
+dispatch was never removed.
 
 Rather than grep for the dispatch URL (a grep stays green on any rewrite
 that double-builds by another route), these tests MODEL the trigger matrix
@@ -234,7 +247,7 @@ def _builds_of_translation_commit(changed_paths: list, translation_committed: bo
     return builds
 
 
-# ─── The invariant, over the trigger matrix ──────────────────────────────
+# ─── The two-arm policy, over the trigger matrix ─────────────────────────
 #
 # (changed paths on the merge, translations committed?, want builds of the
 # merge commit, want builds of the generated translation commit)
@@ -250,17 +263,20 @@ _SCENARIOS = [
     # The translation machinery itself is image content (scripts/ is not in
     # paths-ignore), so this merge must be built — once.
     (["scripts/update_translations.sh"], False, 1, 0),
-    # POSITIVE CONTROL: docs-only merges are deliberately skipped by the dev
-    # workflow's paths-ignore, and the translations workflow does not run at
-    # all (its paths don't match). Zero builds, on every revision of these
-    # workflows — a harness that rejected everything would go red here.
+    # ZERO ARM + POSITIVE CONTROL: docs-only merges are deliberately skipped
+    # by the dev workflow's paths-ignore, and the translations workflow does
+    # not run at all (its paths don't match). Zero builds, on every revision
+    # of these workflows — a harness that rejected everything would go red
+    # here.
     (["docs/usage.md"], False, 0, 0),
     (["README.md"], False, 0, 0),
-    # The quiet harm: an edit to the translations workflow ITSELF runs the
-    # workflow (its own file is in its paths), commits nothing, and the
-    # dispatch force-built a commit the push trigger deliberately skipped —
-    # defeating the paths-ignore optimization the dev workflow documents in
-    # its own header. This very PR is such a commit.
+    # The zero arm's live case: an edit to the translations workflow ITSELF
+    # runs the workflow (its own file is in its paths) but lies wholly
+    # inside the dev workflow's ignored paths, so the push trigger
+    # deliberately skips it. The removed dispatch force-built exactly these
+    # commits. Zero builds is the intended, permanent behaviour for this
+    # class — the merge of the PR that introduced this test is itself such
+    # an event (it touches only .github/ and tests/).
     ([".github/workflows/update-translations.yml"], False, 0, 0),
 ]
 
@@ -269,16 +285,22 @@ _SCENARIOS = [
     "changed,committed,want_merge,want_translation",
     _SCENARIOS,
     ids=[
-        "code-push",
-        "code-push-with-translation-commit",
-        "translations-only-pr",
-        "translation-script-change",
-        "docs-only-md (control)",
-        "root-readme-only (control)",
-        "workflow-self-edit",
+        "code-push:1-build",
+        "code-push-with-translation-commit:1-build-each",
+        "translations-only-pr:1-build",
+        "translation-script-change:1-build",
+        "docs-only-md:0-builds(control)",
+        "root-readme-only:0-builds(control)",
+        "workflow-self-edit:0-builds",
     ],
 )
-def test_each_main_commit_is_built_exactly_once(changed, committed, want_merge, want_translation):
+def test_image_relevant_merges_build_exactly_once_ignored_merges_build_never(
+    changed, committed, want_merge, want_translation
+):
+    """Both arms at once: image-relevant merges build exactly once, merges
+    confined to the dev workflow's paths-ignore build never — and nothing
+    outside the push trigger (a dispatch, a re-run) may add a build either
+    arm didn't ask for."""
     merge_builds = _builds_of_merge_commit(changed, committed)
     translation_builds = _builds_of_translation_commit(changed, committed)
     assert merge_builds == want_merge, (
