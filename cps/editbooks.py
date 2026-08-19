@@ -2009,6 +2009,31 @@ def edit_hardcover_blacklist(book_id, to_save):
 
 
 # returns False if an error occurs or no book is uploaded, in all other cases the ebook metadata to change is returned
+def _book_has_annotations(book_id):
+    """True when any user holds a highlight or note against this book.
+
+    Used to decide whether a newly uploaded KEPUB may be split into one document
+    per chapter. Splitting renames spine documents, and every stored annotation
+    -- Kobo `ContentID`, web-reader `cfi_range`, KOReader position -- is
+    anchored to the document it was made in, so renaming strands them. A book
+    nobody has annotated has nothing to strand.
+
+    Deliberately across ALL users, not just the uploader: an admin replacing a
+    format must not silently break another account's highlights.
+
+    Fails CLOSED. If the annotation store cannot be read, this returns True and
+    the upload is merely normalized rather than split -- the outcome users had
+    before splitting existed, which is the safe side of the trade.
+    """
+    try:
+        return ub.session.query(ub.Annotation).filter(
+            ub.Annotation.book_id == book_id).first() is not None
+    except Exception:
+        log.exception(
+            "Could not check annotations for book %s; not splitting its KEPUB", book_id)
+        return True
+
+
 def upload_book_formats(requested_files, book, book_id, no_cover=True):
     # Check and handle Uploaded file
     to_save = dict()
@@ -2064,13 +2089,23 @@ def upload_book_formats(requested_files, book, book_id, no_cover=True):
                 # would keep its fragment-anchored TOC targets forever and a
                 # Kobo would file every highlight in those chapters under an id
                 # no spine row carries (#1715, same defect as #1657).
-                # This is a new-book boundary, so it explicitly opts into spine
-                # splitting. Existing-library repair keeps the default disabled.
+                #
                 # normalize_kepub_package logs and returns None on any failure,
                 # leaving the archive untouched -- storing an un-normalized
                 # KEPUB is strictly better than refusing the upload, which is
                 # the same trade-off convert.py makes.
-                normalize_kepub_package(saved_filename, split_chapters=True)
+                #
+                # Splitting is opted into only when the book carries no
+                # annotations. This route is reached from EDIT BOOK, so
+                # `book_id` can be a book that has been in the library for
+                # years: a split renames its spine documents, and a Kobo matches
+                # its stored Bookmark rows by ContentID, so it would keep the
+                # rows, rewrite each ContentID to the bare old filename, render
+                # nothing, and report "no annotations" for a book the reader had
+                # highlighted. Normalization alone never renames a document,
+                # which is why it stays unconditional and this does not.
+                normalize_kepub_package(
+                    saved_filename, split_chapters=not _book_has_annotations(book_id))
 
             # AFTER normalization: it rewrites the archive, so measuring first
             # would record a stale size in the Calibre data row.

@@ -79,7 +79,8 @@ class _Upload:
             dst.write(src.read())
 
 
-def _drive_upload(monkeypatch, tmp_path, filename, *, splittable=False):
+def _drive_upload(monkeypatch, tmp_path, filename, *, splittable=False,
+                  annotations=0):
     """Run the real upload_book_formats with fake collaborators."""
     from cps import editbooks
 
@@ -138,6 +139,23 @@ def _drive_upload(monkeypatch, tmp_path, filename, *, splittable=False):
     monkeypatch.setattr(editbooks, "TaskUpload", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(editbooks.uploader, "process", lambda *a, **k: None, raising=False)
     monkeypatch.setattr(editbooks, "merge_metadata", lambda *a, **k: None, raising=False)
+
+    # `_book_has_annotations` decides whether this upload may be split. It fails
+    # CLOSED, so without a working annotation store every upload would silently
+    # take the no-split path and the split assertions below would pass for the
+    # wrong reason.
+    class _AnnotationQuery:
+        def filter(self, *_args, **_kwargs):
+            return self
+
+        def first(self):
+            return object() if annotations else None
+
+    class _UbSession:
+        def query(self, _model):
+            return _AnnotationQuery()
+
+    monkeypatch.setattr(editbooks.ub, "session", _UbSession(), raising=False)
 
     editbooks.upload_book_formats([_Upload(source, filename)], _Book(), 1)
 
@@ -199,3 +217,75 @@ def test_non_kepub_upload_is_untouched(monkeypatch, tmp_path):
     assert stored.exists()
     assert _ncx_sources(str(stored)) == ["chapter.xhtml#top"], (
         "a non-KEPUB upload must be stored byte-for-byte as supplied")
+
+
+def test_an_uploaded_kepub_is_not_split_when_the_book_already_has_annotations(
+        monkeypatch, tmp_path):
+    """This route is reached from EDIT BOOK, so the book can be years old.
+
+    Splitting renames spine documents. A Kobo matches its stored Bookmark rows
+    by ContentID, so it keeps the rows, rewrites each ContentID to the bare old
+    filename, renders nothing, and reports "no annotations" for a book the
+    reader had highlighted. Normalization alone never renames a document, so it
+    still runs -- only the split is withheld.
+    """
+    stored, _recorded = _drive_upload(
+        monkeypatch, tmp_path, "incoming.kepub", splittable=True, annotations=1)
+
+    assert stored.exists(), "the upload must still be stored"
+    assert _ncx_sources(str(stored)) == ["chapter.xhtml#one", "chapter.xhtml#two"], (
+        "an annotated book's KEPUB was split; every existing highlight in it "
+        "would stop rendering on the device")
+
+
+def test_the_annotation_check_fails_closed(monkeypatch, tmp_path):
+    """If the annotation store cannot be read, do not split.
+
+    The unsafe direction is splitting a book that turns out to have highlights,
+    so an unreadable store must produce the pre-split behaviour, not the
+    optimistic one.
+    """
+    from cps import editbooks
+
+    class _ExplodingSession:
+        def query(self, _model):
+            raise RuntimeError("annotation store unavailable")
+
+    monkeypatch.setattr(editbooks.ub, "session", _ExplodingSession(), raising=False)
+    assert editbooks._book_has_annotations(1) is True
+
+
+def test_the_annotation_check_looks_past_the_uploading_user(monkeypatch):
+    """An admin replacing a format must not silently break someone else's highlights.
+
+    Executed rather than pinned to source text: capture the criteria the query is
+    actually filtered by and read them, so the test fails if a `user_id` filter
+    is added no matter how it is spelled.
+    """
+    from cps import editbooks, ub
+
+    captured = []
+
+    class _Query:
+        def filter(self, *criteria):
+            captured.extend(criteria)
+            return self
+
+        def first(self):
+            return None
+
+    class _Session:
+        def query(self, model):
+            assert model is ub.Annotation, model
+            return _Query()
+
+    monkeypatch.setattr(editbooks.ub, "session", _Session(), raising=False)
+    assert editbooks._book_has_annotations(7) is False
+
+    rendered = " ".join(str(criterion) for criterion in captured)
+    assert captured, "the check ran no filter at all; it would report every book annotated"
+    assert "annotation.book_id" in rendered, rendered
+    assert "user_id" not in rendered, (
+        "the annotation check is filtered by user; an admin replacing a format "
+        "would then split a book another account has highlighted: " + rendered
+    )

@@ -592,3 +592,155 @@ def test_validator_guards_run_on_the_temporary_file_before_the_original_moves(
 
     assert _split(book) is True
     assert book.read_bytes() != before
+
+
+# ---------------------------------------------------------------------------
+# Hostile packages.
+#
+# A KEPUB reaching the splitter can be one a user uploaded, so the archive's own
+# paths are untrusted input. The splitter never extracts to disk -- it reads
+# members in memory, writes a temporary archive beside the target and os.replace()s
+# it -- so classic zip-slip does not apply. What remains is whether a crafted OPF
+# or TOC can make it address something outside the archive, or overwrite a member
+# it was not asked to touch.
+#
+# These were run as one-off probes first and are kept because the answers are the
+# security posture, not a detail of today's implementation.
+# ---------------------------------------------------------------------------
+
+
+def _book_with_toc_targets(tmp_path, targets, extra=None, name="hostile.kepub"):
+    """A minimal splittable package whose TOC points wherever the caller says."""
+    book = _book(tmp_path)
+    replacement = _ncx(targets)
+    with zipfile.ZipFile(book) as archive:
+        contents = {info.filename: archive.read(info) for info in archive.infolist()}
+        infos = archive.infolist()
+    hostile = tmp_path / name
+    with zipfile.ZipFile(hostile, "w") as archive:
+        for info in infos:
+            data = contents[info.filename]
+            if info.filename.endswith("toc.ncx"):
+                data = replacement
+            archive.writestr(info, data)
+        for member, data in (extra or {}).items():
+            archive.writestr(member, data)
+    return hostile
+
+
+#: A hostile target paired with two REAL fragments on a real member. Without the
+#: pairing these cases do not discriminate: if the containment check is removed
+#: the hostile target is simply skipped, the document stops being a split
+#: candidate, and `_split` returns False for a completely different reason —
+#: which is what the first version of these tests actually measured. With a
+#: genuine candidate present the split can proceed, so the assertions below see
+#: what containment is really preventing.
+_REAL_FRAGMENTS = ["chapter.xhtml#ch1", "chapter.xhtml#ch2"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("hostile, why", [
+    ("../../../../etc/passwd#ch1", "relative traversal out of the archive"),
+    ("/etc/passwd#ch1", "absolute path"),
+    ("chapter.xhtml/../../../../etc/passwd#ch1", "traversal behind a real member name"),
+    ("file:///etc/passwd#ch1", "absolute file: URL"),
+    ("//evil.example/passwd#ch1", "protocol-relative URL"),
+])
+def test_a_hostile_toc_target_never_escapes_the_archive(tmp_path, hostile, why):
+    """The security property, asserted directly rather than via the mechanism.
+
+    Whether the splitter REFUSES the package or ignores the hostile entry, the
+    invariant that matters is the same: nothing is addressed or written outside
+    the archive, and a refusal leaves the user's file exactly as it was.
+    """
+    book = _book_with_toc_targets(tmp_path, _REAL_FRAGMENTS + [hostile])
+    before = book.read_bytes()
+    siblings_before = sorted(child.name for child in tmp_path.iterdir())
+
+    result = _split(book)
+    assert result in (True, False, None), why
+
+    with zipfile.ZipFile(book) as archive:
+        names = archive.namelist()
+    escaping = [
+        name for name in names
+        if name.startswith("/") or ".." in name.split("/") or ":" in name.split("/")[0]
+    ]
+    assert escaping == [], (why, escaping)
+
+    if result is not True:
+        assert book.read_bytes() == before, why
+    assert _leftover_temporaries(book) == []
+    assert sorted(child.name for child in tmp_path.iterdir()) == siblings_before, (
+        "the splitter created something beside the book: %s" % why)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("hostile", [
+    "../../../../etc/passwd#ch1",
+    "/etc/passwd#ch1",
+])
+def test_a_hostile_target_beside_real_ones_refuses_the_whole_package(tmp_path, hostile):
+    """And it refuses rather than splitting around the hostile entry.
+
+    This is the assertion that dies if the containment check is swallowed: with
+    two real fragments present the package IS a split candidate, so dropping the
+    hostile target silently would produce a rewritten archive. Refusing the
+    whole package is the documented contract -- anything not provably
+    reference-safe leaves the file untouched.
+    """
+    book = _book_with_toc_targets(tmp_path, _REAL_FRAGMENTS + [hostile])
+    before = book.read_bytes()
+
+    assert _split(book) is False
+    assert book.read_bytes() == before
+
+
+@pytest.mark.unit
+def test_no_member_can_be_written_outside_the_archive(tmp_path):
+    """Whatever the TOC claims, every member name stays inside the package."""
+    book = _book_with_toc_targets(
+        tmp_path, ["chapter.xhtml#ch1", "chapter.xhtml#ch2"])
+    assert _split(book) is True
+
+    with zipfile.ZipFile(book) as archive:
+        names = archive.namelist()
+    assert names, "the archive lost every member"
+    escaping = [
+        name for name in names
+        if name.startswith("/") or ".." in name.split("/") or ":" in name.split("/")[0]
+    ]
+    assert escaping == [], escaping
+
+
+@pytest.mark.unit
+def test_a_piece_name_collision_never_overwrites_the_existing_member(tmp_path):
+    """The obvious way to lose data here is to name a piece over something real.
+
+    A package can already contain `chapter-split-1.xhtml` -- most easily because
+    it was split once before by an older build. Its bytes must survive, and the
+    new pieces must take the next free names.
+    """
+    book = _book_with_toc_targets(
+        tmp_path, ["chapter.xhtml#ch1", "chapter.xhtml#ch2"],
+        extra={"OPS/chapter-split-1.xhtml": b"PRE-EXISTING"})
+
+    assert _split(book) is True
+
+    with zipfile.ZipFile(book) as archive:
+        contents = {name: archive.read(name) for name in archive.namelist()}
+    assert contents["OPS/chapter-split-1.xhtml"] == b"PRE-EXISTING", (
+        "the splitter overwrote a member it was not asked to touch")
+    assert "OPS/chapter-split-2.xhtml" in contents
+    assert "OPS/chapter-split-3.xhtml" in contents
+
+
+@pytest.mark.unit
+def test_a_hostile_package_leaves_no_temporary_file_behind(tmp_path):
+    """A refusal must not litter the library directory with .spine-split.tmp files."""
+    book = _book_with_toc_targets(
+        tmp_path, ["/etc/passwd#ch1", "/etc/passwd#ch2"])
+    assert _split(book) is False
+    assert _leftover_temporaries(book) == []
+    assert sorted(child.name for child in tmp_path.iterdir()) == sorted(
+        {book.name, "book.kepub"}), sorted(child.name for child in tmp_path.iterdir())
