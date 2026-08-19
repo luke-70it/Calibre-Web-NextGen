@@ -20,6 +20,7 @@ from flask_babel import lazy_gettext as N_
 
 from cps.services.worker import CalibreTask
 from cps import db
+from cps import ub
 from cps import logger, config
 from cps.subproc_wrapper import process_open, stream_process_output
 from flask_babel import gettext as _
@@ -237,6 +238,41 @@ class TaskConvert(CalibreTask):
         self._handleError(error_message)
         return
 
+    def _book_has_annotations(self):
+        """True when any user holds a highlight or note against this book.
+
+        Conversion targets a book already in the library, so this task can be
+        asked to regenerate the KEPUB of something that has been read and
+        highlighted. Splitting renames spine documents; every stored annotation
+        is anchored to the document it was made in (Kobo `ContentID`, web-reader
+        `cfi_range`, KOReader position), so renaming strands them. Normalization
+        never renames anything, which is why only the split is withheld.
+
+        Uses `ub.init_db_thread()` rather than the global `ub.session`: this runs
+        on a worker thread, and the global session belongs to the web request
+        (see cps/tasks/annotation_sync.py).
+
+        Fails CLOSED. If the annotation store cannot be read this reports True and
+        the package is merely normalized -- the behaviour before splitting
+        existed, which is the safe side.
+        """
+        session = None
+        try:
+            session = ub.init_db_thread()
+            return session.query(ub.Annotation).filter(
+                ub.Annotation.book_id == self.book_id).first() is not None
+        except Exception:
+            log.exception(
+                "Could not check annotations for book %s; not splitting its KEPUB",
+                self.book_id)
+            return True
+        finally:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
     def _convert_kepubify(self, file_path, format_old_ext, format_new_ext):
         if config.config_embed_metadata and config.config_binariesdir:
             tmp_dir, temp_file_name = helper.do_calibre_export(self.book_id, format_old_ext[1:])
@@ -304,7 +340,9 @@ class TaskConvert(CalibreTask):
                     # (upstream calibre-web #1484). The normalizer already logs a
                     # warning, leaves the archive untouched, and _valid_archive
                     # below still rejects a genuinely corrupt one.
-                    normalize_kepub_package(temp_destination, split_chapters=True)
+                    normalize_kepub_package(
+                        temp_destination,
+                        split_chapters=not self._book_has_annotations())
                     if not _valid_archive(temp_destination, format_new_ext[1:]):
                         return 1, N_("Kepubify produced an invalid KEPUB archive")
                     os.replace(temp_destination, destination)

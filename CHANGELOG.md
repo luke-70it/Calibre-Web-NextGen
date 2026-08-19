@@ -28,9 +28,10 @@ is for things you can see or feel when running the app.
   one file per chapter, so highlights attach where you make them. Measured on a
   41-book library: chapters that could not hold a highlight fell from 301 to 46,
   and books with at least one such chapter from 32 to 11 — Pride and Prejudice
-  went from 47 unreachable chapters to none. **Books already in your library are
-  deliberately left alone**, because changing an existing book's chapter files
-  would break the highlights you already have in it.
+  went from 47 unreachable chapters to none. **A book you have already
+  highlighted is deliberately left alone** — changing its chapter files would
+  stop those highlights showing on your device — so this applies to books added
+  from now on, and to converting or re-uploading a book nobody has annotated.
 - **Asking your system to reduce motion now stops every spinning icon in the new
   UI, not just some of them.** The app has seven loading spinners; four stopped
   when you turned on "reduce motion" and three kept spinning — including the
