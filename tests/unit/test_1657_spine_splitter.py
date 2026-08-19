@@ -983,3 +983,193 @@ def test_an_unreadable_package_answers_the_conservative_way(tmp_path):
     broken.write_bytes(b"not a zip at all")
     assert package_was_split_by_us(broken) is False
     assert package_was_split_by_us(tmp_path / "does-not-exist.kepub") is False
+
+
+# ---------------------------------------------------------------------------
+# Split fan-out bounds.
+#
+# The byte bounds this module inherits from the normalizer cap the INPUT, and
+# they were written for a REWRITE — their own docstring says they exist because
+# "this implementation temporarily holds the source members, rewritten members,
+# output ZIP and validation members at the same time". A SPLIT is a FAN-OUT, so
+# an input-side bound stops bounding the peak: every boundary carries its own
+# copy of the document shell.
+#
+# MEASURED before the cap existed: a 14.9 KB upload with 1000 anchors and a
+# 180 KB shell reached 348 MiB of allocation — past the 256 MiB the module
+# declares — and 8000 anchors burned 185 seconds of CPU. Both run inline in the
+# Flask request handler, on a gevent server where one busy greenlet blocks every
+# other request, and the auto-ingest path opts in unconditionally for anything
+# dropped in a watched folder.
+#
+# After the cap, the same inputs are refused in well under a second and a few
+# MiB. The largest fan-out in the 41-book reference library is ELEVEN fragments
+# in one document, so a 512-piece cap has ~46x headroom over the worst real book
+# while stopping the attack.
+# ---------------------------------------------------------------------------
+
+
+def _fanout_book(tmp_path, anchors, head_bytes=100):
+    """A package whose TOC points `anchors` times into one small document."""
+    filler = "<!--" + ("x" * max(0, head_bytes)) + "-->"
+    paragraphs = "".join(
+        '<p id="p{i}"><span class="koboSpan" id="kobo.{i}.1">t</span></p>'.format(i=i)
+        for i in range(anchors))
+    chapter = (
+        '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml">'
+        '<head><title>t</title>' + filler + '</head><body>'
+        '<div id="book-columns"><div id="book-inner">' + paragraphs +
+        '</div></div></body></html>').encode()
+    points = "".join(
+        '<navPoint id="n{i}"><navLabel><text>{i}</text></navLabel>'
+        '<content src="chapter.xhtml#p{i}"/></navPoint>'.format(i=i)
+        for i in range(anchors))
+    # `co_varnames` includes LOCALS, not just parameters, so a cleverer probe for
+    # an optional `name=` argument silently passed a kwarg _book does not take.
+    # Each caller gets its own tmp_path, so one fixed name is enough.
+    book = _book(tmp_path)
+    with zipfile.ZipFile(book) as archive:
+        infos = archive.infolist()
+        contents = {info.filename: archive.read(info) for info in infos}
+    with zipfile.ZipFile(book, "w") as archive:
+        for info in infos:
+            data = contents[info.filename]
+            if info.filename.endswith("chapter.xhtml"):
+                data = chapter
+            elif info.filename.endswith("toc.ncx"):
+                data = ('<?xml version="1.0"?>'
+                        '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"><navMap>'
+                        + points + '</navMap></ncx>').encode()
+            archive.writestr(info, data)
+    return book
+
+
+@pytest.mark.unit
+def test_an_absurd_fragment_count_is_refused_not_split(tmp_path):
+    from cps.services.kepub_spine_splitter import MAX_SPLIT_PIECES
+
+    book = _fanout_book(tmp_path, anchors=MAX_SPLIT_PIECES + 50)
+    before = book.read_bytes()
+
+    assert _split(book) is False
+    assert book.read_bytes() == before
+    assert _leftover_temporaries(book) == []
+
+
+@pytest.mark.unit
+def test_a_large_shell_times_many_pieces_is_refused_before_allocating(tmp_path):
+    """The piece COUNT alone is not the danger — it is count x shell.
+
+    This case is comfortably under the piece cap and still over the byte budget,
+    so it is the test that fails if only the count check exists.
+    """
+    from cps.services.kepub_spine_splitter import (
+        MAX_SPLIT_PEAK_BYTES, MAX_SPLIT_PIECES,
+    )
+
+    anchors = 400
+    assert anchors < MAX_SPLIT_PIECES, "this case must not be caught by the count cap"
+    head = (MAX_SPLIT_PEAK_BYTES // anchors) + 4096
+
+    book = _fanout_book(tmp_path, anchors=anchors, head_bytes=head)
+    before = book.read_bytes()
+
+    assert _split(book) is False
+    assert book.read_bytes() == before
+
+
+@pytest.mark.unit
+def test_the_refusal_is_cheap(tmp_path):
+    """Refusing must not cost what doing it would have.
+
+    A guard that still allocates the pieces before rejecting them fixes nothing;
+    the whole point is that the budget is checked BEFORE the first copy.
+    """
+    import tracemalloc
+
+    from cps.services.kepub_spine_splitter import MAX_SPLIT_PEAK_BYTES
+
+    book = _fanout_book(tmp_path, anchors=400, head_bytes=(MAX_SPLIT_PEAK_BYTES // 400) + 4096)
+
+    tracemalloc.start()
+    try:
+        assert _split(book) is False
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+    assert peak < MAX_SPLIT_PEAK_BYTES // 2, (
+        "refusing allocated {:.1f} MiB — the budget is being checked after the "
+        "pieces are built, not before".format(peak / 1048576))
+
+
+@pytest.mark.unit
+def test_a_normal_book_is_nowhere_near_the_cap(tmp_path):
+    """Vacuity guard, and the regression guard for real books.
+
+    The three tests above would all pass if the cap were set to 1 and nothing
+    ever split. The largest fan-out in the reference library is 11 fragments in
+    one document; this pins that an ordinary book still splits.
+    """
+    from cps.services.kepub_spine_splitter import MAX_SPLIT_PIECES
+
+    assert MAX_SPLIT_PIECES >= 128, "the cap has been set below any plausible book"
+    book = _book(tmp_path)
+    assert _split(book) is True
+
+
+@pytest.mark.unit
+def test_one_hostile_document_does_not_deny_the_split_to_the_rest(tmp_path):
+    """Dropping the candidate, not failing the package.
+
+    A book could carry one pathological document beside good ones. Refusing the
+    whole package would let a single bad document deny the fix to every chapter
+    in the book.
+    """
+    from cps.services import kepub_spine_splitter as module
+
+    targets = [
+        {"fragment": "f{}".format(i), "resolved": "OPS/huge.xhtml"}
+        for i in range(module.MAX_SPLIT_PIECES + 10)
+    ] + [
+        {"fragment": "a", "resolved": "OPS/fine.xhtml"},
+        {"fragment": "b", "resolved": "OPS/fine.xhtml"},
+    ]
+    candidates = module._split_candidates(targets)
+
+    assert "OPS/huge.xhtml" not in candidates
+    assert "OPS/fine.xhtml" in candidates
+
+
+@pytest.mark.unit
+def test_unique_id_does_not_restart_its_search_each_time(tmp_path):
+    """The O(N^2) that made 2000 pieces cost two million str.format calls.
+
+    Asserted through the cursor rather than by timing, so it cannot flake on a
+    loaded machine.
+    """
+    from cps.services.kepub_spine_splitter import _unique_id
+
+    occupied, cursor = {"id"}, {}
+    first = _unique_id("id", occupied, cursor)
+    assert first == "id-1"
+    after_first = cursor["id"]
+
+    for _ in range(50):
+        _unique_id("id", occupied, cursor)
+
+    assert cursor["id"] > after_first, "the cursor never advanced"
+    assert cursor["id"] <= 60, "the search is restarting from 1 each call"
+
+
+@pytest.mark.unit
+def test_the_id_cursor_does_not_leak_between_packages(tmp_path):
+    """It is passed in, not module-global.
+
+    A global would grow one entry per distinct id for the life of the process and
+    let one book's ids influence the next.
+    """
+    from cps.services import kepub_spine_splitter as module
+
+    assert not hasattr(module, "_UNIQUE_ID_CURSOR"), (
+        "the id cursor is module-global again; it must be scoped to one package")

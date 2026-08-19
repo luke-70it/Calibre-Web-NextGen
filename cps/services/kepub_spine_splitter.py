@@ -50,6 +50,26 @@ _CLOSE_ELEMENT_NAME_RE = re.compile(
 _KOBO_SPAN_CLASS = re.compile(rb"(?:^|\s)koboSpan(?:\s|$)")
 
 
+#: A real book has tens of chapters in one file, not thousands. The byte bounds
+#: inherited from the normalizer cap the INPUT, and they were written for a
+#: rewrite — "this implementation temporarily holds the source members, rewritten
+#: members, output ZIP and validation members at the same time". A SPLIT is a
+#: fan-out, not a rewrite, so an input-side bound stops bounding the peak: every
+#: boundary gets its own copy of the document shell.
+#:
+#: MEASURED on this branch before the cap existed: a 14.9 KB upload with 1000
+#: anchors and a 180 KB shell reached 348 MiB of allocation — past the 256 MiB
+#: the module declares — and 8000 anchors burned 185 seconds of CPU inside the
+#: Flask request handler, on a gevent server where one busy greenlet blocks every
+#: other request. The same files with splitting off: 0.29 s and 10.7 MiB.
+MAX_SPLIT_PIECES = 512
+
+#: Ceiling on what a single document's split may allocate. Each piece carries the
+#: whole shell, so the cost is (pieces × shell) and neither factor is bounded on
+#: its own. Checked BEFORE any piece is built.
+MAX_SPLIT_PEAK_BYTES = 64 * 1024 * 1024
+
+
 class _UnsafeSplit(ValueError):
     """A valid package whose split cannot be proven reference-safe."""
 
@@ -100,12 +120,28 @@ def _unique_piece_names(source, count, occupied):
     return names
 
 
-def _unique_id(base, occupied):
-    suffix = 1
-    candidate = base
-    while candidate in occupied:
+def _unique_id(base, occupied, cursor):
+    """Allocate `base`, or `base-1`, `base-2`, ... , recording where it got to.
+
+    `cursor` carries the search position per base ACROSS calls. Without it the
+    scan restarts at 1 every time, which is O(N^2) in the number of pieces — two
+    million str.format calls at 2000 pieces, measured with cProfile.
+
+    It is passed in rather than kept module-global on purpose: a global would
+    grow one entry per distinct id for the life of the process, which is a slow
+    leak on a long-running server, and would let one book's ids influence the
+    next.
+    """
+    if base not in occupied:
+        occupied.add(base)
+        return base
+    suffix = cursor.get(base, 1)
+    while True:
         candidate = "{}-{}".format(base, suffix)
         suffix += 1
+        if candidate not in occupied:
+            break
+    cursor[base] = suffix
     occupied.add(candidate)
     return candidate
 
@@ -334,6 +370,18 @@ def _partition_document(source, boundaries, container_bounds):
     container_start, container_inner_start, container_inner_end, container_end = container_bounds
     prefix = source[:container_inner_start]
     suffix = source[container_inner_end:]
+
+    # Every piece carries the whole shell, so the peak is (pieces x shell) and
+    # neither factor is bounded on its own: a small archive with many anchors and
+    # a large <head> multiplies into hundreds of megabytes. Refused here, before
+    # the first copy is allocated, rather than discovered after the archive has
+    # been built and written.
+    projected = len(boundaries) * (len(prefix) + len(suffix))
+    if len(boundaries) > MAX_SPLIT_PIECES or projected > MAX_SPLIT_PEAK_BYTES:
+        raise _UnsafeSplit(
+            "split would allocate {} bytes across {} pieces, over the "
+            "{}-byte / {}-piece budget".format(
+                projected, len(boundaries), MAX_SPLIT_PEAK_BYTES, MAX_SPLIT_PIECES))
     starts = [container_inner_start] + boundaries[1:]
     ends = boundaries[1:] + [container_inner_end]
     pieces = [prefix + source[start:end] + suffix for start, end in zip(starts, ends)]
@@ -526,7 +574,21 @@ def _split_candidates(targets):
     for target in targets:
         if target["fragment"]:
             fragments.setdefault(target["resolved"], set()).add(target["fragment"])
-    return {document: values for document, values in fragments.items() if len(values) >= 2}
+    # An absurd fragment count is the fan-out attack, not a book. Dropping the
+    # document leaves it unsplit — the behaviour before this feature — rather than
+    # failing the whole package, so one hostile document cannot deny the split to
+    # the rest of a legitimate book.
+    candidates = {}
+    for document, values in fragments.items():
+        if len(values) < 2:
+            continue
+        if len(values) > MAX_SPLIT_PIECES:
+            log.info(
+                "KEPUB spine split skipped for %s: %d TOC fragments exceed the "
+                "%d-piece cap", document, len(values), MAX_SPLIT_PIECES)
+            continue
+        candidates[document] = values
+    return candidates
 
 
 def _manifest_and_spine(package, opf_path):
@@ -612,11 +674,13 @@ def _plan_splits(archive, opf_path, opf_bytes, candidates, archive_names):
             "fragment_pieces": fragment_pieces,
         }
 
+    # Scoped to this package, so nothing survives into the next one.
+    id_cursor = {}
     for plan in plans.values():
         item = plan["manifest_item"]
         itemref = plan["itemref"]
         piece_ids = [plan["manifest_id"]] + [
-            _unique_id(plan["manifest_id"] + "-split", occupied_ids)
+            _unique_id(plan["manifest_id"] + "-split", occupied_ids, id_cursor)
             for _piece in plan["piece_names"][1:]
         ]
         for index, (piece_name, piece_id) in enumerate(zip(plan["piece_names"], piece_ids)):
