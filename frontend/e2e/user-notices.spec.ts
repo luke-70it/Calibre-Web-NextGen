@@ -99,9 +99,9 @@ test('book detail presents and independently dismisses its book-scoped occurrenc
   });
 
   await page.goto(`/app/book/${book!.id}`);
-  await expect(page.getByText('This book was repaired after it had already been sent to a Kobo.')).toBeVisible();
+  await expect(page.getByText('We repaired this book for your Kobo.', { exact: false })).toBeVisible();
   await page.getByRole('button', { name: 'Dismiss permanently' }).click();
 
-  await expect(page.getByText('This book was repaired after it had already been sent to a Kobo.')).toHaveCount(0);
+  await expect(page.getByText('We repaired this book for your Kobo.', { exact: false })).toHaveCount(0);
   expect(dismissedId).toBe(201);
 });
