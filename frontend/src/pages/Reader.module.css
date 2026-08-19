@@ -53,6 +53,7 @@
    HelpBanner.module.css `.arrow` for the measurement. */
 .spin { display: inline-flex; animation: spin 0.9s linear infinite; color: var(--accent); }
 @keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
 
 .exitLink {
   color: var(--accent);
