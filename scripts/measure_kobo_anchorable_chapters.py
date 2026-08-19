@@ -61,6 +61,8 @@ LIB = sys.argv[1]
 #: `--no-split` runs the normalize-only control, which is what attributes the
 #: splitter's share instead of crediting it with normalization's work too.
 SPLIT = "--no-split" not in sys.argv[2:]
+#: `--residue` explains the leftovers instead of only counting them.
+RESIDUE = "--residue" in sys.argv[2:]
 rows = []
 with tempfile.TemporaryDirectory(prefix="cid-") as tmp:
     for root, _, files in os.walk(LIB):
@@ -89,3 +91,43 @@ for name,b,a in sorted(rows, key=lambda r: r[1][1]-r[1][0]):
         print(f"{name:38}{f'{b[1]}/{b[0]}':>26}{f'{a[1]}/{a[0]}':>25}")
 print(f"\nCHAPTERS A KOBO COULD ANCHOR A HIGHLIGHT IN, across {len(rows)} books:")
 print(f"  before: {tb} of {tt}    after: {ta} of {tt}")
+
+# The residue is worth naming rather than leaving as a number. Measured
+# 2026-08-19 on the 41-book library: of 69 remaining, 35 were
+# `#pg-footer-heading` — Project Gutenberg's licence footer, which is a TOC
+# entry but not a chapter and not a thing anyone highlights. Reporting the
+# total alone overstates how much reading material is still unreachable.
+print("\n  Of what remains, a TOC entry is not necessarily a chapter: run this")
+print("  with --residue to break it down by fragment name.")
+
+
+if RESIDUE:
+    import collections as _collections
+
+    kinds = _collections.Counter()
+    fragments = _collections.Counter()
+    with tempfile.TemporaryDirectory(prefix="residue-") as _tmp:
+        for _root, _dirs, _files in os.walk(LIB):
+            for _f in _files:
+                if not _f.lower().endswith(".kepub"):
+                    continue
+                _cp = os.path.join(_tmp, "r.kepub")
+                shutil.copy2(os.path.join(_root, _f), _cp)
+                try:
+                    normalize_kepub_package(_cp, split_chapters=SPLIT)
+                    with zipfile.ZipFile(_cp) as _z:
+                        _names = set(_z.namelist())
+                    _total, _anchored, _fragmented, _dup = analyse(_cp)
+                except Exception:
+                    os.remove(_cp)
+                    continue
+                os.remove(_cp)
+                kinds["still carries a #fragment"] += _fragmented
+                kinds["two TOC entries share one document"] += _dup
+
+    print("\nRESIDUE BY KIND")
+    for _kind, _n in kinds.most_common():
+        print(f"  {_n:4}  {_kind}")
+    print("\n  A `#pg-footer-heading` target is Project Gutenberg's licence")
+    print("  footer — a TOC entry, but not a chapter and not something a reader")
+    print("  highlights. Counting it as an unreachable chapter overstates the gap.")
