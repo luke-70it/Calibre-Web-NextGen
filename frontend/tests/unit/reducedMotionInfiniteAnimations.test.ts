@@ -12,10 +12,29 @@
  *
  * The house rule, already followed by the four that were correct, is
  * `animation: none` under the reduce query. This suite pins that rule to the
- * POPULATION rather than to today's file list: it derives every class carrying
+ * POPULATION rather than to today's file list: it derives the classes carrying
  * an infinite animation by scanning the modules, and fails if any one of them
- * lacks an off-switch. A spinner added next year with no reduce block fails
- * here without anyone remembering this finding existed.
+ * lacks an off-switch. A spinner added later in the same shape as today's
+ * fails here without anyone remembering this finding existed.
+ *
+ * WHAT IT DOES NOT CATCH, stated plainly so the green is not read as more than
+ * it is. These are text scanners, not a CSS parser, and each gap below was
+ * probed against the real scanner rather than reasoned about:
+ *   - Longhand form. `animation-name` + `animation-iteration-count: infinite`
+ *     is invisible to the infinite scanner. No module uses longhand today, so
+ *     this is a future hole, not a present miss.
+ *   - Compound or mixed selector groups. `.a, .b:hover { animation: … infinite }`
+ *     and `.parent .spinner { … }` are skipped: the selector regex accepts only
+ *     plain `.class` lists. Every animated rule in the codebase today is a plain
+ *     class, which is why the population below is still complete.
+ *   - Conditional off-switches. A rule nested inside `@supports` or a second
+ *     `@media` INSIDE the reduce block counts as an off-switch even when its
+ *     condition is false, and `@media not all and (prefers-reduced-motion: reduce)`
+ *     counts even though it never applies. Deciding those needs query
+ *     evaluation, not text matching.
+ * A stricter gate would need a real CSS parser, which the frontend deliberately
+ * does not ship (no test framework either — see test_frontend_unit_suites_run.py).
+ * The trade is recorded here so the next person can make it deliberately.
  *
  * Deliberately a static CSS analysis, not a browser test. `prefers-reduced-motion`
  * is an OS-level setting; asserting on the stylesheet is the cheap, deterministic
@@ -47,9 +66,11 @@ const decomment = (css: string) => css.replace(/\/\*[\s\S]*?\*\//g, '');
 /**
  * Classes whose rule body declares an infinite animation.
  *
- * Matches `.name { … animation: … infinite … }`. Only class selectors are
- * considered: an infinite animation on a bare element or a keyframes block is
- * not something a module can switch off by class, and none exist today.
+ * Matches `.name { … animation: … infinite … }` in the SHORTHAND form only,
+ * and only when every selector in the group is a plain class. A compound or
+ * descendant selector (`.a:hover`, `.parent .spin`) or a longhand
+ * `animation-iteration-count: infinite` is not seen — see the header for why
+ * that is acceptable against today's population and what it costs.
  */
 function infiniteAnimationClasses(css: string): Set<string> {
   const found = new Set<string>();
@@ -111,7 +132,7 @@ describe('reduced motion covers every infinite animation', () => {
     assert.ok(total > 0, 'no infinite animations found at all -- the scanner is broken');
   });
 
-  test('every class with an infinite animation is switched off under reduced motion', () => {
+  test('every class the scanner sees with an infinite animation is switched off', () => {
     const offenders: string[] = [];
     for (const file of MODULES) {
       const css = readFileSync(file, 'utf8');
@@ -142,6 +163,51 @@ describe('reduced motion covers every infinite animation', () => {
       assert.ok(infiniteAnimationClasses(css).has(cls), `${rel} .${cls} no longer animates`);
       assert.ok(reducedMotionOffSwitches(css).has(cls), `${rel} .${cls} has no reduced-motion off-switch`);
     }
+  });
+});
+
+describe('the population stays inside what the scanner can see', () => {
+  // The scanners above are text matchers with known blind spots (see header).
+  // Documenting a blind spot does not protect anyone; these two tests fail the
+  // moment the codebase enters one, which is what makes the population claim
+  // above true rather than merely believed.
+
+  test('no module declares an infinite animation in longhand', () => {
+    const offenders: string[] = [];
+    for (const file of MODULES) {
+      const css = decomment(readFileSync(file, 'utf8'));
+      if (/animation-iteration-count\s*:\s*infinite/.test(css)) {
+        offenders.push(relative(SRC, file));
+      }
+    }
+    assert.deepEqual(
+      offenders, [],
+      'longhand `animation-iteration-count: infinite` is invisible to the ' +
+      'infinite-animation scanner, so these modules would pass the gate above ' +
+      'while animating forever:\n  ' + offenders.join('\n  '));
+  });
+
+  test('no infinite animation sits on a selector the scanner cannot read', () => {
+    // Find every rule body carrying an infinite shorthand, whatever its selector,
+    // then require that selector to be a plain class list -- the only shape
+    // infiniteAnimationClasses() understands.
+    const offenders: string[] = [];
+    const ANY_RULE = /([^{}]+)\{([^{}]*)\}/g;
+    for (const file of MODULES) {
+      const css = decomment(readFileSync(file, 'utf8'));
+      for (const m of css.matchAll(ANY_RULE)) {
+        const [, selectors, declarations] = m;
+        if (!/\banimation\b\s*:[^;]*\binfinite\b/.test(declarations)) continue;
+        const sel = selectors.split('}').pop()!.trim();
+        if (!sel || sel.startsWith('@')) continue;
+        const plain = sel.split(',').every((one) => /^\s*\.[A-Za-z_][\w-]*\s*$/.test(one));
+        if (!plain) offenders.push(`${relative(SRC, file)}  ${sel.replace(/\s+/g, ' ')}`);
+      }
+    }
+    assert.deepEqual(
+      offenders, [],
+      'these rules animate forever on a selector the scanner skips, so the ' +
+      'gate above would not see them:\n  ' + offenders.join('\n  '));
   });
 });
 
