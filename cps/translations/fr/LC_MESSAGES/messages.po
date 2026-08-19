@@ -3882,23 +3882,6 @@ msgid "{count} notices dismissed permanently."
 msgstr "{count} avis masqués définitivement."
 
 #: cps/spa_strings.py
-#, python-brace-format
-msgid ""
-"CWNG repaired {count} books previously sent to your Kobo. Older highlights "
-"may still need to be recreated on the device."
-msgstr ""
-"CWNG a réparé {count} livres précédemment envoyés à votre Kobo. Il faudra "
-"peut-être recréer les anciens surlignages sur l’appareil."
-
-#: cps/spa_strings.py
-msgid ""
-"CWNG repaired a book previously sent to your Kobo. Older highlights may "
-"still need to be recreated on the device."
-msgstr ""
-"CWNG a réparé un livre précédemment envoyé à votre Kobo. Il faudra peut-être "
-"recréer les anciens surlignages sur l’appareil."
-
-#: cps/spa_strings.py
 msgid "There is new information about your library."
 msgstr ""
 "De nouvelles informations concernant votre bibliothèque sont disponibles."
@@ -3911,16 +3894,6 @@ msgstr "Masquer définitivement les {count} avis"
 #: cps/spa_strings.py
 msgid "Dismiss all"
 msgstr "Tout masquer"
-
-#: cps/spa_strings.py
-msgid ""
-"This book was repaired after it had already been sent to a Kobo. Download "
-"the updated book; highlights created before the repair may remain invisible "
-"and may need to be recreated."
-msgstr ""
-"Ce livre a été réparé après avoir déjà été envoyé à une Kobo. Téléchargez le "
-"livre mis à jour ; les surlignages créés avant la réparation peuvent rester "
-"invisibles et devoir être recréés."
 
 #: cps/spa_strings.py
 msgid "There is new information about this book."
@@ -6432,6 +6405,45 @@ msgstr "En attente de votre autorisation…"
 #: cps/spa_strings.py
 msgid "Warning: this highlight can’t be shown in the book"
 msgstr "Avertissement : ce surlignage ne peut pas être affiché dans le livre"
+
+#: cps/spa_strings.py
+msgid ""
+"We repaired this book for your Kobo. If you were having trouble "
+"highlighting, try again after your next sync. Highlights you made before the "
+"repair may still not appear, and may need to be made again."
+msgstr ""
+"Nous avons réparé ce livre pour votre Kobo. Si vous aviez des difficultés "
+"à surligner, réessayez après votre prochaine synchronisation. Les "
+"surlignages créés avant la réparation peuvent ne toujours pas apparaître "
+"et devront peut-être être recréés."
+
+
+#: cps/spa_strings.py
+msgid ""
+"We repaired this book for your Kobo. If you were having trouble "
+"highlighting, try again after your next sync. If you read it some other way, "
+"download it again to get the repaired copy. Highlights you made before the "
+"repair may still not appear, and may need to be made again."
+msgstr ""
+"Nous avons réparé ce livre pour votre Kobo. Si vous aviez des difficultés "
+"à surligner, réessayez après votre prochaine synchronisation. Si vous le "
+"lisez d’une autre manière, téléchargez-le à nouveau pour obtenir la copie "
+"réparée. Les surlignages créés avant la réparation peuvent ne toujours pas "
+"apparaître et devront peut-être être recréés."
+
+
+#: cps/spa_strings.py
+#, python-brace-format
+msgid ""
+"We repaired {count} books for your Kobo. If you were having trouble "
+"highlighting, try again after your next sync. Highlights you made before the "
+"repair may still not appear, and may need to be made again."
+msgstr ""
+"Nous avons réparé {count} livres pour votre Kobo. Si vous aviez des "
+"difficultés à surligner, réessayez après votre prochaine synchronisation. "
+"Les surlignages créés avant la réparation peuvent ne toujours pas "
+"apparaître et devront peut-être être recréés."
+
 
 #: cps/spa_strings.py
 msgid "Web reader"
@@ -9715,9 +9727,9 @@ msgid ""
 "\">kindle-epub-fix.netlify.app</a> tool made by <a href=\"https://github.com/"
 "innocenat\">innocenat</a>."
 msgstr ""
-"Cet outil a été adapté à partir de l'outil <a href=\"https://kindle-epub-fix."
-"netlify.app/\">kindle-epub-fix.netlify.app</a> créé par <a href=\"https://"
-"github.com/innocenat\">innocenat</a>."
+"Cet outil a été adapté à partir de l'outil <a href=\"https://kindle-epub-"
+"fix.netlify.app/\">kindle-epub-fix.netlify.app</a> créé par <a "
+"href=\"https://github.com/innocenat\">innocenat</a>."
 
 #: cps/templates/cwa_settings.html
 msgid "Enable KOReader Sync (NextGen Plugin)"
@@ -13157,6 +13169,30 @@ msgstr "Synchroniser les étagères sélectionnées avec Kobo"
 #: cps/templates/user_table.html
 msgid "Show Read/Unread Section"
 msgstr "Afficher la section Lu / Non lu"
+
+#, python-brace-format
+#~ msgid ""
+#~ "CWNG repaired {count} books previously sent to your Kobo. Older "
+#~ "highlights may still need to be recreated on the device."
+#~ msgstr ""
+#~ "CWNG a réparé {count} livres précédemment envoyés à votre Kobo. Il faudra "
+#~ "peut-être recréer les anciens surlignages sur l’appareil."
+
+#~ msgid ""
+#~ "CWNG repaired a book previously sent to your Kobo. Older highlights may "
+#~ "still need to be recreated on the device."
+#~ msgstr ""
+#~ "CWNG a réparé un livre précédemment envoyé à votre Kobo. Il faudra peut-"
+#~ "être recréer les anciens surlignages sur l’appareil."
+
+#~ msgid ""
+#~ "This book was repaired after it had already been sent to a Kobo. Download "
+#~ "the updated book; highlights created before the repair may remain "
+#~ "invisible and may need to be recreated."
+#~ msgstr ""
+#~ "Ce livre a été réparé après avoir déjà été envoyé à une Kobo. Téléchargez "
+#~ "le livre mis à jour ; les surlignages créés avant la réparation peuvent "
+#~ "rester invisibles et devoir être recréés."
 
 #~ msgid "Could not load highlights."
 #~ msgstr "Impossible de charger les surlignages."

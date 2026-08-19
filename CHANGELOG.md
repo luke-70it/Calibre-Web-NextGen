@@ -18,6 +18,12 @@ is for things you can see or feel when running the app.
 
 ### Fixed
 
+- **The notice you get after CWNG repairs a Kobo book now tells you what to do
+  about it.** It used to say the app had "repaired a book previously sent to your
+  Kobo" and that "older highlights may still need to be recreated" — accurate, but
+  it never said the thing that actually helps: sync, then try highlighting again.
+  It now leads with that. The version shown on a book's own page also tells you to
+  download the book again if you read it somewhere other than a Kobo.
 - **Container updates and restarts no longer spend the entire shutdown grace
   period frozen before being killed.** The ingest watcher installed a graceful
   shutdown handler but then blocked in a foreground polling or filesystem-watch

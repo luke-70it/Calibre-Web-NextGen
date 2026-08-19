@@ -59,7 +59,7 @@ test('aggregates repaired books and permanently bulk-dismisses explicit occurren
   });
 
   await page.goto('/app');
-  await expect(page.getByText('CWNG repaired 2 books previously sent to your Kobo.')).toBeVisible();
+  await expect(page.getByText('We repaired 2 books for your Kobo.', { exact: false })).toBeVisible();
   const accessibility = await new AxeBuilder({ page }).analyze();
   expect(accessibility.violations.filter(
     (violation) => violation.impact === 'critical' || violation.impact === 'serious',
