@@ -4,8 +4,14 @@
   "created": "2026-08-18",
   "id": "F-7d206e",
   "refs": [],
+  "resolution": {
+    "commit": "202b88422",
+    "date": "2026-08-19",
+    "note": "",
+    "release": ""
+  },
   "severity": "ux",
   "source": "audit",
-  "status": "open",
+  "status": "resolved",
   "title": "SPA loading spinners: 4 of 7 honour prefers-reduced-motion, 3 do not (incl. the shared Spinner)"
 }
