@@ -2034,6 +2034,36 @@ def _book_has_annotations(book_id):
         return True
 
 
+def _package_was_split_by_us(path):
+    """Thin indirection so tests can drive the decision without a real archive."""
+    from .services.kepub_spine_splitter import package_was_split_by_us
+
+    return package_was_split_by_us(path)
+
+
+def _may_split_replacement(book_id, replacing_a_split_package):
+    """Whether a replacement KEPUB for this book may be split.
+
+    A book with no annotations is always safe to split — there is nothing to
+    strand. When it HAS annotations the answer turns on what is already stored,
+    because piece naming is deterministic (F-bbd10e):
+
+      * stored package ALREADY SPLIT -> split. A replacement from the same source
+        re-splits to the same names, so splitting preserves an annotation
+        anchored to `X-split-2.xhtml`, while withholding it deletes the file that
+        anchor names. A replacement from a different edition breaks those anchors
+        either way, so splitting is never worse here.
+      * stored package NOT split -> do not split. Splitting would rename the
+        documents its existing annotations are anchored to.
+
+    An earlier version of this guard withheld the split whenever annotations
+    existed, which is right for the second case and causes the first case's harm.
+    """
+    if not _book_has_annotations(book_id):
+        return True
+    return bool(replacing_a_split_package)
+
+
 def upload_book_formats(requested_files, book, book_id, no_cover=True):
     # Check and handle Uploaded file
     to_save = dict()
@@ -2076,6 +2106,12 @@ def upload_book_formats(requested_files, book, book_id, no_cover=True):
                           category="error")
                     error = True
                     continue
+            # Asked BEFORE the save, because the save overwrites the evidence.
+            # See _may_split_replacement for why the answer decides the split.
+            replacing_a_split_package = (
+                file_ext == "kepub" and os.path.exists(saved_filename)
+                and _package_was_split_by_us(saved_filename))
+
             try:
                 requested_file.save(saved_filename)
             except OSError:
@@ -2105,7 +2141,9 @@ def upload_book_formats(requested_files, book, book_id, no_cover=True):
                 # highlighted. Normalization alone never renames a document,
                 # which is why it stays unconditional and this does not.
                 normalize_kepub_package(
-                    saved_filename, split_chapters=not _book_has_annotations(book_id))
+                    saved_filename,
+                    split_chapters=_may_split_replacement(
+                        book_id, replacing_a_split_package))
 
             # AFTER normalization: it rewrites the archive, so measuring first
             # would record a stale size in the Calibre data row.

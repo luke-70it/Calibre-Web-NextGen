@@ -857,3 +857,50 @@ def split_multichapter_documents(path):
                 os.unlink(temporary_path)
             except OSError:
                 pass
+
+
+#: The shape `_unique_piece_names` gives a piece. Exposed so a caller can ask
+#: "did WE split this package?" without duplicating the pattern.
+_PIECE_NAME_RE = re.compile(rb"-split-\d+$")
+
+
+def package_was_split_by_us(path):
+    """True when this package's SPINE contains documents our splitter produced.
+
+    Answers one question and one only: is re-splitting a replacement for this
+    package the anchor-preserving choice?
+
+    It matters because piece naming is deterministic (see
+    tests/unit/test_split_piece_names_are_deterministic.py). So when the stored
+    package is already split:
+
+      * a replacement built from the same source re-splits to the SAME names, so
+        splitting PRESERVES an annotation anchored to `X-split-2.xhtml` while
+        withholding the split deletes the file that anchor names;
+      * a replacement built from a different edition breaks those anchors
+        whatever we do.
+
+    Splitting is therefore never worse than withholding it for an
+    already-split package, and strictly better in the common case. When the
+    stored package was NOT split the reverse holds, which is why the caller
+    still withholds the split there.
+
+    Deliberately checks the SPINE rather than merely scanning member names: a
+    file called `chapter-split-1.xhtml` that no itemref references proves
+    nothing, and a false positive here re-introduces exactly the harm the
+    caller's guard exists to prevent. Any failure to read the package answers
+    False — the conservative direction.
+    """
+    try:
+        with zipfile.ZipFile(path) as archive:
+            opf_path = _package_document_path(archive)
+            opf_bytes = _read_bounded_member(
+                archive, opf_path, MAX_PACKAGE_DOCUMENT_BYTES, "package document")
+            for href in _spine_paths(opf_path, opf_bytes):
+                stem = posixpath.splitext(posixpath.basename(href))[0]
+                if _PIECE_NAME_RE.search(stem.encode("utf-8")):
+                    return True
+    except Exception:
+        log.info("Could not inspect %s for existing spine splits", path)
+        return False
+    return False

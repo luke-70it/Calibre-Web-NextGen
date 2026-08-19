@@ -80,7 +80,7 @@ class _Upload:
 
 
 def _drive_upload(monkeypatch, tmp_path, filename, *, splittable=False,
-                  annotations=0):
+                  annotations=0, pre_existing=False):
     """Run the real upload_book_formats with fake collaborators."""
     from cps import editbooks
 
@@ -156,6 +156,13 @@ def _drive_upload(monkeypatch, tmp_path, filename, *, splittable=False,
             return _AnnotationQuery()
 
     monkeypatch.setattr(editbooks.ub, "session", _UbSession(), raising=False)
+
+    if pre_existing:
+        # The replacement case needs something already stored, or the
+        # "was it already split" question is never even asked.
+        stored_dir = library / "Author" / "Book (1)"
+        stored_dir.mkdir(parents=True, exist_ok=True)
+        (stored_dir / ("Book (1)." + filename.rsplit('.', 1)[-1])).write_bytes(b"old")
 
     editbooks.upload_book_formats([_Upload(source, filename)], _Book(), 1)
 
@@ -289,3 +296,59 @@ def test_the_annotation_check_looks_past_the_uploading_user(monkeypatch):
         "the annotation check is filtered by user; an admin replacing a format "
         "would then split a book another account has highlighted: " + rendered
     )
+
+
+def test_an_annotated_book_that_was_ALREADY_split_is_split_again(monkeypatch, tmp_path):
+    """F-bbd10e: withholding the split is the wrong answer for a book born split.
+
+    Piece naming is deterministic, so re-splitting a replacement built from the
+    same source reproduces the exact member names its annotations are anchored
+    to. Withholding the split instead DELETES those files. The earlier guard —
+    "never split an annotated book" — got this case backwards.
+    """
+    from cps import editbooks
+
+    # Pretend the package already on disk carries our split pieces in its spine.
+    monkeypatch.setattr(editbooks, "_package_was_split_by_us", lambda _p: True,
+                        raising=False)
+
+    stored, _recorded = _drive_upload(
+        monkeypatch, tmp_path, "incoming.kepub", splittable=True, annotations=1,
+        pre_existing=True)
+
+    assert _ncx_sources(str(stored)) == [
+        "chapter-split-1.xhtml",
+        "chapter-split-2.xhtml",
+    ], "an already-split annotated book was left unsplit, stranding its anchors"
+
+
+def test_an_annotated_book_that_was_NOT_split_is_still_left_alone(monkeypatch, tmp_path):
+    """The original case, which must not regress while fixing the inversion."""
+    from cps import editbooks
+
+    monkeypatch.setattr(editbooks, "_package_was_split_by_us", lambda _p: False,
+                        raising=False)
+
+    stored, _recorded = _drive_upload(
+        monkeypatch, tmp_path, "incoming.kepub", splittable=True, annotations=1,
+        pre_existing=True)
+
+    assert _ncx_sources(str(stored)) == ["chapter.xhtml#one", "chapter.xhtml#two"], (
+        "a book that was never split had its spine renamed underneath its "
+        "existing highlights"
+    )
+
+
+def test_the_decision_rule_itself(monkeypatch):
+    """Both inputs, all four combinations, without driving an upload."""
+    from cps import editbooks
+
+    monkeypatch.setattr(editbooks, "_book_has_annotations", lambda _b: False,
+                        raising=False)
+    assert editbooks._may_split_replacement(1, False) is True
+    assert editbooks._may_split_replacement(1, True) is True
+
+    monkeypatch.setattr(editbooks, "_book_has_annotations", lambda _b: True,
+                        raising=False)
+    assert editbooks._may_split_replacement(1, False) is False
+    assert editbooks._may_split_replacement(1, True) is True

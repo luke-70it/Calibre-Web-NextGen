@@ -943,3 +943,43 @@ def test_a_hostile_package_leaves_no_temporary_file_behind(tmp_path):
     assert _leftover_temporaries(book) == []
     assert sorted(child.name for child in tmp_path.iterdir()) == sorted(
         {book.name, "book.kepub"}), sorted(child.name for child in tmp_path.iterdir())
+
+
+@pytest.mark.unit
+def test_package_was_split_by_us_recognises_our_own_output(tmp_path):
+    """The signal the replacement rule (F-bbd10e) turns on.
+
+    False before, True after — the detector has to change its answer for the
+    rule to mean anything.
+    """
+    from cps.services.kepub_spine_splitter import package_was_split_by_us
+
+    book = _book(tmp_path)
+    assert package_was_split_by_us(book) is False
+    assert _split(book) is True
+    assert package_was_split_by_us(book) is True
+
+
+@pytest.mark.unit
+def test_a_split_looking_member_outside_the_spine_does_not_count(tmp_path):
+    """Name-sniffing alone would be a false positive, and a false positive here
+    re-introduces exactly the harm the caller's guard prevents: it would split an
+    annotated book that was never split. Only the SPINE counts."""
+    from cps.services.kepub_spine_splitter import package_was_split_by_us
+
+    book = _book(tmp_path)
+    with zipfile.ZipFile(book, "a") as archive:
+        archive.writestr("OPS/decoy-split-1.xhtml", b"<html/>")
+
+    assert package_was_split_by_us(book) is False
+
+
+@pytest.mark.unit
+def test_an_unreadable_package_answers_the_conservative_way(tmp_path):
+    """False means "do not split an annotated book", which is the safe side."""
+    from cps.services.kepub_spine_splitter import package_was_split_by_us
+
+    broken = tmp_path / "broken.kepub"
+    broken.write_bytes(b"not a zip at all")
+    assert package_was_split_by_us(broken) is False
+    assert package_was_split_by_us(tmp_path / "does-not-exist.kepub") is False

@@ -340,9 +340,22 @@ class TaskConvert(CalibreTask):
                     # (upstream calibre-web #1484). The normalizer already logs a
                     # warning, leaves the archive untouched, and _valid_archive
                     # below still rejects a genuinely corrupt one.
+                    # `destination` is still the OLD package at this point —
+                    # os.replace below is what swaps it — so it can be asked
+                    # whether it was already split. Same rule as the upload path
+                    # (F-bbd10e): an annotated book may be re-split only when the
+                    # stored package was already split, because piece naming is
+                    # deterministic and a re-split then reproduces the very names
+                    # its annotations are anchored to.
+                    from cps.services.kepub_spine_splitter import (
+                        package_was_split_by_us,
+                    )
+
+                    may_split = not self._book_has_annotations() or (
+                        os.path.exists(destination)
+                        and package_was_split_by_us(destination))
                     normalize_kepub_package(
-                        temp_destination,
-                        split_chapters=not self._book_has_annotations())
+                        temp_destination, split_chapters=may_split)
                     if not _valid_archive(temp_destination, format_new_ext[1:]):
                         return 1, N_("Kepubify produced an invalid KEPUB archive")
                     os.replace(temp_destination, destination)

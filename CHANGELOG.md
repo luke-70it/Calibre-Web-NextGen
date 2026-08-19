@@ -31,8 +31,9 @@ is for things you can see or feel when running the app.
   and 1584 with chapter splitting on top — so this change is worth about 392 more
   chapters, and 96% of chapters in that library can now hold a highlight. **A book you have already
   highlighted is deliberately left alone** — changing its chapter files would
-  stop those highlights showing on your device — so this applies to books added
-  from now on, and to converting or re-uploading a book nobody has annotated.
+  stop those highlights showing on your device — unless it was already stored
+  chapter-by-chapter, in which case re-uploading or re-converting it keeps the
+  same chapter files and your highlights keep working.
 - **Highlight colours synced through the KOReader plugin were wrong, and on a
   black-and-white Kobo every highlight came back yellow.** The plugin used a
   colour table that had blue and green the wrong way round, called Kobo's pink
