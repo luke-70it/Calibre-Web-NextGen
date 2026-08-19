@@ -24,6 +24,20 @@ is for things you can see or feel when running the app.
   it never said the thing that actually helps: sync, then try highlighting again.
   It now leads with that. The version shown on a book's own page also tells you to
   download the book again if you read it somewhere other than a Kobo.
+- **Highlight colours synced through the KOReader plugin were wrong, and on a
+  black-and-white Kobo every highlight came back yellow.** The plugin used a
+  colour table that had blue and green the wrong way round, called Kobo's pink
+  "red" (a Kobo cannot store red at all), and had no entry for grey — which is
+  the colour a greyscale reader like the Clara BW records for *every* highlight
+  you make, so all of them arrived as yellow. The table now matches what the
+  device actually stores, measured on hardware, and the server and plugin are
+  checked against each other so they cannot drift apart again.
+- **Asking your system to reduce motion now stops every spinning icon in the new
+  UI, not just some of them.** The app has seven loading spinners; four stopped
+  when you turned on "reduce motion" and three kept spinning — including the
+  shared one used on more screens than any other, so the same page could show a
+  still spinner in one place and a spinning one in another. All seven now follow
+  the same rule. Nothing changes if you have not asked for reduced motion.
 - **Container updates and restarts no longer spend the entire shutdown grace
   period frozen before being killed.** The ingest watcher installed a graceful
   shutdown handler but then blocked in a foreground polling or filesystem-watch
