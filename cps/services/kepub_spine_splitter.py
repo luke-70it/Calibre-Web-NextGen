@@ -235,6 +235,66 @@ def _container_bounds(source, container, elements, ranges):
     raise _UnsafeSplit("split container closing tag cannot be matched safely")
 
 
+def _project_anchor(anchor, container):
+    """Return the direct child of *container* containing *anchor*."""
+    cut = anchor
+    while cut.getparent() is not container:
+        cut = cut.getparent()
+        if cut is None:
+            raise _UnsafeSplit("TOC anchor is not below its split container")
+    return cut
+
+
+def _descended_cut_plan(source, container, bounds, anchors, elements, ranges):
+    """Prove and plan the single supported nested-anchor descent.
+
+    The ordinary NCA projection may collapse every target onto one child.  We
+    descend into that child only when it is itself exactly one TOC target and
+    the original container contains no content outside it.  The outer target
+    then owns the bytes before the first nested boundary.
+    """
+    children = {
+        _project_anchor(anchor, container) for anchor in anchors.values()
+    }
+    if len(children) != 1:
+        return None
+    descended_container = next(iter(children))
+    if sum(anchor is descended_container for anchor in anchors.values()) != 1:
+        return None
+    nested_anchors = {
+        fragment: anchor for fragment, anchor in anchors.items()
+        if anchor is not descended_container
+    }
+    if not nested_anchors or any(
+            descended_container not in anchor.iterancestors()
+            for anchor in nested_anchors.values()):
+        return None
+
+    descended_bounds = _container_bounds(
+        source, descended_container, elements, ranges)
+    _container_start, container_inner_start, container_inner_end, _container_end = bounds
+    descended_start, descended_inner_start, _descended_inner_end, descended_end = (
+        descended_bounds)
+    # Prefix/suffix slicing repeats everything outside the selected container.
+    # Permit that only for whitespace inside the original NCA; elements,
+    # comments, text, and other meaningful bytes make descent unsafe.
+    if (source[container_inner_start:descended_start].strip()
+            or source[descended_end:container_inner_end].strip()):
+        return None
+
+    nested_cuts = {
+        ranges[elements.index(_project_anchor(anchor, descended_container))][0]
+        for anchor in nested_anchors.values()
+    }
+    # This is deliberately one level only.  If the nested targets still
+    # collapse into one child, arbitrary recursive shell construction would be
+    # required and the document remains in its current graceful grouping.
+    if len(nested_cuts) < 2 or min(nested_cuts) <= descended_inner_start:
+        return None
+    boundaries = [descended_inner_start, *sorted(nested_cuts)]
+    return descended_bounds, boundaries
+
+
 def _anchor_cut_plan(source, document, fragments, elements, ranges):
     body = _body_element(document)
     anchors = {}
@@ -255,17 +315,18 @@ def _anchor_cut_plan(source, document, fragments, elements, ranges):
     if container is not body and body not in container.iterancestors():
         raise _UnsafeSplit("TOC anchor common ancestor is outside the content body")
     bounds = _container_bounds(source, container, elements, ranges)
-    cut_positions = {}
     anchor_positions = {}
+    cut_positions = {}
     for fragment, anchor in anchors.items():
         anchor_positions[fragment] = ranges[elements.index(anchor)][0]
-        cut = anchor
-        while cut.getparent() is not container:
-            cut = cut.getparent()
-            if cut is None:
-                raise _UnsafeSplit("TOC anchor is not below its common ancestor")
+        cut = _project_anchor(anchor, container)
         cut_positions[fragment] = ranges[elements.index(cut)][0]
     boundaries = sorted(set(cut_positions.values()))
+    if len(boundaries) == 1:
+        descended = _descended_cut_plan(
+            source, container, bounds, anchors, elements, ranges)
+        if descended is not None:
+            bounds, boundaries = descended
     return bounds, boundaries, anchor_positions
 
 
@@ -297,7 +358,16 @@ def _piece_for_position(boundaries, position):
     return max(0, bisect_right(boundaries, position) - 1)
 
 
-def _fragment_piece_map(document, elements, ranges, boundaries, piece_names):
+def _prefer_explicit_anchor_pieces(
+        mapping, anchor_positions, boundaries, piece_names):
+    """Make explicit TOC anchors authoritative over copied shell ids."""
+    for fragment, position in anchor_positions.items():
+        mapping[fragment] = piece_names[_piece_for_position(boundaries, position)]
+    return mapping
+
+
+def _fragment_piece_map(
+        document, elements, ranges, boundaries, piece_names, anchor_positions):
     mapping = {}
     for element, (position, _end) in zip(elements, ranges):
         piece = piece_names[_piece_for_position(boundaries, position)]
@@ -307,7 +377,12 @@ def _fragment_piece_map(document, elements, ranges, boundaries, piece_names):
                 prior = mapping.setdefault(fragment, piece)
                 if prior != piece:
                     raise _UnsafeSplit("fragment identity occurs in multiple pieces")
-    return mapping
+    # A descended container is copied into every piece as lexical shell, so its
+    # id is physically repeated.  Explicit TOC anchors are authoritative and
+    # are applied last: the outer anchor's original position deliberately owns
+    # piece one and cannot be overwritten by a repeated shell id.
+    return _prefer_explicit_anchor_pieces(
+        mapping, anchor_positions, boundaries, piece_names)
 
 
 def _replacement_for_reference(value, document_path, split_plans):
@@ -524,7 +599,7 @@ def _plan_splits(archive, opf_path, opf_bytes, candidates, archive_names):
         piece_names = _unique_piece_names(document_path, len(boundaries), occupied_names)
         pieces = _partition_document(source, boundaries, container_bounds)
         fragment_pieces = _fragment_piece_map(
-            document, elements, ranges, boundaries, piece_names)
+            document, elements, ranges, boundaries, piece_names, anchor_positions)
         plans[document_path] = {
             "source": source,
             "manifest_id": item_id,

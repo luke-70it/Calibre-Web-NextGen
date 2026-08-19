@@ -36,6 +36,24 @@ def _chapter(span_ids=("kobo.1.1", "kobo.1.2", "kobo.2.1", "kobo.2.2")):
     ).format(*span_ids).encode()
 
 
+def _nested_anchor_chapter():
+    """The measured Gutenberg shape: an outer TOC div owns nested chapters."""
+    return (
+        b'<?xml version="1.0"?>\n'
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Book</title></head>'
+        b'<body class="calibre"><div id="book-columns"><div id="book-inner">\n'
+        b'<div id="ch1" class="outer-chapter">'
+        b'<h2><span  data-kept="outer" class="lead koboSpan" '
+        b'id="kobo.10.1">Outer introduction</span></h2>\n'
+        b'<h3 id="ch2"><span class="koboSpan" id="kobo.11.1">Nested one</span></h3>'
+        b'<p><a href="#ch1"><span class="koboSpan" id="kobo.11.2">outer</span></a></p>\n'
+        b'<h3 id="ch3"><span id="kobo.12.1" class="tail koboSpan">Nested two</span>'
+        b'</h3><p>Last nested chapter.</p>'
+        b'</div>\n'
+        b'</div></div></body></html>'
+    )
+
+
 def _ncx(targets):
     points = "".join(
         '<navPoint id="n{}"><navLabel><text>{}</text></navLabel>'
@@ -81,7 +99,7 @@ def _book(tmp_path, *, targets=("chapter.xhtml#ch1", "chapter.xhtml#ch2"),
     return path
 
 
-def _add_following_document(book, following):
+def _add_spine_document(book, member, item_id, document_content):
     with zipfile.ZipFile(book) as archive:
         members = [(info, archive.read(info)) for info in archive.infolist()]
     package_index = next(
@@ -90,15 +108,19 @@ def _add_following_document(book, following):
     package_info, package = members[package_index]
     package = package.replace(
         b"</manifest>",
-        b'<item id="following" href="following.xhtml" '
-        b'media-type="application/xhtml+xml"/></manifest>',
+        ('<item id="{}" href="{}" media-type="application/xhtml+xml"/>'
+         '</manifest>').format(item_id, member).encode(),
     ).replace(
-        b"</spine>", b'<itemref idref="following"/></spine>')
+        b"</spine>", '<itemref idref="{}"/></spine>'.format(item_id).encode())
     members[package_index] = package_info, package
     with zipfile.ZipFile(book, "w") as archive:
-        for info, content in members:
-            archive.writestr(info, content)
-        archive.writestr("OPS/following.xhtml", following)
+        for info, member_content in members:
+            archive.writestr(info, member_content)
+        archive.writestr("OPS/" + member, document_content)
+
+
+def _add_following_document(book, following):
+    _add_spine_document(book, "following.xhtml", "following", following)
 
 
 def _split(path):
@@ -228,6 +250,183 @@ def test_shared_cut_element_keeps_anchors_together_without_aborting_other_splits
     assert b'id="ch1"' in first and b'id="ch1b"' in first
     assert b'id="ch2"' not in first
     assert b'id="ch2"' in second
+
+
+@pytest.mark.unit
+def test_descends_once_when_an_outer_toc_anchor_owns_nested_chapters(tmp_path):
+    book = _book(
+        tmp_path,
+        targets=("chapter.xhtml#ch1", "chapter.xhtml#ch2", "chapter.xhtml#ch3"),
+        chapter=_nested_anchor_chapter(),
+    )
+
+    assert _split(book) is True
+
+    contents, _manifest, spine, targets = _package_state(book)
+    assert spine == ["chapter", "chapter-split", "chapter-split-1"]
+    assert targets == [
+        "chapter-split-1.xhtml",
+        "chapter-split-2.xhtml",
+        "chapter-split-3.xhtml",
+    ]
+    pieces = [contents["OPS/chapter-split-{}.xhtml".format(index)] for index in range(1, 4)]
+    assert all(piece.count(b'id="ch1"') == 1 for piece in pieces)
+    assert b"Outer introduction" in pieces[0]
+    assert b'id="ch2"' not in pieces[0]
+    assert b'id="ch2"' in pieces[1] and b'id="ch3"' not in pieces[1]
+    assert b'id="ch3"' in pieces[2]
+
+
+@pytest.mark.unit
+def test_descended_outer_anchor_explicitly_keeps_piece_one(tmp_path):
+    book = _book(
+        tmp_path,
+        targets=("chapter.xhtml#ch1", "chapter.xhtml#ch2", "chapter.xhtml#ch3"),
+        chapter=_nested_anchor_chapter(),
+    )
+    following = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+        b'<a href="chapter.xhtml#ch1">Outer chapter</a></body></html>')
+    _add_following_document(book, following)
+
+    assert _split(book) is True
+
+    contents, _manifest, _spine, targets = _package_state(book)
+    assert targets[0] == "chapter-split-1.xhtml"
+    assert b'href="chapter-split-1.xhtml#ch1"' in contents["OPS/following.xhtml"]
+    assert b'href="chapter-split-1.xhtml#ch1"' in contents["OPS/chapter-split-2.xhtml"]
+
+
+@pytest.mark.unit
+def test_explicit_anchor_mapping_overrides_a_repeated_shell_identity():
+    from cps.services.kepub_spine_splitter import _prefer_explicit_anchor_pieces
+
+    # Simulate generic discovery seeing the copied outer shell in the last
+    # piece.  The explicit TOC target's original position must win afterward.
+    mapping = {"ch1": "chapter-split-3.xhtml", "ch3": "chapter-split-3.xhtml"}
+    result = _prefer_explicit_anchor_pieces(
+        mapping,
+        {"ch1": 10, "ch2": 110, "ch3": 210},
+        [50, 100, 200],
+        [
+            "chapter-split-1.xhtml",
+            "chapter-split-2.xhtml",
+            "chapter-split-3.xhtml",
+        ],
+    )
+
+    assert result == {
+        "ch1": "chapter-split-1.xhtml",
+        "ch2": "chapter-split-2.xhtml",
+        "ch3": "chapter-split-3.xhtml",
+    }
+
+
+@pytest.mark.unit
+def test_multiple_outer_targets_do_not_descend_but_other_boundary_still_splits(tmp_path):
+    outer = (
+        b'<div id="ch1" name="ch1-alias"><h2>Outer</h2>'
+        b'<h3 id="ch2"><span class="koboSpan" id="kobo.2.1">nested</span></h3>'
+        b'</div>')
+    chapter = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body><div id="book-columns">'
+        b'<div id="book-inner">' + outer +
+        b'<section id="ch4"><span class="koboSpan" id="kobo.4.1">real split</span>'
+        b'</section></div></div></body></html>')
+    book = _book(
+        tmp_path,
+        targets=(
+            "chapter.xhtml#ch1",
+            "chapter.xhtml#ch1-alias",
+            "chapter.xhtml#ch2",
+            "chapter.xhtml#ch4",
+        ),
+        chapter=chapter,
+    )
+
+    assert _split(book) is True
+
+    contents, _manifest, spine, targets = _package_state(book)
+    assert spine == ["chapter", "chapter-split"]
+    assert targets == [
+        "chapter-split-1.xhtml",
+        "chapter-split-1.xhtml",
+        "chapter-split-1.xhtml",
+        "chapter-split-2.xhtml",
+    ]
+    assert outer in contents["OPS/chapter-split-1.xhtml"]
+    assert b'id="ch4"' in contents["OPS/chapter-split-2.xhtml"]
+
+
+@pytest.mark.unit
+def test_meaningful_content_outside_descent_container_is_not_duplicated(tmp_path):
+    nested = (
+        b'<html xmlns="http://www.w3.org/1999/xhtml"><body><div id="book-columns">'
+        b'<div id="book-inner"><p>Meaningful sibling content</p>'
+        b'<div id="outer"><h2>Outer</h2>'
+        b'<h3 id="nested-1"><span class="koboSpan" id="kobo.8.1">one</span></h3>'
+        b'<h3 id="nested-2"><span class="koboSpan" id="kobo.8.2">two</span></h3>'
+        b'</div></div></div></body></html>')
+    book = _book(
+        tmp_path,
+        targets=(
+            "chapter.xhtml#ch1",
+            "chapter.xhtml#ch2",
+            "nested.xhtml#outer",
+            "nested.xhtml#nested-1",
+            "nested.xhtml#nested-2",
+        ),
+    )
+    _add_spine_document(book, "nested.xhtml", "nested", nested)
+
+    # The ordinary chapter proves planning and writing actually proceed; the
+    # unsafe nested candidate must remain byte-exact instead of being copied
+    # around each descended piece.
+    assert _split(book) is True
+
+    contents, _manifest, spine, targets = _package_state(book)
+    assert spine == ["chapter", "chapter-split", "nested"]
+    assert contents["OPS/nested.xhtml"] == nested
+    assert contents["OPS/nested.xhtml"].count(b"Meaningful sibling content") == 1
+    assert targets == [
+        "chapter-split-1.xhtml",
+        "chapter-split-2.xhtml",
+        "nested.xhtml#outer",
+        "nested.xhtml#nested-1",
+        "nested.xhtml#nested-2",
+    ]
+
+
+@pytest.mark.unit
+def test_descent_preserves_every_kobo_span_lexeme_byte_exact(tmp_path):
+    book = _book(
+        tmp_path,
+        targets=("chapter.xhtml#ch1", "chapter.xhtml#ch2", "chapter.xhtml#ch3"),
+        chapter=_nested_anchor_chapter(),
+    )
+    with zipfile.ZipFile(book) as archive:
+        before = _kobo_span_lexemes([archive.read(name) for name in archive.namelist()])
+
+    assert _split(book) is True
+
+    with zipfile.ZipFile(book) as archive:
+        after = _kobo_span_lexemes([archive.read(name) for name in archive.namelist()])
+    assert len(before) == 4
+    assert after == before
+
+
+@pytest.mark.unit
+def test_second_call_after_descent_is_a_byte_identical_noop(tmp_path):
+    book = _book(
+        tmp_path,
+        targets=("chapter.xhtml#ch1", "chapter.xhtml#ch2", "chapter.xhtml#ch3"),
+        chapter=_nested_anchor_chapter(),
+    )
+    assert _split(book) is True
+    after_first = book.read_bytes()
+
+    assert _split(book) is False
+    assert book.read_bytes() == after_first
 
 
 @pytest.mark.unit

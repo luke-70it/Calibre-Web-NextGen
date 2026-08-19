@@ -28,8 +28,8 @@ is for things you can see or feel when running the app.
   one file per chapter, so highlights attach where you make them. Measured on a
   41-book library, counting the chapters a Kobo could actually attach a highlight
   to: 13 of 1653 before any of this work, 1192 once the existing repair had run,
-  and 1549 with chapter splitting on top — so this change is worth about 357 more
-  chapters, and 94% of chapters in that library can now hold a highlight. **A book you have already
+  and 1584 with chapter splitting on top — so this change is worth about 392 more
+  chapters, and 96% of chapters in that library can now hold a highlight. **A book you have already
   highlighted is deliberately left alone** — changing its chapter files would
   stop those highlights showing on your device — so this applies to books added
   from now on, and to converting or re-uploading a book nobody has annotated.
