@@ -224,3 +224,35 @@ class TestTheDeviceReadPath:
         (cmd, _kwargs), = captured
         assert "just-the-password" in cmd
         assert "root@10.0.0.9" in cmd
+
+
+def test_the_device_path_cannot_smuggle_a_command(monkeypatch):
+    """`--device-path` is interpolated into a string a SHELL on the device runs.
+
+    Unquoted, a path containing `;` would execute on the Kobo — which breaks the
+    one promise this script makes, that every device command is a read. Found by
+    asking the question the review gate asks about anything touching subprocess.
+    """
+    module = _module()
+    monkeypatch.setenv("SECRET", "pw")
+    captured = []
+
+    class _Result:
+        stdout, stderr, returncode = "", "", 0
+
+    def run(cmd, **kwargs):
+        captured.append(kwargs.get("input", ""))
+        return _Result()
+
+    monkeypatch.setattr(module.subprocess, "run", run)
+
+    module.read_device_file(
+        "10.0.0.9", "/mnt/onboard/x.epub; rm -rf /mnt/onboard", dry_run=False)
+
+    sent, = captured
+    quoted = "'/mnt/onboard/x.epub; rm -rf /mnt/onboard'"
+    assert quoted in sent, sent
+    # The payload appearing INSIDE the quotes is harmless — that is the point of
+    # quoting. What must not exist is an unquoted occurrence, which would start a
+    # second command. Strip the quoted form and require nothing dangerous is left.
+    assert "rm -rf" not in sent.replace(quoted, ""), sent

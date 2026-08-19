@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 
@@ -78,7 +79,12 @@ def _credential():
 def read_device_file(host, path, *, dry_run):
     """Size, mtime and hash of one file on the device. Read-only."""
     user, password = _credential()
-    command = DEVICE_READ.format(path=path)
+    # shlex.quote, because this string is interpreted by a SHELL on the device.
+    # `--device-path` comes from the command line, so an unquoted path containing
+    # `;` or a backtick would run on the Kobo — and this script's whole promise is
+    # that every device command is a read. Quoting is what makes that true rather
+    # than merely intended.
+    command = DEVICE_READ.format(path=shlex.quote(path))
     if dry_run:
         print(f"    [dry run] would ssh -tt {user}@{host} and send: {command.strip()!r}")
         return None
