@@ -291,7 +291,12 @@ class TaskConvert(CalibreTask):
                 os.close(temp_fd)
                 try:
                     copyfile(converted_file[0], temp_destination)
-                    # None means the normalizer could not process this package.
+                    # Split only newly generated packages. Existing-library
+                    # repair deliberately keeps the normalizer's default-off
+                    # split policy because changing spine filenames can orphan
+                    # annotations already stored on a Kobo.
+                    # None means normalization or splitting could not process
+                    # this package.
                     # Continue with the un-normalized KEPUB rather than failing the
                     # conversion: an un-normalized KEPUB is exactly what we ship
                     # today, whereas withholding it drops the user back to EPUB
@@ -299,7 +304,7 @@ class TaskConvert(CalibreTask):
                     # (upstream calibre-web #1484). The normalizer already logs a
                     # warning, leaves the archive untouched, and _valid_archive
                     # below still rejects a genuinely corrupt one.
-                    normalize_kepub_package(temp_destination)
+                    normalize_kepub_package(temp_destination, split_chapters=True)
                     if not _valid_archive(temp_destination, format_new_ext[1:]):
                         return 1, N_("Kepubify produced an invalid KEPUB archive")
                     os.replace(temp_destination, destination)

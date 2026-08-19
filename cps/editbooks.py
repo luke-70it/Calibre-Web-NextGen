@@ -2064,11 +2064,13 @@ def upload_book_formats(requested_files, book, book_id, no_cover=True):
                 # would keep its fragment-anchored TOC targets forever and a
                 # Kobo would file every highlight in those chapters under an id
                 # no spine row carries (#1715, same defect as #1657).
+                # This is a new-book boundary, so it explicitly opts into spine
+                # splitting. Existing-library repair keeps the default disabled.
                 # normalize_kepub_package logs and returns None on any failure,
                 # leaving the archive untouched -- storing an un-normalized
                 # KEPUB is strictly better than refusing the upload, which is
                 # the same trade-off convert.py makes.
-                normalize_kepub_package(saved_filename)
+                normalize_kepub_package(saved_filename, split_chapters=True)
 
             # AFTER normalization: it rewrites the archive, so measuring first
             # would record a stale size in the Calibre data row.

@@ -37,14 +37,27 @@ CHAPTER = ('<?xml version="1.0" encoding="UTF-8"?>'
            '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>c</title></head>'
            '<body><div id="top">x</div></body></html>')
 
+SPLIT_NCX = ('<?xml version="1.0" encoding="UTF-8"?>'
+             '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1"><navMap>'
+             '<navPoint id="n1"><navLabel><text>One</text></navLabel>'
+             '<content src="chapter.xhtml#one"/></navPoint>'
+             '<navPoint id="n2"><navLabel><text>Two</text></navLabel>'
+             '<content src="chapter.xhtml#two"/></navPoint></navMap></ncx>')
+SPLIT_CHAPTER = ('<?xml version="1.0" encoding="UTF-8"?>'
+                 '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                 '<div id="book-columns"><div id="book-inner">'
+                 '<section id="one"><span class="koboSpan" id="kobo.1.1">one</span></section>'
+                 '<section id="two"><span class="koboSpan" id="kobo.2.1">two</span></section>'
+                 '</div></div></body></html>')
 
-def _make_kepub(path):
+
+def _make_kepub(path, *, splittable=False):
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("mimetype", "application/epub+zip")
         archive.writestr("META-INF/container.xml", CONTAINER)
         archive.writestr("OEBPS/content.opf", OPF)
-        archive.writestr("OEBPS/toc.ncx", NCX)
-        archive.writestr("OEBPS/chapter.xhtml", CHAPTER)
+        archive.writestr("OEBPS/toc.ncx", SPLIT_NCX if splittable else NCX)
+        archive.writestr("OEBPS/chapter.xhtml", SPLIT_CHAPTER if splittable else CHAPTER)
     return path
 
 
@@ -66,13 +79,13 @@ class _Upload:
             dst.write(src.read())
 
 
-def _drive_upload(monkeypatch, tmp_path, filename):
+def _drive_upload(monkeypatch, tmp_path, filename, *, splittable=False):
     """Run the real upload_book_formats with fake collaborators."""
     from cps import editbooks
 
     library = tmp_path / "library"
     (library / "Author" / "Book (1)").mkdir(parents=True)
-    source = _make_kepub(str(tmp_path / "incoming.kepub"))
+    source = _make_kepub(str(tmp_path / "incoming.kepub"), splittable=splittable)
 
     recorded = {}
 
@@ -139,6 +152,35 @@ def test_uploaded_kepub_has_its_redundant_toc_fragment_stripped(monkeypatch, tmp
     assert _ncx_sources(str(stored)) == ["chapter.xhtml"], (
         "the redundant #top fragment must be gone, or a Kobo files highlights in "
         "this chapter under an id no spine row carries")
+
+
+def test_uploaded_kepub_is_born_with_split_chapter_documents(monkeypatch, tmp_path):
+    stored, _recorded = _drive_upload(
+        monkeypatch, tmp_path, "incoming.kepub", splittable=True)
+
+    assert _ncx_sources(str(stored)) == [
+        "chapter-split-1.xhtml",
+        "chapter-split-2.xhtml",
+    ]
+
+
+def test_upload_continues_when_opted_in_split_returns_failure(monkeypatch, tmp_path):
+    from cps import editbooks
+
+    monkeypatch.setattr(
+        editbooks,
+        "normalize_kepub_package",
+        lambda _path, **_kwargs: None,
+    )
+
+    stored, _recorded = _drive_upload(
+        monkeypatch, tmp_path, "incoming.kepub", splittable=True)
+
+    assert stored.exists()
+    assert _ncx_sources(str(stored)) == [
+        "chapter.xhtml#one",
+        "chapter.xhtml#two",
+    ]
 
 
 def test_recorded_size_matches_the_normalized_file(monkeypatch, tmp_path):

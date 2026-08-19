@@ -18,6 +18,19 @@ is for things you can see or feel when running the app.
 
 ### Fixed
 
+- **Highlights now work in the chapters of a book that keeps many chapters in
+  one file — the shape almost every Project Gutenberg book has.** A Kobo
+  recognises a chapter by the file it lives in, not by a link into the middle of
+  a file, so in these books only the first chapter of each file could hold a
+  highlight. Everything you highlighted in the rest of the file was saved on the
+  device and simply never shown, with the Annotations panel reporting nothing
+  there. Books converted, uploaded, or auto-ingested from now on are stored with
+  one file per chapter, so highlights attach where you make them. Measured on a
+  41-book library: chapters that could not hold a highlight fell from 301 to 46,
+  and books with at least one such chapter from 32 to 11 — Pride and Prejudice
+  went from 47 unreachable chapters to none. **Books already in your library are
+  deliberately left alone**, because changing an existing book's chapter files
+  would break the highlights you already have in it.
 - **Container updates and restarts no longer spend the entire shutdown grace
   period frozen before being killed.** The ingest watcher installed a graceful
   shutdown handler but then blocked in a foreground polling or filesystem-watch
