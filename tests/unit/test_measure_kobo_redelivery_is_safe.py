@@ -138,3 +138,89 @@ def test_the_only_write_is_a_last_modified_bump():
               for m in re.findall(r"(?:UPDATE|DELETE\s+FROM|INSERT\s+INTO)\s+\w+",
                                   body, re.I)]
     assert writes == ["UPDATE BOOKS"], writes
+
+
+class TestTheDeviceReadPath:
+    """The half that only runs when the Kobo is awake.
+
+    The safety tests above cover the refusal and the dry run. They do NOT cover
+    the code that actually talks to the device — and that is the code which will
+    run in a narrow window, on hardware, probably once. A bug there wastes the
+    window. These drive it against a fake `subprocess.run` so the command shape
+    and the parsing are exercised without a device.
+    """
+
+    def _fake_run(self, captured, stdout="", stderr="", returncode=0):
+        class _Result:
+            pass
+
+        def run(cmd, **kwargs):
+            captured.append((cmd, kwargs))
+            result = _Result()
+            result.stdout, result.stderr, result.returncode = stdout, stderr, returncode
+            return result
+
+        return run
+
+    def test_it_sends_the_command_on_stdin_not_argv(self, monkeypatch):
+        """The recipe this fleet already paid for: plain `ssh host 'cmd'`
+        connects, authenticates and returns NOTHING, and `-tt` needs the command
+        on STDIN. Getting this wrong looks like a dead device."""
+        module = _module()
+        monkeypatch.setenv("SECRET", '{"username": "root", "password": "pw"}')
+        captured = []
+        monkeypatch.setattr(module.subprocess, "run",
+                            self._fake_run(captured, stdout="ok"))
+
+        module.read_device_file("10.0.0.9", "/mnt/onboard/b.kepub.epub", dry_run=False)
+
+        (cmd, kwargs), = captured
+        assert "-tt" in cmd, cmd
+        assert "root@10.0.0.9" in cmd
+        assert kwargs.get("input"), "the command must go on stdin"
+        assert "/mnt/onboard/b.kepub.epub" in kwargs["input"]
+        assert kwargs["input"].rstrip().endswith("exit"), (
+            "an interactive shell that is never told to exit hangs until timeout"
+        )
+        # The path must not also be smuggled into argv, which is what makes the
+        # command silently return nothing.
+        assert not any(str(a).startswith("ls -l") for a in cmd), cmd
+
+    def test_it_refuses_to_run_without_a_credential(self, monkeypatch):
+        module = _module()
+        monkeypatch.setenv("SECRET", "")
+        with pytest.raises(SystemExit) as excinfo:
+            module.read_device_file("10.0.0.9", "/x", dry_run=False)
+        assert "secret exec" in str(excinfo.value)
+
+    def test_a_dry_run_never_launches_ssh(self, monkeypatch):
+        module = _module()
+        captured = []
+        monkeypatch.setattr(module.subprocess, "run", self._fake_run(captured))
+        assert module.read_device_file("10.0.0.9", "/x", dry_run=True) is None
+        assert captured == [], "a dry run reached for the network"
+
+    def test_it_returns_both_streams_so_an_error_is_not_swallowed(self, monkeypatch):
+        """dropbear writes some of what matters to stderr; dropping it would make
+        a failed read look like an unchanged file, which is the WRONG answer in
+        this experiment rather than merely a missing one."""
+        module = _module()
+        monkeypatch.setenv("SECRET", "pw")
+        captured = []
+        monkeypatch.setattr(module.subprocess, "run",
+                            self._fake_run(captured, stdout="size line",
+                                           stderr="Permission denied"))
+        out = module.read_device_file("10.0.0.9", "/x", dry_run=False)
+        assert "size line" in out and "Permission denied" in out
+
+    def test_a_bare_string_credential_still_works(self, monkeypatch):
+        """The vault entry is not guaranteed to be JSON; a raw password must not
+        crash the run when the device is finally awake."""
+        module = _module()
+        monkeypatch.setenv("SECRET", "just-the-password")
+        captured = []
+        monkeypatch.setattr(module.subprocess, "run", self._fake_run(captured, stdout="ok"))
+        module.read_device_file("10.0.0.9", "/x", dry_run=False)
+        (cmd, _kwargs), = captured
+        assert "just-the-password" in cmd
+        assert "root@10.0.0.9" in cmd
