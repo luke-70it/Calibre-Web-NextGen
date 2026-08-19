@@ -398,3 +398,197 @@ def test_existing_piece_name_collision_is_avoided(tmp_path):
     contents, _manifest, _spine, targets = _package_state(book)
     assert contents["OPS/chapter-split-1.xhtml"] == b"occupied"
     assert targets == ["chapter-split-2.xhtml", "chapter-split-3.xhtml"]
+
+
+# ---------------------------------------------------------------------------
+# The post-write validator's own guards.
+#
+# WHY THESE EXIST. A mutation campaign over this suite found that the splitter's
+# BEHAVIOUR was well covered -- reverting the cut container to <body> failed 16
+# of 17 tests, mapping every fragment to the first piece failed 6, reversing
+# piece order failed 3 -- while EVERY guard inside `_validate_split_archive`
+# could be deleted with the whole suite still green:
+#
+#   deleted guard                              suite result
+#   KoboSpan id multiset changed                17 passed
+#   spine reading order changed                 17 passed
+#   TOC target retains a fragment               17 passed
+#   split archive differs from the rewrite plan 17 passed
+#   fragment identity occurs in multiple pieces 17 passed
+#
+# Those guards are the last thing standing between a planning or writing bug and
+# a corrupted book on someone's device, and none of them was exercised. Tests
+# that only drive the correct path cannot see them, because on the correct path
+# they never fire.
+#
+# So each test below INJECTS the fault the guard exists to catch, and asserts the
+# whole rewrite is abandoned: `split_multichapter_documents` returns None, the
+# source archive is byte-identical, and no temporary file is left beside it.
+# `os.replace` runs only after validation, so "byte-identical" is the real
+# user-visible contract, not an implementation detail.
+#
+# Faults are injected at the two points where they can actually originate:
+# `_build_entries` (a bad PLAN) and `_write_archive` (a bad WRITE). Nothing in
+# the production module is modified.
+#
+# After these tests, deleting any one of those four guards fails exactly one test
+# each. A FIFTH guard is deliberately not covered here:
+#
+#     raise ValueError("non-touched ZIP member changed: " + name)
+#
+# It cannot fire, and no test can make it. `touched` is defined as every name
+# whose planned content differs from its source content, so for any name outside
+# `touched`, expected == source by construction; the earlier
+# `actual != expected_contents` guard has already proven actual == expected, and
+# therefore actual == source. It is subsumed, not independent. Left in place
+# because it states the intent cheaply, recorded here so nobody spends an
+# afternoon trying to write the test that would cover it.
+# ---------------------------------------------------------------------------
+
+
+def _splitter_module():
+    from cps.services import kepub_spine_splitter
+
+    return kepub_spine_splitter
+
+
+def _leftover_temporaries(book):
+    return sorted(
+        child.name for child in book.parent.iterdir()
+        if child.name != book.name and ".spine-split.tmp" in child.name
+    )
+
+
+def _assert_refused(book, before, result):
+    """The rewrite was abandoned and the user's file is exactly as it was."""
+    assert result is None
+    assert book.read_bytes() == before
+    assert _leftover_temporaries(book) == []
+
+
+def _corrupt_entries(monkeypatch, corrupt):
+    """Let a test damage the rewrite plan just before it is written."""
+    module = _splitter_module()
+    original = module._build_entries
+
+    def patched(*args, **kwargs):
+        return corrupt(list(original(*args, **kwargs)))
+
+    monkeypatch.setattr(module, "_build_entries", patched)
+
+
+def _corrupt_written_archive(monkeypatch, corrupt):
+    """Let a test damage the bytes actually written, leaving the plan intact."""
+    module = _splitter_module()
+    original = module._write_archive
+
+    def patched(path, entries, comment):
+        return original(path, corrupt(list(entries)), comment)
+
+    monkeypatch.setattr(module, "_write_archive", patched)
+
+
+def _edit(entries, name, replace):
+    found = False
+    edited = []
+    for info, content in entries:
+        if info.filename == name:
+            content = replace(content)
+            found = True
+        edited.append((info, content))
+    assert found, "fixture no longer contains {!r}".format(name)
+    return edited
+
+
+@pytest.mark.unit
+def test_validator_refuses_a_plan_that_loses_a_kobo_span(tmp_path, monkeypatch):
+    """The single most important invariant: a highlight anchors to a KoboSpan id.
+
+    A plan that drops one is self-consistent -- the archive matches the plan
+    exactly -- so only the multiset check can catch it.
+    """
+    book = _book(tmp_path)
+    before = book.read_bytes()
+
+    def drop_a_span(entries):
+        return _edit(
+            entries, "OPS/chapter-split-1.xhtml",
+            lambda content: re.sub(
+                rb'<span class="koboSpan" id="kobo\.1\.1">First</span>', b"First", content,
+                count=1))
+
+    _corrupt_entries(monkeypatch, drop_a_span)
+    _assert_refused(book, before, _split(book))
+
+
+@pytest.mark.unit
+def test_validator_refuses_a_plan_that_reorders_the_spine(tmp_path, monkeypatch):
+    """Chapters delivered out of order is a silently wrong book, not a crash."""
+    book = _book(tmp_path)
+    before = book.read_bytes()
+
+    def reverse_spine(entries):
+        return _edit(
+            entries, "OPS/book.opf",
+            lambda content: content.replace(
+                b'<itemref idref="chapter"/><itemref idref="chapter-split"/>',
+                b'<itemref idref="chapter-split"/><itemref idref="chapter"/>'))
+
+    _corrupt_entries(monkeypatch, reverse_spine)
+    _assert_refused(book, before, _split(book))
+
+
+@pytest.mark.unit
+def test_validator_refuses_a_plan_that_leaves_a_fragment_on_a_split_target(
+        tmp_path, monkeypatch):
+    """A retained #fragment is the whole defect #1657 exists to remove.
+
+    Shipping a split whose TOC still points at an anchor would produce exactly
+    the unreachable-chapter identity the split was performed to fix.
+    """
+    book = _book(tmp_path)
+    before = book.read_bytes()
+
+    def restore_a_fragment(entries):
+        return _edit(
+            entries, "OPS/toc.ncx",
+            lambda content: content.replace(
+                b'<content src="chapter-split-2.xhtml"/>',
+                b'<content src="chapter-split-2.xhtml#ch2"/>'))
+
+    _corrupt_entries(monkeypatch, restore_a_fragment)
+    _assert_refused(book, before, _split(book))
+
+
+@pytest.mark.unit
+def test_validator_refuses_bytes_that_do_not_match_the_rewrite_plan(
+        tmp_path, monkeypatch):
+    """Guards the WRITE rather than the plan: what landed must be what was planned."""
+    book = _book(tmp_path)
+    before = book.read_bytes()
+
+    def smuggle_bytes_past_the_plan(entries):
+        return _edit(
+            entries, "OPS/chapter-split-2.xhtml",
+            lambda content: content.replace(b"Second", b"Smuggled"))
+
+    _corrupt_written_archive(monkeypatch, smuggle_bytes_past_the_plan)
+    _assert_refused(book, before, _split(book))
+
+
+@pytest.mark.unit
+def test_validator_guards_run_on_the_temporary_file_before_the_original_moves(
+        tmp_path, monkeypatch):
+    """Vacuity guard for the four tests above.
+
+    Each asserts the source is unchanged after a refusal. That assertion would
+    also hold if the splitter had simply declined to split this fixture for an
+    unrelated reason, which would make all four pass while testing nothing. Pin
+    that the same fixture DOES split when no fault is injected, so the byte
+    identity above is caused by the refusal and by nothing else.
+    """
+    book = _book(tmp_path)
+    before = book.read_bytes()
+
+    assert _split(book) is True
+    assert book.read_bytes() != before
