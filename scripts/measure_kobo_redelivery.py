@@ -36,8 +36,9 @@ WHAT IT NEVER DOES
 * never writes to the device — every device command is a read;
 * never touches a book that has annotations;
 * never deletes a ``kobo_synced_books`` row;
-* nothing at all without ``--go`` (a dry run is the default, and prints the
-  exact commands it would issue).
+* nothing at all without ``--go`` EXCEPT one read-only, ``mode=ro`` count of
+  the book's annotations, which has to happen first so a dry run can tell you
+  whether the real run would refuse.
 
 DEVICE ACCESS, the recipe this fleet already paid for
 -----------------------------------------------------
@@ -90,12 +91,42 @@ def read_device_file(host, path, *, dry_run):
         return None
     if not password:
         raise SystemExit("no credential in $SECRET — run this under `secret exec`")
-    result = subprocess.run(
-        [SSHPASS, "-p", password, "ssh", "-tt",
-         "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-         "-o", "ConnectTimeout=8", "-o", "LogLevel=ERROR", f"{user}@{host}"],
-        input=command, capture_output=True, text=True, timeout=60,
-    )
+
+    # `sshpass -e` reads the password from SSHPASS in the child environment, NOT
+    # from argv. That is not cosmetic: subprocess.TimeoutExpired embeds the whole
+    # command list in its message, so with `-p` a timeout prints the device's root
+    # password in cleartext — into terminal scrollback, into any log, and into the
+    # agent transcript this is designed to be run from. The standing rule is that a
+    # secret value never reaches a transcript, and `-p` breaks it on the script's
+    # own expected failure path (a Kobo that suspends mid-read hangs to the wall
+    # clock, because ConnectTimeout only covers TCP connect).
+    child_env = dict(os.environ)
+    child_env["SSHPASS"] = password
+
+    # The host key is PINNED to a file next to this script rather than discarded.
+    # `--host` moves with DHCP, so the address is not proof of identity: if the
+    # lease has moved, `accept-new` against a persistent file still refuses a
+    # CHANGED key, which is exactly the case that would otherwise hand a root
+    # password to whatever now answers on that address. (That is not
+    # hypothetical — a LAN sweep during development found a different dropbear
+    # host answering on :22.)
+    known_hosts = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               ".kobo_known_hosts")
+    try:
+        result = subprocess.run(
+            [SSHPASS, "-e", "ssh", "-tt",
+             "-o", "StrictHostKeyChecking=accept-new",
+             "-o", f"UserKnownHostsFile={known_hosts}",
+             "-o", "ConnectTimeout=8", "-o", "LogLevel=ERROR", f"{user}@{host}"],
+            input=command, capture_output=True, text=True, timeout=60,
+            env=child_env,
+        )
+    except subprocess.TimeoutExpired:
+        # `from None` matters: chaining would re-print the original message, and
+        # the whole point is that no exception carries the command line.
+        raise SystemExit(
+            f"device read timed out after 60s against {host}"
+        ) from None
     return ((result.stdout or "") + (result.stderr or "")).strip()
 
 
@@ -120,16 +151,19 @@ def bump_last_modified(metadata_db, book_id, *, dry_run):
     and turns every book into a NewEntitlement. Doing it here would answer a
     question nobody asked.
     """
-    statement = ("UPDATE books SET last_modified = datetime('now') "
-                 f"WHERE id = {book_id}")
+    statement = "UPDATE books SET last_modified = datetime('now') WHERE id = ?"
     if dry_run:
-        print(f"    [dry run] would run against {metadata_db}: {statement}")
+        print(f"    [dry run] would run against {metadata_db}: "
+              f"{statement} with id={book_id}")
         return
     import sqlite3
 
     conn = sqlite3.connect(metadata_db)
     try:
-        conn.execute(statement)
+        # Bound, not interpolated. It is only safe today because argparse coerces
+        # --book-id with type=int, and that safety net is one edit away from
+        # failing silently.
+        conn.execute(statement, (book_id,))
         conn.commit()
     finally:
         conn.close()

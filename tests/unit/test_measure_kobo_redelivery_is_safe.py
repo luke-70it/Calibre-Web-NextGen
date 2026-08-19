@@ -221,9 +221,78 @@ class TestTheDeviceReadPath:
         captured = []
         monkeypatch.setattr(module.subprocess, "run", self._fake_run(captured, stdout="ok"))
         module.read_device_file("10.0.0.9", "/x", dry_run=False)
-        (cmd, _kwargs), = captured
-        assert "just-the-password" in cmd
+        (cmd, kwargs), = captured
         assert "root@10.0.0.9" in cmd
+        assert kwargs["env"]["SSHPASS"] == "just-the-password"
+
+    def test_the_password_never_enters_argv(self, monkeypatch):
+        """subprocess.TimeoutExpired embeds the WHOLE command list in its message.
+
+        With `sshpass -p <password>` a timeout prints the device's root password in
+        cleartext — into scrollback, into any log, and into the agent transcript
+        this script is designed to be run from, which breaks the standing rule that
+        a secret value never reaches a transcript. And a timeout is this script's
+        EXPECTED failure: ConnectTimeout only covers TCP connect, so a Kobo that
+        suspends mid-read hangs to the wall clock.
+        """
+        module = _module()
+        monkeypatch.setenv("SECRET", '{"username": "root", "password": "s3cr3t-root-pw"}')
+        captured = []
+        monkeypatch.setattr(module.subprocess, "run", self._fake_run(captured, stdout="ok"))
+
+        module.read_device_file("10.0.0.9", "/x", dry_run=False)
+
+        (cmd, kwargs), = captured
+        assert "s3cr3t-root-pw" not in " ".join(str(a) for a in cmd), cmd
+        assert "-p" not in cmd, "sshpass -p puts the secret in argv; use -e"
+        assert "-e" in cmd
+        assert kwargs["env"]["SSHPASS"] == "s3cr3t-root-pw"
+
+    def test_a_timeout_reports_without_the_command_line(self, monkeypatch):
+        """Even with -e, an unhandled TimeoutExpired would print the argv. Catch it."""
+        module = _module()
+        monkeypatch.setenv("SECRET", "s3cr3t-root-pw")
+
+        def run(cmd, **kwargs):
+            raise module.subprocess.TimeoutExpired(cmd, 60)
+
+        monkeypatch.setattr(module.subprocess, "run", run)
+        with pytest.raises(SystemExit) as excinfo:
+            module.read_device_file("10.0.0.9", "/x", dry_run=False)
+        message = str(excinfo.value)
+        assert "s3cr3t-root-pw" not in message, message
+        assert "timed out" in message
+        # `raise X from None` sets __suppress_context__, NOT __cause__ — a bare
+        # `raise X` inside an except block already leaves __cause__ as None while
+        # chaining via __context__. Asserting on __cause__ therefore passed with
+        # the `from None` removed; mutation caught it.
+        assert excinfo.value.__suppress_context__, (
+            "the original TimeoutExpired is still chained, so Python prints its "
+            "message — which contains the whole command list, password included — "
+            "as 'During handling of the above exception...'"
+        )
+
+    def test_the_host_key_is_pinned_to_a_persistent_file(self, monkeypatch):
+        """`--host` moves with DHCP, so the address is not proof of identity.
+
+        Discarding known_hosts to /dev/null means a lease that has moved hands the
+        Kobo root password to whatever now answers on that address, with no
+        "host key changed" warning. A persistent file with accept-new still learns
+        a new host once but REFUSES a changed key.
+        """
+        module = _module()
+        monkeypatch.setenv("SECRET", "pw")
+        captured = []
+        monkeypatch.setattr(module.subprocess, "run", self._fake_run(captured, stdout="ok"))
+
+        module.read_device_file("10.0.0.9", "/x", dry_run=False)
+
+        (cmd, _kwargs), = captured
+        joined = " ".join(str(a) for a in cmd)
+        assert "UserKnownHostsFile=/dev/null" not in joined, joined
+        assert "StrictHostKeyChecking=no" not in joined, joined
+        assert "StrictHostKeyChecking=accept-new" in joined, joined
+        assert ".kobo_known_hosts" in joined, joined
 
 
 def test_the_device_path_cannot_smuggle_a_command(monkeypatch):
