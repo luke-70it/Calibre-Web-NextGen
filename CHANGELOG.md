@@ -19,7 +19,7 @@ is for things you can see or feel when running the app.
 ### Fixed
 
 - **The notice you get after CWNG repairs a Kobo book now tells you what to do
-  about it.** It used to say the app had "repaired a book previously sent to your
+  about it, in a way that works whichever way your device behaves.** It used to say the app had "repaired a book previously sent to your
   Kobo" and that "older highlights may still need to be recreated" — accurate, but
   it never said the thing that actually helps: sync, then try highlighting again.
   It now leads with that. The version shown on a book's own page also tells you to
