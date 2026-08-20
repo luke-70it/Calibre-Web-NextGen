@@ -6076,28 +6076,25 @@ msgstr ""
 
 #: cps/spa_strings.py
 msgid ""
-"We repaired this book for your Kobo. Sync your device — and if "
-"highlighting still does not work, remove the book from your Kobo and let "
-"it download again. Highlights you made before the repair may not come "
-"back."
+"We repaired this book for your Kobo. If you were having trouble "
+"highlighting, try after sync — and if it still doesn’t work, remove the "
+"book from your Kobo and let it download again."
 msgstr ""
 
 #: cps/spa_strings.py
 msgid ""
-"We repaired this book for your Kobo. Sync your device — and if "
-"highlighting still does not work, remove the book from your Kobo and let "
-"it download again. If you read it some other way, download it again to "
-"get the repaired copy. Highlights you made before the repair may not come"
-" back."
+"We repaired this book for your Kobo. If you were having trouble "
+"highlighting, try after sync — and if it still doesn’t work, remove the "
+"book from your Kobo and let it download again. If you read it some other "
+"way, download it again to get the repaired copy."
 msgstr ""
 
 #: cps/spa_strings.py
 #, python-brace-format
 msgid ""
-"We repaired {count} books for your Kobo. Sync your device — and if "
-"highlighting still does not work, remove the book from your Kobo and let "
-"it download again. Highlights you made before the repair may not come "
-"back."
+"We repaired {count} books for your Kobo. If you were having trouble "
+"highlighting, try after sync — and if it still doesn’t work, remove them "
+"from your Kobo and let them download again."
 msgstr ""
 
 #: cps/spa_strings.py
