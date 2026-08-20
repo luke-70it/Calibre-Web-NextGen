@@ -55,7 +55,9 @@ def analyse(path):
     counts = collections.Counter(anchored)
     # two TOC entries deriving the SAME identity = only one chapter is reachable
     duplicated = sum(c - 1 for c in counts.values() if c > 1)
-    return len(derived), len(anchored) - duplicated, len(fragmented), duplicated
+    # the fragment NAMES, so --residue can say WHICH targets are still unreachable
+    frag_names = [d.split("#", 1)[1] for d in fragmented]
+    return len(derived), len(anchored) - duplicated, len(fragmented), duplicated, frag_names
 
 LIB = sys.argv[1]
 #: `--no-split` runs the normalize-only control, which is what attributes the
@@ -117,17 +119,25 @@ if RESIDUE:
                     normalize_kepub_package(_cp, split_chapters=SPLIT)
                     with zipfile.ZipFile(_cp) as _z:
                         _names = set(_z.namelist())
-                    _total, _anchored, _fragmented, _dup = analyse(_cp)
+                    _total, _anchored, _fragmented, _dup, _fnames = analyse(_cp)
                 except Exception:
                     os.remove(_cp)
                     continue
                 os.remove(_cp)
                 kinds["still carries a #fragment"] += _fragmented
                 kinds["two TOC entries share one document"] += _dup
+                fragments.update(_fnames)
 
     print("\nRESIDUE BY KIND")
     for _kind, _n in kinds.most_common():
         print(f"  {_n:4}  {_kind}")
+    print("\nRESIDUE BY FRAGMENT NAME")
+    for _frag, _n in fragments.most_common(15):
+        print(f"  {_n:4}  #{_frag}")
+    _footer = sum(_n for _f, _n in fragments.items() if "footer" in _f.lower())
+    if _footer:
+        print(f"\n  {_footer} of {sum(fragments.values())} fragmented targets are a licence footer,")
+        print("  not a chapter. The real unreachable-chapter count is the remainder.")
     print("\n  A `#pg-footer-heading` target is Project Gutenberg's licence")
     print("  footer — a TOC entry, but not a chapter and not something a reader")
     print("  highlights. Counting it as an unreachable chapter overstates the gap.")
