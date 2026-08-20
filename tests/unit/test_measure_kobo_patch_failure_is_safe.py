@@ -359,9 +359,33 @@ class _Upstream(http.server.BaseHTTPRequestHandler):
     do_DELETE = _reply
 
 
+class _FramingUpstream(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    reply = b'{"chunked":true}'
+
+    def log_message(self, _fmt, *_args):
+        pass
+
+    def do_GET(self):
+        self.send_response_only(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+        self.wfile.write(f"{len(self.reply):x}\r\n".encode())
+        self.wfile.write(self.reply + b"\r\n0\r\n\r\n")
+
+    def do_HEAD(self):
+        self.send_response_only(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(self.reply)))
+        self.end_headers()
+
+
 class _RunningProxy:
-    def __init__(self, module, expected="ann-1"):
-        self.upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
+    def __init__(self, module, expected="ann-1", upstream_handler=_Upstream):
+        self.upstream = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), upstream_handler
+        )
         self.upstream.seen = []
         self.up_thread = threading.Thread(
             target=self.upstream.serve_forever, daemon=True
@@ -463,6 +487,72 @@ def test_only_the_exact_disposable_single_update_can_receive_503():
         assert len(running.upstream.seen) == len(cases) + 1
     finally:
         running.close()
+
+
+def test_relayed_responses_are_reframed_to_the_exact_emitted_bytes():
+    module = _module()
+    running = _RunningProxy(module, upstream_handler=_FramingUpstream)
+    try:
+        status, body, headers = running.request("GET", "/chunked")
+        assert status == 200
+        assert headers["Content-Length"] == str(len(_FramingUpstream.reply))
+        assert "Transfer-Encoding" not in headers
+        assert body == _FramingUpstream.reply
+
+        status, body, headers = running.request("HEAD", "/head")
+        assert status == 200
+        assert headers["Content-Length"] == "0"
+        assert "Transfer-Encoding" not in headers
+        assert body == b""
+    finally:
+        running.close()
+
+
+def test_routing_correction_is_printed_at_startup_and_immediately_before_sync(
+    tmp_path, monkeypatch, capsys
+):
+    module = _module()
+    row = module.DeviceAnnotation("ann-1", "highlight", "0")
+    snapshots = iter(
+        [
+            (tmp_path / "baseline.gz", []),
+            (tmp_path / "staged.gz", [row]),
+            (tmp_path / "after.gz", [row]),
+        ]
+    )
+    monkeypatch.setattr(
+        module,
+        "capture_device_snapshot",
+        lambda *_args, **_kwargs: next(snapshots),
+    )
+    output_before_prompts = []
+
+    def answer_prompt(_prompt):
+        output_before_prompts.append(capsys.readouterr().out)
+        return ""
+
+    monkeypatch.setattr("builtins.input", answer_prompt)
+    args = _main_args(tmp_path, go=True) + ["--port", "0"]
+    assert module.main(args) == 2
+    final_output = capsys.readouterr().out
+    all_output = "".join(output_before_prompts) + final_output
+    warning = "ROUTING SAFETY — NETWORK LEVEL ONLY"
+
+    assert all_output.count(warning) == 2
+    startup_output = output_before_prompts[0]
+    assert startup_output.index(warning) < startup_output.index("DECISION TABLE")
+    before_sync_output = output_before_prompts[1]
+    assert before_sync_output.rstrip().endswith(
+        "DO NOT edit the device or production CWNG configuration."
+    )
+    for phrase in (
+        "reading_services_host, not api_endpoint",
+        "address the Kobo already believes is CWNG",
+        "--upstream at the real CWNG origin",
+        "Kobo Clara BW firmware 4.42.23291",
+        "measured to stop syncing",
+    ):
+        assert phrase in startup_output
 
 
 @pytest.mark.parametrize(

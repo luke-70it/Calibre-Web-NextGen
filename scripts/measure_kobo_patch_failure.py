@@ -26,6 +26,10 @@ Safety model
 The operator can leave scripts/measure_kobo_redelivery.py waiting at its
 "SYNC THE DEVICE NOW" prompt. The same physical wake and sync then measures
 F-3e383a and this experiment together.
+
+Routing is network-level only: the proxy must listen at the address the Kobo
+already believes is CWNG, while ``--upstream`` names the real CWNG origin.
+Never edit the device's ``reading_services_host`` or production CWNG config.
 """
 
 from __future__ import annotations
@@ -472,9 +476,16 @@ class PatchFailureHandler(http.server.BaseHTTPRequestHandler):
             response_headers = _end_to_end_headers(list(response.getheaders()))
             self.send_response_only(response.status, response.reason)
             for name, value in response_headers:
+                if name.lower() == "content-length":
+                    continue
                 self.send_header(name, value)
+            # The upstream body is fully buffered, so frame the exact bytes this
+            # handler will emit. Transfer-Encoding was removed with the other
+            # hop-by-hop headers above; never forward its now-invalid framing.
+            emitted_body = b"" if self.command == "HEAD" else response_body
+            self.send_header("Content-Length", str(len(emitted_body)))
             self.end_headers()
-            self.wfile.write(response_body)
+            self.wfile.write(emitted_body)
             self.wfile.flush()
         except Exception:
             body = b'{"error":"upstream unavailable"}'
@@ -590,6 +601,18 @@ def print_decision_table():
     )
 
 
+def print_routing_constraint():
+    print("\nROUTING SAFETY — NETWORK LEVEL ONLY")
+    print("  Annotations use reading_services_host, not api_endpoint.")
+    print(
+        "  Run this proxy on the address the Kobo already believes is CWNG, and point"
+    )
+    print("  --upstream at the real CWNG origin.")
+    print("  Kobo Clara BW firmware 4.42.23291 was measured to stop syncing after a")
+    print("  device-side reading_services_host edit.")
+    print("  DO NOT edit the device or production CWNG configuration.")
+
+
 def classify_result(state, rows, expected_annotation_id=None):
     if state.failure_count != 1 or state.unsafe_target_patch_count:
         return "INCONCLUSIVE"
@@ -653,6 +676,7 @@ def main(argv=None):
         + ("" if args.go else "  [DRY RUN]")
     )
     print(f"  disposable book {args.book_id}, ContentId {content_id}")
+    print_routing_constraint()
     print_decision_table()
 
     require_safe_server_book(
@@ -726,10 +750,11 @@ def main(argv=None):
     print(
         "   Leave measure_kobo_redelivery.py at its SYNC prompt; this same sync settles both."
     )
+    print_routing_constraint()
 
     try:
         input(
-            "\nRoute the existing experiment endpoint here, SYNC ONCE, then press Enter. "
+            "\nWith the network-level route already in place, SYNC ONCE, then press Enter. "
         )
         after_one_backup, after_one_rows = capture_device_snapshot(
             args.device_host,
