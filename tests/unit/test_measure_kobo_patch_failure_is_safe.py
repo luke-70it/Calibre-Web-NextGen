@@ -411,7 +411,7 @@ class _RunningProxy:
             method, path, body=body, headers={"Content-Type": "application/json"}
         )
         response = conn.getresponse()
-        result = (response.status, response.read(), dict(response.getheaders()))
+        result = (response.status, response.read(), response.headers)
         conn.close()
         return result
 
@@ -495,13 +495,13 @@ def test_relayed_responses_are_reframed_to_the_exact_emitted_bytes():
     try:
         status, body, headers = running.request("GET", "/chunked")
         assert status == 200
-        assert headers["Content-Length"] == str(len(_FramingUpstream.reply))
+        assert headers.get_all("Content-Length") == [str(len(_FramingUpstream.reply))]
         assert "Transfer-Encoding" not in headers
         assert body == _FramingUpstream.reply
 
         status, body, headers = running.request("HEAD", "/head")
         assert status == 200
-        assert headers["Content-Length"] == "0"
+        assert headers.get_all("Content-Length") == ["0"]
         assert "Transfer-Encoding" not in headers
         assert body == b""
     finally:
