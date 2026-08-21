@@ -42,6 +42,12 @@ from tests.fixtures.kobo_reader_sqlite import (
 )
 
 
+OVERFLOWING_KOBO_CLOCKS = (
+    pytest.param("9999-12-31T23:59:59-23:59", id="above-maxyear"),
+    pytest.param("0001-01-01T00:00:00+23:59", id="below-minyear"),
+)
+
+
 @pytest.fixture
 def memory_db(tmp_path, monkeypatch):
     """Same shape as the backup-feature fixture — full ub.Base schema
@@ -258,6 +264,56 @@ class TestPreviouslyInvisibleDeviceRows:
         assert result["skipped_hidden"] == 1, result
         assert row.hidden is False
         assert row.highlighted_text == "server copy stays visible"
+
+
+@pytest.mark.unit
+class TestOutOfRangeDeviceClock:
+    @pytest.mark.parametrize("clock", OVERFLOWING_KOBO_CLOCKS)
+    def test_parser_rejects_both_utc_overflows(self, clock):
+        from cps.annotations import _parse_kobo_datetime
+
+        assert _parse_kobo_datetime(clock) is None
+
+    @pytest.mark.parametrize("clock", OVERFLOWING_KOBO_CLOCKS)
+    def test_row_with_overflowing_clock_is_imported_and_accounted(
+        self, memory_db, synthetic_db, clock,
+    ):
+        from cps import ub
+        from cps.annotations import ingest_bookmarks
+
+        connection = sqlite3.connect(synthetic_db)
+        try:
+            connection.execute(
+                "UPDATE Bookmark SET DateModified = ? WHERE BookmarkID = 'bm-001'",
+                (clock,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        session, _, _ = memory_db
+        result = ingest_bookmarks(
+            synthetic_db,
+            user_id=7,
+            session=session,
+            book_lookup=_make_book_lookup({
+                "b3d1b38b-74fd-43b7-a796-996e5a6a8b04": 348,
+            }),
+            commit=session.commit,
+        )
+
+        row = session.query(ub.Annotation).filter_by(annotation_id="bm-001").one()
+        assert result["imported"] == 3, result
+        assert result["total_seen"] == 8, result
+        assert _accounted(result) == result["total_seen"]
+        assert row.client_modified_at is None
+
+    def test_valid_clock_keeps_its_existing_naive_utc_value(self):
+        from cps.annotations import _parse_kobo_datetime
+
+        assert _parse_kobo_datetime(
+            "2026-08-20T15:30:45.123456+02:30"
+        ) == datetime(2026, 8, 20, 13, 0, 45, 123456)
 
 
 @pytest.mark.unit
