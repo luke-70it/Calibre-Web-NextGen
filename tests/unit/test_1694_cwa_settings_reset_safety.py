@@ -4,6 +4,7 @@
 """Regression coverage for the destructive CWA Settings reset (#1694)."""
 
 import inspect
+import re
 from pathlib import Path
 
 import flask
@@ -12,6 +13,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CWA_SETTINGS_TEMPLATE = REPO_ROOT / "cps" / "templates" / "cwa_settings.html"
+CWA_CSS = REPO_ROOT / "cps" / "static" / "css" / "cwa.css"
+LAYOUT_TEMPLATE = REPO_ROOT / "cps" / "templates" / "layout.html"
 
 
 class _SettingsDB:
@@ -119,16 +122,93 @@ def test_route_keeps_cached_english_forms_working(
     assert _SettingsDB.reset_calls == expected_reset_calls
 
 
-def test_template_makes_save_primary_and_confirms_the_full_reset():
+def _css_declarations(source, selector):
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", source):
+        selectors = {item.strip() for item in match.group(1).split(",")}
+        if selector not in selectors:
+            continue
+        return {
+            name.strip(): value.strip()
+            for declaration in match.group(2).split(";")
+            if ":" in declaration
+            for name, value in [declaration.split(":", 1)]
+        }
+    raise AssertionError(f"Missing CSS selector: {selector}")
+
+
+def _rgb_chroma(color):
+    if color.startswith("#"):
+        value = color.removeprefix("#")
+        assert len(value) == 6, f"Unsupported hex color: {color}"
+        channels = tuple(int(value[index:index + 2], 16) for index in (0, 2, 4))
+    else:
+        match = re.fullmatch(
+            r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*[\d.]+)?\s*\)",
+            color,
+        )
+        assert match, f"Unsupported CSS color: {color}"
+        channels = tuple(int(channel) for channel in match.groups())
+    return max(channels) - min(channels)
+
+
+def test_template_confirms_the_full_reset_and_keeps_save_rightmost():
     source = CWA_SETTINGS_TEMPLATE.read_text(encoding="utf-8")
     reset = source.index('name="settings_action" value="reset"')
     save = source.index('name="settings_action" value="save"')
 
     assert reset < save, "Reset must remain left of the rightmost Save action"
-    assert 'value="reset" class="btn btn-default"' in source
-    assert 'value="save" class="btn btn-primary"' in source
     assert "Reset every CWA setting to its default?" in source
     assert "All of your current CWA settings will be permanently lost." in source
     assert 'onclick="return confirm(this.dataset.confirm);"' in source
     assert "{{ _('Reset All CWA Settings') }}" in source
     assert "{{ _('Save') }}" in source
+
+
+@pytest.mark.parametrize(
+    ("theme_selector", "state_suffix"),
+    [
+        (None, ""),
+        (None, "-interactive"),
+        ("body.blur .cwa-settings-actions", ""),
+        ("body.blur .cwa-settings-actions", "-interactive"),
+    ],
+)
+def test_save_is_the_color_accent_in_both_themes(theme_selector, state_suffix):
+    template = CWA_SETTINGS_TEMPLATE.read_text(encoding="utf-8")
+    css = CWA_CSS.read_text(encoding="utf-8")
+    layout = LAYOUT_TEMPLATE.read_text(encoding="utf-8")
+
+    reset_tag = re.search(r'<button[^>]+value="reset"[^>]*>', template).group(0)
+    save_tag = re.search(r'<button[^>]+value="save"[^>]*>', template).group(0)
+    assert "cwa-settings-actions" in template
+    assert "cwa-settings-reset-action" in reset_tag
+    assert "cwa-settings-save-action" in save_tag
+    assert "btn-default" not in reset_tag and "btn-primary" not in reset_tag
+    assert "btn-default" not in save_tag and "btn-primary" not in save_tag
+
+    # cwa.css is the final theme stylesheet, so these action-specific rules
+    # are the declarations a browser resolves after caliBlur's global button
+    # inversion. Compare the actual resolved colors, not Bootstrap class names.
+    assert layout.index("css/caliBlur.css") < layout.index("css/cwa.css")
+    variables = _css_declarations(css, ".cwa-settings-actions")
+    if theme_selector:
+        variables.update(_css_declarations(css, theme_selector))
+
+    if state_suffix:
+        reset_selector = ".cwa-settings-actions .cwa-settings-reset-action:hover"
+        save_selector = ".cwa-settings-actions .cwa-settings-save-action:hover"
+    else:
+        reset_selector = ".cwa-settings-actions .cwa-settings-reset-action"
+        save_selector = ".cwa-settings-actions .cwa-settings-save-action"
+
+    reset_variable = f"--cwa-settings-reset-bg{state_suffix}"
+    save_variable = f"--cwa-settings-save-bg{state_suffix}"
+    assert _css_declarations(css, reset_selector)["background-color"] == f"var({reset_variable})"
+    assert _css_declarations(css, save_selector)["background-color"] == f"var({save_variable})"
+
+    reset_color = variables[reset_variable]
+    save_color = variables[save_variable]
+    assert _rgb_chroma(save_color) > _rgb_chroma(reset_color), (
+        f"Save must remain the color accent: reset={reset_color}, save={save_color}"
+    )
