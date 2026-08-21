@@ -289,6 +289,12 @@ is for things you can see or feel when running the app.
   marker the old cover badge used, driven by the same sync state your Kobo and
   KOReader already write. Reported by @magdalar and @JamesHACS (#1702).
 
+- **CWA Settings no longer lets one misplaced click erase every CWA setting.**
+  Reset All CWA Settings has moved out of Save's primary, rightmost position,
+  no longer looks like the main action, and now asks for confirmation that
+  names the full loss before changing anything. Both controls can now be
+  translated without breaking what the server does. Reported by @iroQuai in
+  #1694.
 - **Highlights now work in the chapters of a book that keeps many chapters in
   one file — the shape almost every Project Gutenberg book has.** A Kobo
   recognises a chapter by the file it lives in, not by a link into the middle of
