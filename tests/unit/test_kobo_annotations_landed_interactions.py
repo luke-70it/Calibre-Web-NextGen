@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from types import SimpleNamespace
+import sqlite3
 import zipfile
 
 import pytest
@@ -57,10 +58,39 @@ def test_device_import_types_survive_the_actual_startup_migration(
     """#1774 rows must already be authoritative when #1777 starts."""
     from cps import ub
     from cps.annotations import ingest_bookmarks
+    from scripts.measure_kobo_anchorable_chapters import analyse
     from tests.fixtures.kobo_reader_sqlite import build_kobo_db_with_recovery_rows
+    from tests.unit.test_1657_spine_splitter import (
+        _book,
+        _nested_anchor_chapter,
+        _package_state,
+        _split,
+    )
 
     engine, session = annotation_db
+    package_dir = tmp_path / "import-package"
+    package_dir.mkdir()
+    package = _book(
+        package_dir,
+        targets=("chapter.xhtml#ch1", "chapter.xhtml#ch2", "chapter.xhtml#ch3"),
+        chapter=_nested_anchor_chapter(),
+    )
+    assert _split(package) is True
+    assert analyse(package)[:4] == (3, 3, 0, 0)
+    _contents, _manifest, _spine, targets = _package_state(package)
+    imported_content_id = "{}!!{}".format(BOOK_UUID, targets[1])
+
     device_db = build_kobo_db_with_recovery_rows(tmp_path / "KoboReader.sqlite")
+    connection = sqlite3.connect(device_db)
+    try:
+        connection.execute(
+            "UPDATE Bookmark SET ContentID = ? "
+            "WHERE BookmarkID IN ('recover-dogear', 'recover-note-only')",
+            (imported_content_id,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
     result = ingest_bookmarks(
         device_db,
         user_id=7,
@@ -69,14 +99,14 @@ def test_device_import_types_survive_the_actual_startup_migration(
         commit=session.commit,
     )
     before = {
-        row.annotation_id: row.annotation_type
+        row.annotation_id: (row.annotation_type, row.content_id)
         for row in session.query(ub.Annotation).order_by(ub.Annotation.annotation_id)
     }
 
     assert result["imported"] == 2, result
     assert before == {
-        "recover-dogear": "dogear",
-        "recover-note-only": "highlight",
+        "recover-dogear": ("dogear", imported_content_id),
+        "recover-note-only": ("highlight", imported_content_id),
     }, "the fixture did not produce the #1774 typed rows"
 
     # Drive the startup entry point, not merely its backfill helper.  Wrap the
@@ -95,7 +125,7 @@ def test_device_import_types_survive_the_actual_startup_migration(
     ub.migrate_kobo_two_way_annotation_sync(engine, session)
     session.expire_all()
     after = {
-        row.annotation_id: row.annotation_type
+        row.annotation_id: (row.annotation_type, row.content_id)
         for row in session.query(ub.Annotation).order_by(ub.Annotation.annotation_id)
     }
 
