@@ -133,10 +133,84 @@ local function testNoSyncFailureIsWrittenAtDbg()
     assertTruthy(text:find("logger.warn(", 1, true), "failures are logged at warn")
 end
 
+local function fakePushClient(responses)
+    local calls = {}
+    local transport = {
+        reset_middlewares = function() end,
+        enable = function() end,
+        push_annotations = function(_, payload)
+            calls[#calls + 1] = payload
+            local response = responses[#calls]
+            if type(response) == "function" then return response() end
+            return response or { status = 200, body = { deleted = #payload.deleted } }
+        end,
+    }
+    return { client = transport }, calls
+end
+
+-- F-e4da4d: delete request size is bounded on the slow device side, while the
+-- logical push remains one all-or-failed operation to the caller. The caller
+-- advances its watermark only when this callback says every chunk succeeded.
+local function testDeletePushIsBoundedAndCompletesOnce()
+    local deleted = {}
+    for i = 1, 451 do deleted[i] = "annotation-" .. tostring(i) end
+    local annotations = { { annotation_id = "live-1" } }
+    local subject, calls = fakePushClient({})
+    local outcomes = {}
+
+    CWASyncClient.push_annotations(subject, "user", "pass", "digest",
+        annotations, deleted, function(ok, body, reason)
+            outcomes[#outcomes + 1] = { ok = ok, body = body, reason = reason }
+        end)
+
+    assertEqual(#calls, 3, "451 delete ids are sent as three bounded requests")
+    assertEqual(#calls[1].deleted, 200, "the first delete chunk is capped at 200 ids")
+    assertEqual(#calls[2].deleted, 200, "the second delete chunk is capped at 200 ids")
+    assertEqual(#calls[3].deleted, 51, "the final delete chunk carries the remainder")
+    assertEqual(calls[1].deleted[1], "annotation-1", "chunking preserves first-id order")
+    assertEqual(calls[3].deleted[51], "annotation-451", "chunking preserves last-id order")
+    assertEqual(calls[1].annotations, annotations,
+        "live annotations ride the first request exactly once")
+    assertEqual(#calls[2].annotations, 0,
+        "later chunks do not replay the complete annotation set")
+    assertEqual(#calls[3].annotations, 0,
+        "the final chunk contains deletes only")
+    assertEqual(calls[1].delete_source, "koreader", "every delete chunk names its authority")
+    assertEqual(calls[2].delete_source, "koreader", "later chunks keep delete authority")
+    assertEqual(#outcomes, 1, "the logical push completes exactly once")
+    assertEqual(outcomes[1].ok, true, "all successful chunks report one success")
+    assertEqual(outcomes[1].reason, nil, "the combined success has no failure reason")
+end
+
+local function testDeletePushFailureStopsAndCannotCompleteWatermark()
+    local deleted = {}
+    for i = 1, 401 do deleted[i] = "annotation-" .. tostring(i) end
+    local subject, calls = fakePushClient({
+        { status = 200, body = { deleted = 200 } },
+        { status = 503, body = { error = "busy" } },
+        { status = 200, body = { deleted = 1 } },
+    })
+    local outcomes = {}
+
+    CWASyncClient.push_annotations(subject, "user", "pass", "digest", {}, deleted,
+        function(ok, body, reason)
+            outcomes[#outcomes + 1] = { ok = ok, body = body, reason = reason }
+        end)
+
+    assertEqual(#calls, 2, "a failed second chunk prevents the third request")
+    assertEqual(#outcomes, 1, "a partial server delete still completes the callback once")
+    assertEqual(outcomes[1].ok, false,
+        "a partial delete is never reported as complete to the watermark caller")
+    assertEqual(outcomes[1].reason, "HTTP 503", "the failed chunk status reaches the user")
+    assertEqual(outcomes[1].body.error, "busy", "the failed chunk body is preserved")
+end
+
 testDescribeFailureNamesEveryShape()
 testNoSyncFailureIsWrittenAtDbg()
 testRaisedCallReportsAReasonAndWarns()
 testNon200ReportsItsStatus()
 testSuccessCarriesNoReason()
+testDeletePushIsBoundedAndCompletesOnce()
+testDeletePushFailureStopsAndCannotCompleteWatermark()
 
 print("sync_client outcome-reporting tests passed")

@@ -8,6 +8,10 @@ local PROGRESS_TIMEOUTS = { 2,  5 }
 local AUTH_TIMEOUTS     = { 5, 10 }
 -- Annotations: payloads can be larger than a progress ping, so allow longer.
 local ANNOTATION_TIMEOUTS = { 5, 15 }
+-- Bound only the destructive list; the live annotation payload is sent once.
+-- 200 ordinary annotation ids stay comfortably below common proxy body limits
+-- and below the server's independent 900-id SQLite query chunk.
+local ANNOTATION_DELETE_CHUNK_SIZE = 200
 
 local CWASyncClient = {
     service_spec = nil,
@@ -308,15 +312,49 @@ function CWASyncClient:push_annotations(username, password, document, annotation
     })
     socketutil:set_timeout(ANNOTATION_TIMEOUTS[1], ANNOTATION_TIMEOUTS[2])
     local co = coroutine.create(function()
-        local ok, res = pcall(function()
-            return self.client:push_annotations({
-                document = document,
-                annotations = annotations,
-                deleted = (deleted and #deleted > 0) and deleted or nil,
-                delete_source = (deleted and #deleted > 0) and "koreader" or nil,
-            })
-        end)
-        finish(callback, ok, res, "CWASyncClient:push_annotations")
+        local has_deletes = type(deleted) == "table" and #deleted > 0
+        if not has_deletes then
+            local ok, res = pcall(function()
+                return self.client:push_annotations({
+                    document = document,
+                    annotations = annotations,
+                })
+            end)
+            finish(callback, ok, res, "CWASyncClient:push_annotations")
+            return
+        end
+
+        local last_response
+        for first = 1, #deleted, ANNOTATION_DELETE_CHUNK_SIZE do
+            local chunk = {}
+            local last = math.min(first + ANNOTATION_DELETE_CHUNK_SIZE - 1, #deleted)
+            for index = first, last do
+                chunk[#chunk + 1] = deleted[index]
+            end
+
+            local ok, res = pcall(function()
+                return self.client:push_annotations({
+                    document = document,
+                    -- The complete live set is not multiplied by the number of
+                    -- delete chunks. The server accepts {} as an empty list on
+                    -- continuation requests because Lua cannot encode that
+                    -- distinction itself.
+                    annotations = first == 1 and annotations or {},
+                    deleted = chunk,
+                    delete_source = "koreader",
+                })
+            end)
+            if not ok or res.status ~= 200 then
+                -- Some earlier chunks may already be tombstoned. Report the
+                -- logical push as failed so main.lua keeps the old watermark;
+                -- retrying all ids is safe because server deletes are
+                -- idempotent and already-hidden rows are ignored.
+                finish(callback, ok, res, "CWASyncClient:push_annotations")
+                return
+            end
+            last_response = res
+        end
+        finish(callback, true, last_response, "CWASyncClient:push_annotations")
     end)
     self.client:enable("AsyncHTTP", {thread = co})
     coroutine.resume(co)
