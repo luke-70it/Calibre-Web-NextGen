@@ -749,11 +749,12 @@ The most useful thing you can do costs nothing: [file a bug](https://github.com/
 
 ## How AI is used
 
-Most of this fork's own fixes, their regression tests, the changelog and most issue replies are
-produced by an AI assistant working from a written brief. Merges are gated on CI and on a
-regression test that is verified to fail without the fix, and anything adding a dependency,
-changing a licence or introducing an external URL is merged by a person — but a human does not
-read every line.
+The codebase itself is Calibre-Web and Calibre-Web-Automated — written over many years by their
+human maintainers and contributors, who are credited in [Credits](#credits). What this fork adds
+on top — its own fixes, their regression tests, the changelog and most issue replies — is largely
+produced by an AI assistant working from a written brief, with human review gates: merges require
+CI plus a regression test verified to fail without the fix, and anything adding a dependency,
+changing a licence or introducing an external URL is decided by a person.
 
 **The shipped application itself contains no AI:** no model dependency, no inference call, no
 telemetry, and your library is not sent anywhere.
