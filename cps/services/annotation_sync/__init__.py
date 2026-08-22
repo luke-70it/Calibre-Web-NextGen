@@ -740,7 +740,10 @@ def dispatch_annotation_deletes(
         ann = query.first()
         if ann is None:
             continue
-        if deletable_sources is not None and ann.source not in deletable_sources:
+        delete_authorized = (
+            deletable_sources is None or ann.source in deletable_sources
+        )
+        if not delete_authorized:
             # Keep device transports successful for compatibility, but never
             # let a refused destructive request disappear without provenance
             # details that identify the authority mismatch.
