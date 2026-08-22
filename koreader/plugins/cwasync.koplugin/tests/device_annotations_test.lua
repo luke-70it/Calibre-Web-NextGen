@@ -45,11 +45,13 @@ local function testColorMapping()
     assertEqual(KP.koboIntToColorName(KP.colorNameToKoboInt("blue")), "blue", "blue round-trips")
     assertEqual(KP.koboIntToColorName(KP.colorNameToKoboInt("green")), "green", "green round-trips")
 
-    -- A Kobo has no red. Writing one picks the nearest colour it does have, and
-    -- that is deliberately one-directional: the device is showing pink, so pink
-    -- is what comes back.
-    assertEqual(KP.colorNameToKoboInt("red"), 1, "red is written as the nearest, pink")
-    assertEqual(KP.koboIntToColorName(1), "pink", "and reads back as pink, never red")
+    -- A Kobo has no red. Treat it exactly like every other unsupported name:
+    -- the integer column still needs a value, and 0 is the documented fallback.
+    -- Mapping it to pink would claim the device reproduced a colour it cannot.
+    assertEqual(KP.colorNameToKoboInt("red"), 0,
+        "red is unsupported and degrades to yellow, never invented as pink")
+    assertEqual(KP.koboIntToColorName(0), "yellow",
+        "the fallback reads back honestly as the colour the device received")
 
     -- Writing needs an integer, so an unknown name still has to become one.
     assertEqual(KP.colorNameToKoboInt("chartreuse"), 0, "unknown name -> yellow (documented last resort)")
@@ -116,6 +118,16 @@ local function testBookmarkRowToPortable()
     assertEqual(p.note_text, "note", "note")
     assertEqual(p.content_id, "bk-uuid!!OEBPS/c1.xhtml", "content_id")
     assertEqual(p.chapter_progress, 0.42, "chapter progress carried")
+
+    -- An unmeasured future firmware code omits `color` from the portable
+    -- table, but the annotation itself and its irreplaceable content survive.
+    -- Lua removes nil-valued keys, which is the exact request shape the server
+    -- receives: no colour claim, not a made-up yellow one.
+    row.Color = 99
+    p = KP.bookmarkRowToPortable(row)
+    assertEqual(p.color, nil, "an unknown device code omits portable color")
+    assertEqual(p.annotation_id, "dev-1", "unknown color does not drop the annotation")
+    assertEqual(p.highlighted_text, "passage", "unknown color does not drop the passage")
 end
 
 -- The read contract both providers owe their caller: nil when the device could

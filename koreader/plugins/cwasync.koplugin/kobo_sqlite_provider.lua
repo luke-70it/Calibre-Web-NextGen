@@ -61,13 +61,6 @@ local COLOR_INT_TO_NAME = {
     [4] = "grey",
 }
 
--- A Kobo cannot represent red at all; red exists only in the web reader's
--- palette. Writing a red highlight to a device therefore has to pick something,
--- and pink is the nearest of the five it does have. Deliberately one-directional:
--- Color=1 always reads back as "pink", never as "red", because pink is what the
--- device is actually showing.
-local WRITE_ONLY_NEAREST = { red = 1 }
-
 -- ── Pure field-mapping helpers (unit-tested) ──────────────────────────────
 
 -- name -> Bookmark.Color. The column needs an integer, so an unrecognised name
@@ -77,7 +70,7 @@ function KoboSqliteProvider.colorNameToKoboInt(name)
     if type(name) == "string" then
         name = name:lower()
     end
-    return COLOR_NAME_TO_INT[name] or WRITE_ONLY_NEAREST[name] or 0
+    return COLOR_NAME_TO_INT[name] or 0
 end
 
 -- Bookmark.Color -> name, or nil when the device sent an integer this table does
