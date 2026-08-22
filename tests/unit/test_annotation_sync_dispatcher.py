@@ -154,7 +154,7 @@ def test_dispatch_delete_transitions_to_tombstone(patched_session):
     register_handler(StubHandler())
     dispatch_annotation_sync([_payload("uuid-x")], _book(), user)
     assert s.query(ub.AnnotationSyncTarget).one().status == "synced"
-    dispatch_annotation_deletes(["uuid-x"], user)
+    dispatch_annotation_deletes(["uuid-x"], user, deletable_sources={"kobo"})
     assert s.query(ub.AnnotationSyncTarget).one().status == "tombstone"
 
 
@@ -214,9 +214,11 @@ def test_dispatch_delete_skips_tombstoned(patched_session):
     h = StubHandler()
     register_handler(h)
     dispatch_annotation_sync([_payload("uuid-x")], _book(), user)
-    dispatch_annotation_deletes(["uuid-x"], user)
+    dispatch_annotation_deletes(["uuid-x"], user, deletable_sources={"kobo"})
     h.calls.clear()
-    dispatch_annotation_deletes(["uuid-x"], user)  # second delete attempt
+    dispatch_annotation_deletes(
+        ["uuid-x"], user, deletable_sources={"kobo"},
+    )  # second delete attempt
     assert h.calls == []  # handler.delete NOT called twice
 
 
@@ -225,7 +227,10 @@ def test_malformed_delete_member_cannot_block_a_later_valid_delete(patched_sessi
     s, user = patched_session
     dispatch_annotation_sync([_payload("uuid-keep"), _payload("uuid-delete")], _book(), user)
 
-    dispatch_annotation_deletes([{"not": "an id"}, "uuid-delete"], user, book_id=7)
+    dispatch_annotation_deletes(
+        [{"not": "an id"}, "uuid-delete"], user, book_id=7,
+        deletable_sources={"kobo"},
+    )
 
     rows = {
         row.annotation_id: row.hidden
@@ -239,7 +244,7 @@ def test_tombstone_is_terminal_against_repeat_push(patched_session):
     register_handler(StubHandler())
     payload = _payload("uuid-x")
     dispatch_annotation_sync([payload], _book(), user)
-    dispatch_annotation_deletes(["uuid-x"], user)
+    dispatch_annotation_deletes(["uuid-x"], user, deletable_sources={"kobo"})
     dispatch_annotation_sync([payload], _book(), user)  # re-push
     st = s.query(ub.AnnotationSyncTarget).one()
     assert st.status == "tombstone"  # NOT resurrected
