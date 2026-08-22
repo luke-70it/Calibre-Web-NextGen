@@ -9,8 +9,9 @@ interface; nothing else in the plugin needs to change when it lands.
 
 Provider interface:
     available()                       -> bool   (is this provider usable here?)
-    readAll(volume_id)                -> list|nil (device's annotations, portable;
-                                                  nil when they could not be read)
+    readAll(volume_id, expected_digest) -> list|nil (device's annotations, portable;
+                                                     nil when they could not be read
+                                                     for that document context)
     applyToDevice(portables, vol_id)  -> count   (write server annotations locally)
     backup()                          -> path|false
 

@@ -170,6 +170,16 @@ local function testUnreadableProvidersReportNil()
     local live = Native.readAll()
     assertEqual(type(live), "table", "an attached reader returns a real list")
     assertEqual(#live, 0, "which is empty when the book has no highlights")
+
+    -- A pull for the previous book must not consume the newly opened book's
+    -- collection from this module-level provider singleton.
+    Native.setContext({ annotation = { annotations = {
+        { text = "book B passage", datetime = "2026-08-22T00:00:00Z", page = 2 },
+    } } }, "digest-b")
+    assertEqual(Native.readAll(nil, "digest-a"), nil,
+        "a replaced document context is unreadable to the older callback")
+    assertEqual(#Native.readAll(nil, "digest-b"), 1,
+        "the current document remains readable to its own callback")
     Native.setContext(nil, nil)
 end
 

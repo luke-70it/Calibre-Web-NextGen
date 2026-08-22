@@ -57,7 +57,14 @@ end
 -- there would say "the user deleted every highlight" and the caller would name
 -- each one to the server, which obeys explicit deletes and never un-hides a
 -- tombstone (#920). Unreadable is not empty.
-function Provider.readAll(_volume_id)
+function Provider.readAll(_volume_id, expected_document_digest)
+    -- The provider is a module singleton. A second sync can replace its context
+    -- while the first pull is in flight, so a live collection is authoritative
+    -- only for the document whose digest started this callback.
+    if expected_document_digest ~= nil
+        and Provider.document_digest ~= expected_document_digest then
+        return nil
+    end
     if not Provider.available() then return nil end
     local out = {}
     for _, annotation in ipairs(Provider.ui.annotation.annotations) do

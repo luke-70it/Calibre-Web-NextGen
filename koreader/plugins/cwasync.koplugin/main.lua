@@ -1633,7 +1633,7 @@ function CWASync:syncAnnotations(interactive)
             -- after it, so the reader can be torn down in between; only the read
             -- itself can answer this, never a capability flag.
             local plan = SyncLogic.planLocalContribution(
-                provider, volume_id, self:readAnnotationWatermark())
+                provider, volume_id, self:readAnnotationWatermark(), digest)
             local localList = plan.list
             local diff = SyncLogic.diffAnnotations(localList, remote)
             if provider.push_all_local then

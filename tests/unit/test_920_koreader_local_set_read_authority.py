@@ -28,6 +28,7 @@ refactor cannot quietly restore the capability-flag shortcut.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -117,6 +118,11 @@ def test_the_call_site_consumes_the_decision_rather_than_recomputing_it():
         "the watermark must not be overwritten with a placeholder empty set"
     )
     assert "local localList = plan.list" in main
+    assert re.search(
+        r"SyncLogic\.planLocalContribution\(\s*provider,\s*volume_id,\s*"
+        r"self:readAnnotationWatermark\(\),\s*digest\s*\)",
+        main,
+    ), "the expected document digest must reach the provider's delayed read"
 
     # And the negative half: the call site must own none of this. Each of these
     # is a route by which authority could be re-derived locally — which is the

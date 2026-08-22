@@ -332,6 +332,33 @@ local function testPlanLocalContribution()
     plan = SyncLogic.planLocalContribution(
         providerReturning({}, { push_all_local = true }), nil, nil)
     assertEqual(#plan.deletions, 0, "an empty watermark yields no deletions")
+
+    -- The native provider is a module singleton whose context can be replaced
+    -- while the HTTP pull is in flight. The planner must pass the document it
+    -- started with into the eventual read, so the provider can refuse book B's
+    -- live list rather than diffing it against book A's watermark.
+    local context_provider
+    context_provider = {
+        push_all_local = true,
+        current_digest = "book-a",
+        readAll = function(_volume_id, expected_digest)
+            if expected_digest ~= context_provider.current_digest then return nil end
+            return { { annotation_id = "a" } }
+        end,
+    }
+    plan = SyncLogic.planLocalContribution(
+        context_provider, nil, WATERMARK, "book-a")
+    assertEqual(plan.known, true, "the matching document context is readable")
+    assertEqual(#plan.deletions, 1, "the matching context still syncs real deletions")
+
+    context_provider.current_digest = "book-b"
+    plan = SyncLogic.planLocalContribution(
+        context_provider, nil, WATERMARK, "book-a")
+    assertEqual(plan.known, false, "a replaced document context is not book A's set")
+    assertEqual(#plan.deletions, 0,
+        "book B's list cannot delete anything from book A's watermark")
+    assertEqual(plan.may_save_watermark, false,
+        "a mismatched context cannot replace book A's watermark")
 end
 
 -- #1366: the server can now send a position that is a percentage with no

@@ -249,7 +249,7 @@ end
 -- `list` is then an empty table so callers can still diff safely; they must not
 -- derive deletions from it. A provider that throws is treated as unreadable, not
 -- as empty — a raise is the least trustworthy answer of all.
-function SyncLogic.resolveLocalSet(provider, volume_id)
+function SyncLogic.resolveLocalSet(provider, volume_id, expected_document_digest)
     if type(provider) ~= "table" or type(provider.readAll) ~= "function" then
         return {}, false
     end
@@ -259,7 +259,7 @@ function SyncLogic.resolveLocalSet(provider, volume_id)
     if not (provider.push_all_local or volume_id) then
         return {}, false
     end
-    local ok, list = pcall(provider.readAll, volume_id)
+    local ok, list = pcall(provider.readAll, volume_id, expected_document_digest)
     if not ok or type(list) ~= "table" then
         return {}, false
     end
@@ -281,8 +281,9 @@ end
 --   may_save_watermark -- whether `list` is fit to become the new watermark;
 --                         saving a placeholder would make the next sync believe
 --                         the device had nothing to begin with
-function SyncLogic.planLocalContribution(provider, volume_id, watermark)
-    local list, known = SyncLogic.resolveLocalSet(provider, volume_id)
+function SyncLogic.planLocalContribution(provider, volume_id, watermark, expected_document_digest)
+    local list, known = SyncLogic.resolveLocalSet(
+        provider, volume_id, expected_document_digest)
     return {
         list = list,
         known = known,
