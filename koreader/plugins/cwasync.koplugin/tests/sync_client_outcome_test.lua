@@ -148,12 +148,56 @@ local function fakePushClient(responses)
     return { client = transport }, calls
 end
 
+local function deletedIds(count)
+    local deleted = {}
+    for i = 1, count do deleted[i] = "annotation-" .. tostring(i) end
+    return deleted
+end
+
+local function testDeletePushPreservesZeroAndBoundaryRequestShapes()
+    local annotations = { { annotation_id = "live-1" } }
+
+    local subject, calls = fakePushClient({
+        { status = 200, body = { updated = 1 } },
+    })
+    local outcomes = {}
+    CWASyncClient.push_annotations(subject, "user", "pass", "digest",
+        annotations, {}, function(ok)
+            outcomes[#outcomes + 1] = ok
+        end)
+    assertEqual(#calls, 1, "zero deletes preserve the original one-request push")
+    assertEqual(calls[1].annotations, annotations,
+        "a no-delete push still carries every live annotation")
+    assertEqual(calls[1].deleted, nil,
+        "a no-delete push does not invent delete authority")
+    assertEqual(#outcomes, 1, "a no-delete push completes exactly once")
+    assertEqual(outcomes[1], true, "a successful no-delete push remains successful")
+
+    subject, calls = fakePushClient({})
+    CWASyncClient.push_annotations(subject, "user", "pass", "digest",
+        annotations, deletedIds(200), function() end)
+    assertEqual(#calls, 1, "exactly 200 delete ids remain one request")
+    assertEqual(#calls[1].deleted, 200, "the boundary request carries all 200 ids")
+    assertEqual(calls[1].annotations, annotations,
+        "the boundary request carries the live set")
+
+    subject, calls = fakePushClient({})
+    CWASyncClient.push_annotations(subject, "user", "pass", "digest",
+        annotations, deletedIds(201), function() end)
+    assertEqual(#calls, 2, "201 delete ids cross the boundary exactly once")
+    assertEqual(#calls[1].deleted, 200, "the first boundary chunk is capped")
+    assertEqual(#calls[2].deleted, 1, "the second boundary chunk has the remainder")
+    assertEqual(calls[1].annotations, annotations,
+        "the live set rides the first boundary chunk")
+    assertEqual(#calls[2].annotations, 0,
+        "the boundary continuation is delete-only")
+end
+
 -- F-e4da4d: delete request size is bounded on the slow device side, while the
 -- logical push remains one all-or-failed operation to the caller. The caller
 -- advances its watermark only when this callback says every chunk succeeded.
 local function testDeletePushIsBoundedAndCompletesOnce()
-    local deleted = {}
-    for i = 1, 451 do deleted[i] = "annotation-" .. tostring(i) end
+    local deleted = deletedIds(451)
     local annotations = { { annotation_id = "live-1" } }
     local subject, calls = fakePushClient({})
     local outcomes = {}
@@ -183,8 +227,7 @@ local function testDeletePushIsBoundedAndCompletesOnce()
 end
 
 local function testDeletePushFailureStopsAndCannotCompleteWatermark()
-    local deleted = {}
-    for i = 1, 401 do deleted[i] = "annotation-" .. tostring(i) end
+    local deleted = deletedIds(401)
     local subject, calls = fakePushClient({
         { status = 200, body = { deleted = 200 } },
         { status = 503, body = { error = "busy" } },
@@ -210,6 +253,7 @@ testNoSyncFailureIsWrittenAtDbg()
 testRaisedCallReportsAReasonAndWarns()
 testNon200ReportsItsStatus()
 testSuccessCarriesNoReason()
+testDeletePushPreservesZeroAndBoundaryRequestShapes()
 testDeletePushIsBoundedAndCompletesOnce()
 testDeletePushFailureStopsAndCannotCompleteWatermark()
 

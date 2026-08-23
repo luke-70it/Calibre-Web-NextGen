@@ -162,3 +162,61 @@ expected document digest no longer reaches the delayed read.
 Mutation counts at D2-P1 are therefore **constant-false: 2 failures** and
 **constant-true: 2 failures**. The two wiring points each add one independent
 detection failure when degraded.
+
+## Deliverable 3 — bounded delete requests
+
+Verdict: **OBSERVED SAFE** at the executable client/callback boundary.
+
+`sync_client_outcome_test.lua` now pins the complete request-size boundary:
+
+- zero deletes preserves the legacy single annotation request and sends no
+  `deleted` authority;
+- 200 IDs makes one request;
+- 201 IDs makes 200 + 1;
+- 451 IDs makes 200 + 200 + 51;
+- ordering is preserved, the live annotation table is sent exactly once, and
+  the logical callback completes exactly once;
+- a 503 on chunk two of three stops before chunk three and returns one failed
+  logical outcome.
+
+### Green execution
+
+Command:
+
+```text
+pytest -q --tb=short tests/unit/test_920_koreader_local_set_read_authority.py
+```
+
+Restored output:
+
+```text
+collected 7 items
+tests/unit/test_920_koreader_local_set_read_authority.py ....... [100%]
+7 passed in 0.14s
+```
+
+### Red-first observation
+
+The pre-fix unbounded behavior was restored without removing the loop by
+setting `ANNOTATION_DELETE_CHUNK_SIZE = math.huge`. Output:
+`1 failed, 6 passed in 0.16s`; the Lua suite reports `201 delete ids cross the
+boundary exactly once`, expected 2 requests, actual 1. This is the RED
+regression observation for d5f37bfc6, and it fails on request behavior rather
+than a changed function signature.
+
+### Predicate mutation matrix
+
+Every row was run with the same command above. Each `1 failed` is the
+`sync_client_outcome_test.lua` pytest parameter; the other six focused tests
+remain green.
+
+| Point | Constant-true result | Constant-false result | Detected behavior |
+|---|---:|---:|---|
+| D3-P0 delete-presence (`has_deletes`) | 1 failed, 6 passed | 1 failed, 6 passed | true drops the zero-delete request (expected 1, actual 0); false omits the real delete list (`deleted` is nil) |
+| D3-P1 first-chunk live-set selector (`first == 1`) | 1 failed, 6 passed | 1 failed, 6 passed | true replays the live set on the continuation (expected 0 rows, actual 1); false omits it from the first request |
+| D3-P2 chunk-failure predicate (`not ok or status != 200`) | 1 failed, 6 passed | 1 failed, 6 passed | true stops a 201-ID success after request one; false sends request three after chunk two returned 503 |
+
+Observed runtimes were 0.15–0.16 seconds per mutation. The D3-P2
+constant-false test also retains assertions that the one logical callback is
+failure with reason `HTTP 503`; once the stop-count assertion is restored, the
+green run reaches and passes those watermark-facing outcome assertions.
