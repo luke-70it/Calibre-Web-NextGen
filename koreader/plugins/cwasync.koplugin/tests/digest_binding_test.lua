@@ -36,6 +36,13 @@ assertEqual(type(current), "table",
 assertEqual(#current, 1,
     "the accepted current context contributes its real annotation set")
 
+Provider.setContext({ annotation = { annotations = {
+    { text = "same book, new context", datetime = "2026-08-22T00:00:02Z", page = 3 },
+} } }, "digest-current")
+local reopened_same_book = Provider.readAll(nil, "digest-current")
+assertEqual(#reopened_same_book, 1,
+    "replacing the singleton for the same digest is not refused")
+
 -- Simulate a second sync replacing the module singleton before the first
 -- pull's callback reads it.  The older callback must not consume the new book.
 Provider.setContext({ annotation = { annotations = {

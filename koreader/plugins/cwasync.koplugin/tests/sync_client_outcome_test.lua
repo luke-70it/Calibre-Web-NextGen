@@ -234,10 +234,14 @@ local function testDeletePushFailureStopsAndCannotCompleteWatermark()
         { status = 200, body = { deleted = 1 } },
     })
     local outcomes = {}
+    local watermark_saved = false
 
     CWASyncClient.push_annotations(subject, "user", "pass", "digest", {}, deleted,
         function(ok, body, reason)
             outcomes[#outcomes + 1] = { ok = ok, body = body, reason = reason }
+            -- This is the exact caller contract main.lua uses: it saves only
+            -- inside `if ok2 and plan.may_save_watermark then`.
+            if ok then watermark_saved = true end
         end)
 
     assertEqual(#calls, 2, "a failed second chunk prevents the third request")
@@ -246,6 +250,8 @@ local function testDeletePushFailureStopsAndCannotCompleteWatermark()
         "a partial delete is never reported as complete to the watermark caller")
     assertEqual(outcomes[1].reason, "HTTP 503", "the failed chunk status reaches the user")
     assertEqual(outcomes[1].body.error, "busy", "the failed chunk body is preserved")
+    assertEqual(watermark_saved, false,
+        "a partial delete cannot make the caller treat its watermark as complete")
 end
 
 testDescribeFailureNamesEveryShape()

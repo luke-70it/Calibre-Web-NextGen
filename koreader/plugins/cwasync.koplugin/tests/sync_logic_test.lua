@@ -359,6 +359,20 @@ local function testPlanLocalContribution()
         "book B's list cannot delete anything from book A's watermark")
     assertEqual(plan.may_save_watermark, false,
         "a mismatched context cannot replace book A's watermark")
+
+    -- Unknown local authority is not an abort. The already-completed pull can
+    -- still be diffed/applied device-ward; only this callback's contribution
+    -- and deletion authority are empty. This mirrors main.lua's post-plan
+    -- control flow, whose source gate pins that it does not branch on known.
+    local remote_after_mismatch = { { annotation_id = "server-book-a" } }
+    local mismatch_diff = SyncLogic.diffAnnotations(plan.list, remote_after_mismatch)
+    if context_provider.push_all_local then
+        mismatch_diff.send_to_server = plan.list
+    end
+    assertEqual(#mismatch_diff.apply_to_device, 1,
+        "a mismatch does not abort processing of the completed server pull")
+    assertEqual(#mismatch_diff.send_to_server, 0,
+        "a mismatch contributes none of the replacement book's live set")
 end
 
 -- #1366: the server can now send a position that is a percentage with no

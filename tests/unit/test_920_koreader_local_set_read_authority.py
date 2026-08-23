@@ -123,6 +123,10 @@ def test_the_call_site_consumes_the_decision_rather_than_recomputing_it():
         r"self:readAnnotationWatermark\(\),\s*digest\s*\)",
         main,
     ), "the expected document digest must reach the provider's delayed read"
+    assert "plan.known" not in main, (
+        "an unknown/mismatched local set must suppress local contribution, "
+        "not abort the already-completed annotation pull"
+    )
 
     # And the negative half: the call site must own none of this. Each of these
     # is a route by which authority could be re-derived locally — which is the
