@@ -640,7 +640,33 @@ annotation_revision
 
 ### 11.3 Empty-set ETag and deletion representation
 
-**[ASSUMED]** The exact upstream ETag for a genuinely empty annotation set and the composite-manifest representation of deletion have not been measured.
+**[OBSERVED 2026-08-23]** The empty-set token is `W/"0"`. Measured on the operator's Clara BW
+(read-only DB copy `db-20260822-235633`): of the ten books carrying a non-blank
+`content.AnnotationsSyncToken`, the four with zero `Bookmark` rows all hold exactly `W/"0"`, and
+every book holding a composite manifest has at least one annotation. So an empty authoritative set
+does have a representable, non-synthesised token, and the "do not synthesize a composite empty
+token" restriction below is satisfied by replaying `W/"0"` rather than by refusing to serve.
+
+**[OBSERVED 2026-08-23]** Two further properties of the composite manifest, from the same device,
+comparing three snapshots taken 2026-08-21 00:20, 2026-08-22 10:43 and 2026-08-22 23:56:
+
+* Entries are ordered by an **ASCII sort on the stable-ID hash**, not by creation time, position, or
+  the leading letter. Observed on a 14-entry manifest whose leading letters run A,A,C,B,A,B,B,B,B,B,
+  B,C,B,C while the hashes are strictly ascending.
+* The **stable-ID hash is invariant across version bumps**; only the `<version-int>` moves. Three
+  entries advanced their version between snapshots with byte-identical hashes.
+
+**[OBSERVED 2026-08-23 — UNEXPLAINED, do not design against it yet]** The manifest is **not
+one-book-one-annotation-set**. Six different books carry manifests with the *same fourteen*
+stable-ID hashes but *different* per-entry version ints, and only one of those books (`1984`) has
+fourteen annotations; two of them have none at all. Either the hash is not an annotation identity,
+or the token is not scoped per book. This matters because section 7.3 requires that no ETag match
+for one book may suppress or name another, and a manifest shared across books is exactly the shape
+that would break that. **Resolve this before any ETag-equality comparison is trusted across books.**
+
+**[ASSUMED]** The composite-manifest representation of deletion has still not been measured, and
+neither has the derivation of the stable-ID hash (it is not a plain MD5/SHA1/raw-bytes base64 of
+`BookmarkID` -- all four were tested against a 14-entry manifest and none matched).
 
 **[ASSUMED — RECOMMENDATION]** Closing experiment: seed a book with zero annotations, capture GET body/header and next check; then create one annotation, sync, delete it, and capture every manifest transition. Until then, accept an empty seed only with exact device/upstream ETag equality and do not synthesize a composite empty token.
 
