@@ -57,6 +57,8 @@ CALIBRE_911_EPUB3_SERIES_OPF = """<?xml version="1.0" encoding="utf-8"?>
     <dc:title id="title">Fixture Title</dc:title>
     <dc:creator id="creator">Fixture Author</dc:creator>
     <dc:language>eng</dc:language>
+    <meta property="dcterms:modified">2026-08-23T12:00:00Z</meta>
+    <meta name="cover" content="cover-image"/>
     <!--Image: 671 x 1000 size=63885 q=50-->
     <meta property="belongs-to-collection" id="id-5">Verify Series</meta>
     <meta refines="#id-5" property="collection-type">series</meta>
@@ -72,6 +74,7 @@ CALIBRE_911_EPUB3_SERIES_OPF = """<?xml version="1.0" encoding="utf-8"?>
   <manifest>
     <item id="nav" href="../nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
     <item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/>
+    <item id="cover-image" href="cover.jpg" media-type="image/jpeg" properties="cover-image"/>
   </manifest>
   <spine><itemref idref="chapter"/></spine>
 </package>
@@ -211,4 +214,5 @@ def build_calibre_epub3_series_kepub(dest: Path) -> Path:
         archive.writestr("nav.xhtml", nav)
         archive.writestr("OEBPS/content.opf", CALIBRE_911_EPUB3_SERIES_OPF)
         archive.writestr("OEBPS/chapter.xhtml", chapter)
+        archive.writestr("OEBPS/cover.jpg", b"real-shape-cover-bytes")
     return dest
