@@ -6,7 +6,7 @@ Public API:
   - register_handler(handler): plug in a new target
   - available_targets(): list registered target names
   - dispatch_annotation_sync(payload_annotations, book, user): push every annotation
-  - dispatch_annotation_deletes(deleted_ids, user, book_id): delete scoped annotations
+  - dispatch_annotation_deletes(..., deletable_sources=...): delete scoped annotations
 
 The dispatcher owns all DB persistence — Annotation rows + AnnotationSyncTarget
 rows + the status state machine. Handlers are stateless: they make remote
@@ -611,25 +611,32 @@ def _mark_pending(session, annotation, user):
 
 
 def dispatch_annotation_sync(payload_annotations, book, user, *, origin_device_id=None,
-                             raw_materializations=None, trace_id=None) -> None:
+                             raw_materializations=None, trace_id=None) -> bool:
     """Persist each valid annotation independently, then fan it out.
 
     Device batches are a transport convenience, not a transaction boundary: one
     malformed member or failed write must not roll back already-preserved user
     data or prevent later members from being attempted.
+
+    Return ``True`` only when every addressable member was persisted (or was an
+    idempotent/stale no-op).  ``False`` is transport-significant: the Reading
+    Services route must not proxy a success to Kobo, because Nickel uploads
+    deltas and may never offer an acknowledged member again.
     """
     from cps import ub
     if not payload_annotations:
-        return
+        return True
     if not isinstance(payload_annotations, list):
         log.warning("Skipping annotation batch because updatedAnnotations is not a list")
-        return
+        return False
     jobs = []
+    all_persisted = True
     for index, payload in enumerate(payload_annotations):
         if not isinstance(payload, dict):
             log.warning(
                 "Skipping non-object annotation member at updatedAnnotations[%d]", index,
             )
+            all_persisted = False
             continue
         pending_job = None
         try:
@@ -652,6 +659,7 @@ def dispatch_annotation_sync(payload_annotations, book, user, *, origin_device_i
                 push_annotation_to_handlers(ub.session, ann, book, user, payload=payload)
             committed = ub.session_commit()
             if committed is False:
+                all_persisted = False
                 log.error(
                     "Annotation %s could not be committed; continuing with the batch",
                     payload.get("id"),
@@ -665,6 +673,7 @@ def dispatch_annotation_sync(payload_annotations, book, user, *, origin_device_i
                     annotation_count=1,
                 )
         except Exception:
+            all_persisted = False
             # A failed SQLAlchemy transaction poisons the scoped session until an
             # explicit rollback. Do that here, then continue: prior annotations
             # were committed independently and later annotations still deserve a
@@ -678,6 +687,7 @@ def dispatch_annotation_sync(payload_annotations, book, user, *, origin_device_i
         if pending_job is not None:
             jobs.append(pending_job)
     _enqueue(user, jobs, book=book)
+    return all_persisted
 
 
 def dispatch_existing_annotation_sync(annotation, book, user) -> None:
@@ -702,15 +712,22 @@ def dispatch_existing_annotation_sync(annotation, book, user) -> None:
     _enqueue(user, jobs, book=book)
 
 
-def dispatch_annotation_deletes(deleted_ids, user, book_id=None) -> None:
+def dispatch_annotation_deletes(
+    deleted_ids, user, book_id=None, *, deletable_sources,
+) -> None:
     """For each annotation_id, transition non-tombstone sync_targets via
     handler.delete AND soft-delete the local Annotation row by setting
     ``hidden=True``.
 
-    Sub-project (2): local soft-delete happens unconditionally — independent
-    of any enabled sync target. Recovery is symmetric: a subsequent
-    create/update PATCH for the same annotation_id un-hides it via
-    ``_upsert_annotation``.
+    ``deletable_sources`` is the caller's provenance authority. Device bridges
+    pass the sources that device can honestly name; a direct user action passes
+    ``None`` to declare authority across sources. Requiring the keyword makes a
+    new bridge choose an authority model instead of inheriting an unsafe
+    default.
+
+    Once authorised, local soft-delete happens independently of any enabled
+    sync target. Recovery is symmetric: a subsequent create/update PATCH for
+    the same annotation_id un-hides it via ``_upsert_annotation``.
     """
     from cps import ub
     if not deleted_ids:
@@ -732,6 +749,20 @@ def dispatch_annotation_deletes(deleted_ids, user, book_id=None) -> None:
             query = query.filter(ub.Annotation.book_id == book_id)
         ann = query.first()
         if ann is None:
+            continue
+        delete_authorized = (
+            deletable_sources is None or ann.source in deletable_sources
+        )
+        if not delete_authorized:
+            # Keep device transports successful for compatibility, but never
+            # let a refused destructive request disappear without provenance
+            # details that identify the authority mismatch.
+            log.warning(
+                "Annotation delete refused: user=%s book=%s annotation_id=%r "
+                "stored_source=%r deletable_sources=%s",
+                user.id, ann.book_id, annotation_id, ann.source,
+                sorted(deletable_sources),
+            )
             continue
         # Push delete through any non-tombstone sync targets.
         for st in list(ann.sync_targets):

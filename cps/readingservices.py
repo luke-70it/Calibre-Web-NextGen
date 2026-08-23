@@ -50,6 +50,23 @@ CONNECTION_SPECIFIC_HEADERS = [
     "transfer-encoding",
 ]
 
+
+def _is_check_for_changes_path(path):
+    """Recognize equivalent spellings of the destructive Nickel trigger."""
+    normalized_parts = [part.casefold() for part in path.split("/") if part]
+    return normalized_parts == ["api", "v3", "content", "checkforchanges"]
+
+
+def _is_annotation_path(path):
+    """Recognize the one reading-services route whose PATCH carries user data."""
+    normalized_parts = [part.casefold() for part in path.split("/") if part]
+    return (
+        len(normalized_parts) == 5
+        and normalized_parts[:3] == ["api", "v3", "content"]
+        and normalized_parts[-1] == "annotations"
+    )
+
+
 def redact_headers(headers):
     """Redact sensitive headers from the headers dictionary.
     
@@ -136,22 +153,34 @@ def requires_reading_services_auth_and_config(f):
 
     Authentication uses the existing Flask session, whether it came from a
     Kobo-sync handshake or a browser login. If Kobo sync is off OR the user
-    isn't logged in, we proxy through to Kobo untouched.
+    isn't logged in, we normally proxy through to Kobo untouched. Two routes
+    are exceptions: checkforchanges must still run ownership containment, and
+    an annotation PATCH must fail authentication instead of forwarding a
+    success that would make Nickel forget an upload CWNG did not capture.
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not config.config_kobo_sync:
+        contains_check_for_changes = _is_check_for_changes_path(request.path)
+        if not config.config_kobo_sync and not contains_check_for_changes:
             log.debug("Kobo sync disabled, proxying to Kobo")
             return proxy_to_kobo_reading_services()
         if current_user.is_authenticated:
-            try:
-                from .services.device_registry import register_kobo_device_best_effort
-                g.annotation_origin_device_id = register_kobo_device_best_effort(
-                    user_id=current_user.id, headers=request.headers, return_internal=True,
-                )
-            except Exception:
-                log.warning("Best-effort Kobo device observation failed", exc_info=True)
+            if config.config_kobo_sync:
+                try:
+                    from .services.device_registry import register_kobo_device_best_effort
+                    g.annotation_origin_device_id = register_kobo_device_best_effort(
+                        user_id=current_user.id, headers=request.headers, return_internal=True,
+                    )
+                except Exception:
+                    log.warning("Best-effort Kobo device observation failed", exc_info=True)
             return f(*args, **kwargs)
+        if contains_check_for_changes:
+            return f(*args, **kwargs)
+        if request.method == "PATCH" and _is_annotation_path(request.path):
+            log.warning(
+                "Refusing unauthenticated annotation PATCH so the device can retry"
+            )
+            return make_response(jsonify({"error": "Authentication required"}), 401)
         log.debug("Reading services request without auth, proxying to Kobo")
         return proxy_to_kobo_reading_services()
     return decorated_function
@@ -524,20 +553,37 @@ def handle_annotations(entitlement_id):
                             raw_materializations=raw_materializations,
                             trace_id=trace_id,
                         )
-                    annotation_sync.dispatch_annotation_sync(
+                    persisted = annotation_sync.dispatch_annotation_sync(
                         updated, book, current_user, **dispatch_kwargs,
                     )
+                    if persisted is False:
+                        log.error(
+                            "Kobo annotation PATCH was not fully persisted for "
+                            "user_id=%s book_id=%s; refusing to acknowledge it upstream",
+                            getattr(current_user, "id", None), book.id,
+                        )
+                        return make_response(
+                            jsonify({"error": "Annotation capture temporarily unavailable"}),
+                            503,
+                        )
                 if deleted is not None and not isinstance(deleted, list):
                     log.warning(
                         "Ignoring deletedAnnotationIds for entitlement %s: expected a list",
                         entitlement_id,
                     )
                 elif deleted:
+                    # Nickel can only name annotations Kobo created: CWNG has
+                    # no annotation writeback to Kobo. If F-3b565b implements
+                    # writeback, this provenance authority must be revisited.
                     annotation_sync.dispatch_annotation_deletes(
                         deleted, current_user, book_id=book.id,
+                        deletable_sources={"kobo"},
                     )
         except Exception:
             log.exception("Error processing PATCH annotations")
+            return make_response(
+                jsonify({"error": "Annotation capture temporarily unavailable"}), 503,
+            )
     # Proxy both GET + PATCH. Do not refuse GET: hardware testing showed that a
     # 503 (or a hung request) makes Nickel empty its local annotations. The safe
     # containment point is checkforchanges, before Nickel decides to GET.
@@ -549,6 +595,11 @@ def handle_annotations(entitlement_id):
 @requires_reading_services_auth_and_config
 def handle_check_for_changes():
     """Keep locally-owned content out of Nickel's destructive GET trigger."""
+    return _handle_check_for_changes()
+
+
+def _handle_check_for_changes():
+    """Apply ownership containment independent of route and session spelling."""
     entries = _parse_check_for_changes_request(request.get_data())
     if entries is None:
         log.warning("Not proxying an unrecognized Kobo checkforchanges request")
@@ -608,5 +659,7 @@ def handle_unknown_reading_service_request(subpath):
     Catch-all handler for any reading services requests not explicitly handled.
     Logs the request and proxies to Kobo's reading services.
     """
+    if _is_check_for_changes_path(request.path):
+        return _handle_check_for_changes()
     # Proxy to Kobo reading services
     return proxy_to_kobo_reading_services()

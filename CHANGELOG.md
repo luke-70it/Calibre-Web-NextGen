@@ -16,6 +16,142 @@ is for things you can see or feel when running the app.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Cover thumbnails load faster, and the gap widens the bigger your library
+  gets.** Every cover request searched the whole thumbnail table instead of
+  going straight to the row it wanted, and the book grid asked for each cover
+  twice — once for the WebP version and once for the JPEG. Both are fixed, so a
+  page of covers now costs a fraction of the database work it used to. Reported
+  by @ericsilberberg on Discord, who was running NextGen and stock Calibre-Web
+  side by side and noticed pages populating more slowly here
+  ([#1571](https://github.com/new-usemame/Calibre-Web-NextGen/issues/1571)).
+
+## [v4.1.40] - 2026-08-23
+
+### Added
+
+- **The desktop sidebar now leaves more room for books without taking navigation
+  away.** On mouse-and-keyboard desktops it stays as a narrow icon rail, then
+  expands over the page when you hover over it or focus it with the keyboard.
+  Touch devices and smaller screens keep the existing menu drawer. Proposed and
+  contributed by @chloeroform ([#1019](https://github.com/new-usemame/Calibre-Web-NextGen/issues/1019),
+  [#1652](https://github.com/new-usemame/Calibre-Web-NextGen/pull/1652)).
+
+### Fixed
+
+- **After opening a sidebar destination, the expanded desktop navigation could
+  stay over the new page and block its left-side controls simply because the
+  pointer was still resting over the item that was clicked.** The rail now
+  stays collapsed while the pointer travels out toward the page; deliberately
+  returning to the rail or focusing it with the keyboard still expands it
+  without shifting the page content.
+
+- **The Discover strip no longer changes its books when you return to the
+  browser tab.** The earlier app-wide fix stopped most cached pages from
+  refreshing on focus, but Discover's random-book request had its own rule and
+  still fetched a fresh set. It now keeps the same picks until you deliberately
+  shuffle or reload them. Reported by
+  [@TangentFoxy](https://github.com/TangentFoxy) and fixed by
+  [@chloeroform](https://github.com/chloeroform) ([#1628](https://github.com/new-usemame/Calibre-Web-NextGen/issues/1628),
+  [#1653](https://github.com/new-usemame/Calibre-Web-NextGen/pull/1653)).
+
+- **A book now takes you back to the list you opened it from instead of
+  dropping you at the library root.** The back link returns to the same author,
+  series, tag, publisher, language, rating, format, shelf, magic shelf, or
+  discovery view (Hot, Discover, Top rated, Favourites, or Archived), so a
+  filtered view no longer has to be rebuilt by hand. A library search also
+  returns with its `?q=` query intact. Advanced search is an honest exception:
+  `/search` returns to the search page with an empty form, not the previous
+  criteria or results, because that page keeps its criteria in component state
+  and puts nothing in the URL. The destination survives a reload of the book
+  page, but the list's loaded pages and scroll position do not, so it returns at
+  the top; a book opened from a deep link with no recorded origin still falls
+  back to the library root as before. Opening a book from somewhere that is not
+  a list — a notice banner on another page, for example — or going straight
+  from one book to another shows “← Library”, because there is no list behind
+  it. Reported by @Arjan61 in #666.
+
+- **Smart shelves and other library activity now keep recording statistics when
+  source-tree and container installs launch outside the application directory.**
+  Those launches could not find the CWA settings database module, which filled
+  the log with `No module named 'scripts'` errors and silently dropped activity
+  records for smart shelves, searches, shelves, OPDS, Kobo sync, and related
+  actions. Reported in
+  [#1755](https://github.com/new-usemame/Calibre-Web-NextGen/issues/1755).
+
+- **Profile pictures and update reminders now follow the configured data
+  directory instead of assuming every install uses `/config`.** Source and
+  bare-metal installs could otherwise read or write the container paths, making
+  a saved profile picture disappear from one interface or preventing it from
+  updating, and making the once-a-day update reminder forget its state. Both
+  files now live wherever the installation's configuration actually lives.
+  Reported by [@Thovi98](https://github.com/Thovi98) and fixed by
+  [@chloeroform](https://github.com/chloeroform) ([#1556](https://github.com/new-usemame/Calibre-Web-NextGen/issues/1556),
+  [#1678](https://github.com/new-usemame/Calibre-Web-NextGen/pull/1678)).
+
+- **A Kobo can no longer erase a book's local highlights when its Calibre-Web
+  session expires or an admin has just disabled Kobo sync.** Those transition
+  windows, plus alternate spellings of Kobo's `checkforchanges` request, could
+  bypass the owned-book filter and tell the device to replace its complete
+  local highlight set from the cloud response. Every equivalent request now
+  reaches the same ownership containment; owned books receive an empty change
+  list, while Kobo-store content continues to proxy normally.
+
+- **Merging duplicate books no longer discards the newest copy of a highlight
+  or note when both books carry the same annotation.** The merge always dropped
+  the annotation attached to the book being removed, even when that copy held a
+  later edit than the one on the book being kept. It now compares the available
+  edit times and revision, then preserves the newest complete version and its
+  sync state.
+
+- **Deleting KOReader highlights from a heavily annotated book is no longer
+  slower the more highlights that book holds.** Removing a handful of
+  highlights made the server load every live KOReader highlight in that book
+  first, so the work grew with the size of your collection rather than with the
+  number of deletions. The server now looks up only the highlights actually
+  being removed, in bounded groups. Which highlights get deleted is unchanged,
+  and unrelated highlights are untouched.
+
+- **Two people could not find how to delete a book in the new UI and switched
+  back to the classic view over it.** Deletion worked, but the edit page had no
+  whole-book delete control and the book page buried Delete at the end of a
+  wrapping row of ordinary actions. The edit page now puts Delete book beside
+  Edit metadata, and the book page gives it its own clearly labelled
+  destructive section — the two places people actually look. Both remain
+  permission-gated and confirm before deleting. Reported through anonymous
+  feedback ([#1046](https://github.com/new-usemame/Calibre-Web-NextGen/issues/1046),
+  duplicate [#1037](https://github.com/new-usemame/Calibre-Web-NextGen/issues/1037)).
+
+- **People who had permission to manage someone else's public smart shelf could
+  not do so in the new UI.** Its Edit, Duplicate, and Delete controls were all
+  hidden unless you owned the shelf, even though the server allows admins to
+  edit it, shelf editors to delete it, and any signed-in viewer to duplicate it.
+  Each control now follows its own server-provided permission, matching ordinary
+  shelves; Kobo sync remains available only to the shelf owner. Reported by
+  [@iroQuai](https://github.com/iroQuai) ([#1734](https://github.com/new-usemame/Calibre-Web-NextGen/issues/1734),
+  umbrella [#867](https://github.com/new-usemame/Calibre-Web-NextGen/issues/867)).
+
+- **Pages and API requests no longer fail sporadically with a dropped
+  connection or `socket hang up` behind a reverse proxy or in a client that
+  pools connections.** The server deliberately closes every HTTP connection
+  after its response; it now sends `Connection: close` so HTTP/1.1 clients do
+  not return that closing socket to their pool and try to reuse it.
+
+- **The dependency list on the Statistics page now tells you when something is
+  actually missing.** The list is built from the packages Calibre-Web NextGen
+  declares it needs, but a few of those only apply to certain systems — one is
+  Windows-only, another is for older Python versions. On everything else they
+  were reported as "not installed", so the page hid every "not installed" row to
+  keep them out of sight, and a dependency that was genuinely absent got hidden
+  along with them. That only matters if you run from source rather than the
+  Docker image, where it is possible to end up short a package after an upgrade:
+  the page showed nothing wrong and the app failed later with an import error
+  instead. Entries that do not apply to your system are now left out at the
+  source, and anything genuinely missing is listed again. Docker users see the
+  same list as before, minus two rows that never applied. Packaging work by
+  @chloeroform (#1442).
+
 ## [v4.1.39] - 2026-08-21
 
 ### Fixed
@@ -159,7 +295,6 @@ is for things you can see or feel when running the app.
   a pink or grey highlight used to fail silently, because the note editor sent
   the highlight's colour back with it and the server does not accept those as a
   choice.
-
 - **Active imports no longer incorrectly ask for a manual duplicate scan on
   bare-metal installs or when ingest marker paths are customized.** Both the
   importer and the duplicate index now look for the batch markers in the same
