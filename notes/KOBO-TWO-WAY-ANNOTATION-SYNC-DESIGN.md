@@ -626,17 +626,62 @@ annotation_revision
 
 **[OBSERVED]** No measured `checkforchanges` request contained more than one content ID.
 
+**[OBSERVED 2026-08-23]** Still true with request bodies finally captured. Every captured
+`checkforchanges` carried exactly **one** entry, shaped `{"ContentId": …, "etag": …}`, and the
+device only asked about a book it had **just had open** — books it was not actively reading were
+absent from the request entirely. So the batching question is not merely unmeasured, it may be
+hard to provoke: to see a multi-entry request you likely have to make several books active in one
+session. The `etag` the device sends is exactly the token it has stored for that book, which is
+what makes the section 7.3 equality test workable.
+
+**[OBSERVED 2026-08-23]** The annotations GET the trigger produces is
+`GET /api/v3/content/<id>/annotations?limit=100` — the device asks for a page size of 100, which
+is the concrete number section 11.4's pagination work has to satisfy.
+
 **[ASSUMED — RECOMMENDATION]** Implement array parsing and independent per-entry decisions now, but gate production claims about batch ordering/partial upstream merge until tested.
 
 **[ASSUMED — RECOMMENDATION]** Closing experiment: open/close or force sync with at least two changed books, capture request/response order, and test a mixed batch containing one CWNG-authoritative owned book, one unseeded owned book, and one non-owned Kobo book.
 
-### 11.2 Arbitrary ETag grammar
+### 11.2 Arbitrary ETag grammar — **CLOSED 2026-08-23. Nickel treats the ETag as opaque.**
 
 **[OBSERVED]** Kobo's emitted ETag is a structured composite manifest, not an opaque random token.
 
-**[ASSUMED]** Nickel may still treat the HTTP ETag as opaque for equality, but this has not been observed.
+**[OBSERVED 2026-08-23 — the Stage 3 experiment was run on hardware and it passed.]** Nickel
+accepts a CWNG-authored ETag that shares none of Kobo's manifest grammar, stores it byte-for-byte,
+and sends it back on the next `checkforchanges`.
 
-**[ASSUMED — RECOMMENDATION]** Closing experiment is Stage 3: serve an unchanged set with a valid non-composite CWNG ETag and verify exact echo on two subsequent cycles before enabling any changed set.
+Instrument: the arming-file-gated scratch probe, hard-scoped to one ContentId, on the deployed
+server, against the operator's Clara BW. Subject: a book that was **already downloaded, had zero
+annotations, and carried the measured empty-set token `W/"0"`** — chosen so that no annotation
+could be lost whichever way the experiment went. The served body was the book's true state,
+`{"annotations":[],"nextPageOffsetToken":null}`, so the device's set could not change.
+
+    Cycle A  device -> checkforchanges  [{ContentId: 053742ff…, etag: W/"0"}]
+             server -> names the book so Nickel issues its GET
+             device -> GET /api/v3/content/053742ff…/annotations?limit=100
+             server -> 200, 45 bytes, ETag W/"CWNG:63e653e9-…:1:7be828578aae0f01"
+             device DB AnnotationsSyncToken:  W/"0"  ->  W/"CWNG:63e653e9-…:1:7be828578aae0f01"
+                                              ADOPTED BYTE-FOR-BYTE
+
+    Cycle B  device -> checkforchanges  [{ContentId: 053742ff…,
+                        etag: W/"CWNG:63e653e9-…:1:7be828578aae0f01"}]
+                                              ECHOED BYTE-FOR-BYTE
+
+Device integrity across the whole run: 30 `Bookmark` rows before and after, zero added, zero
+removed, zero modified.
+
+➡️ **Option B is viable and Option A is unnecessary.** CWNG does not need to reverse-engineer or
+synthesize Kobo's composite manifest; byte equality against a CWNG-owned revision ETag is a sound
+unchanged/changed test. The `W/"CWNG:<generation-id>:<authority-revision>:<digest-prefix>"` format
+recommended in section 7.2 is the exact string that was accepted and echoed.
+
+**[OBSERVED 2026-08-23 — unexplained, and it matters for rollback]** Serving `W/"0"` *after* the
+device had adopted a CWNG token did **not** move the stored token back; it stayed on the CWNG
+value. One attempt only, not a controlled test, and a follow-up cycle serving revision `2` could
+not be driven because Nickel throttled further syncs. **Do not assume a served ETag can always
+replace a stored one** — a rollback path that depends on overwriting the device's token is
+unproven. Discriminating test: serve a *different* CWNG revision and see whether that is adopted;
+if it is, `W/"0"` is being rejected specifically rather than adoption being conditional.
 
 ### 11.3 Empty-set ETag and deletion representation
 
