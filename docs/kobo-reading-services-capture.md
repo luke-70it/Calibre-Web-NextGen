@@ -45,3 +45,33 @@ compressed total, seven days, and 16 MiB for any individual body. An exchange
 above the body limit is skipped whole rather than saved partially. Any observer
 or storage failure is logged only with structural metadata and cannot replace,
 delay with retries, or change the response being observed.
+
+## Annotation PATCH recovery spool
+
+Independently of the opt-in observer, every annotation PATCH body is staged to
+durable local storage before JSON parsing, ownership dispatch, or annotation
+persistence begins. This is an always-on data-integrity mechanism, not a
+diagnostic gate. Its records live at:
+
+```text
+<config>/.cwng-private-observability/kobo-patch-spool/
+```
+
+The spool stores the exact raw body as base64 plus its byte length and SHA-256,
+the entitlement/user/origin-device identifiers needed to route a controlled
+replay, and one processing outcome: `staged`, `dispatch_exception`, or
+`dispatch_completed`. It never stores request headers. A completed record is
+retained too because completion of the route does not prove that every member
+commit succeeded. Replay is deliberately a server-side operator action; CWNG
+does not automatically reapply a PATCH or risk applying the same delta twice.
+`cps.services.kobo_patch_spool.iter_replay_candidates()` identifies definitely
+interrupted records and `load_spooled_patch(path)` verifies the stored length
+and digest before returning the original bytes.
+
+The spool uses the same mode-0700 private parent and mode-0600 atomic,
+fsynced gzip records as the observer. It is capped at 512 files, 64 MiB
+compressed total, 14 days, and 16 MiB per PATCH body. An oversized body or any
+storage failure is reported without body content and cannot change parsing,
+dispatch, the existing ownership-unknown 503, or the upstream response returned
+to the Kobo. The same repository, support-bundle, and external-backup exclusions
+described above apply.

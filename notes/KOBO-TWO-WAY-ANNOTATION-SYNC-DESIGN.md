@@ -604,6 +604,16 @@ compressed, seven days, and 16 MiB for any one body. Capture finalization is an 
 observer, storage exceptions are swallowed, and executed route tests prove identical status,
 headers, and body with the gate off, on, and throwing.
 
+**[OBSERVED — IMPLEMENTED 2026-08-23]** Annotation PATCH has a separate always-on recovery spool.
+The exact raw request body is atomically written and fsynced before JSON parsing, ownership
+resolution, or dispatch, so a processing exception leaves a server-side replay artifact without
+changing the response sent to Nickel. Records contain no headers, use the same private mode-0700
+parent and mode-0600 files, and are bounded to 512 records, 64 MiB compressed, 14 days, and 16 MiB
+per body. Normal-return records remain during retention because return from the dispatcher is not
+proof that every member committed. Replay is manual and integrity-checked; it is not automatic.
+This implements F-5c1146 addendum point (2). The finding's response-code/failed-member half remains
+open until the independent PATCH failure hardware experiment completes.
+
 **[ASSUMED — RECOMMENDATION]** Test migration on fresh, legacy, partially created, and repeated-run databases. Prove generic annotation values and `cfi_range` behavior are unchanged.
 
 ### Stage 1 — seed-only observe mode

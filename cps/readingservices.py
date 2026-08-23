@@ -368,6 +368,36 @@ def _capture_ownership_label(ownership):
     return "owned"
 
 
+def _stage_patch_for_recovery(raw_body, entitlement_id):
+    """Fsync PATCH bytes before parsing/dispatch; never change route success."""
+    try:
+        from .services import kobo_patch_spool
+        return kobo_patch_spool.stage_patch(
+            raw_body=raw_body,
+            entitlement_id=entitlement_id,
+            user_id=getattr(current_user, "id", None),
+            origin_device_id=getattr(g, "annotation_origin_device_id", None),
+        )
+    except Exception:
+        log.error(
+            "Kobo PATCH recovery spool could not stage user_id=%s bytes=%s",
+            getattr(current_user, "id", None), len(raw_body), exc_info=True,
+        )
+        return None
+
+
+def _mark_patch_spool_outcome(ticket, status):
+    if ticket is None:
+        return
+    try:
+        ticket.mark_dispatch_outcome(status)
+    except Exception:
+        log.error(
+            "Kobo PATCH recovery spool outcome failed spool_id=%s status=%s",
+            getattr(ticket, "spool_id", None), status, exc_info=True,
+        )
+
+
 def get_book_identifiers(book):
     """Extract relevant identifiers from book."""
     identifiers = {}
@@ -566,9 +596,9 @@ def handle_annotations(entitlement_id):
     Readwise / Notion / etc.). All DB writes happen in the dispatcher; this
     handler is a thin orchestrator.
 
-    Sub-project (2) note: this path persists annotations whenever the PATCH
-    includes content (i.e. annotations come from Kobo). The dispatcher now
-    persists independently of whether any external sync target is enabled.
+    The exact PATCH body is durably staged before parsing and dispatch so an
+    interrupted local capture can be replayed server-side. Local persistence is
+    independent of whether any external sync target is enabled.
     """
     raw_body = request.get_data(cache=True)
     capture_session = _begin_exchange_capture(
@@ -576,6 +606,7 @@ def handle_annotations(entitlement_id):
         raw_body,
     )
     if request.method == "PATCH":
+        patch_spool_ticket = _stage_patch_for_recovery(raw_body, entitlement_id)
         try:
             data = request.get_json(silent=True)
             if not isinstance(data, dict):
@@ -674,10 +705,13 @@ def handle_annotations(entitlement_id):
                         deletable_sources={"kobo"},
                     )
         except Exception:
+            _mark_patch_spool_outcome(patch_spool_ticket, "dispatch_exception")
             log.exception("Error processing PATCH annotations")
             return make_response(
                 jsonify({"error": "Annotation capture temporarily unavailable"}), 503,
             )
+        else:
+            _mark_patch_spool_outcome(patch_spool_ticket, "dispatch_completed")
     # Proxy both GET + PATCH. Do not refuse GET: hardware testing showed that a
     # 503 (or a hung request) makes Nickel empty its local annotations. The safe
     # containment point is checkforchanges, before Nickel decides to GET.

@@ -28,6 +28,11 @@ is for things you can see or feel when running the app.
 
 ### Fixed
 
+- **A Kobo annotation upload is now recoverable even if local processing
+  throws before it can persist the delta.** CWNG durably stages the exact raw
+  PATCH body before parsing or dispatch, keeps the private recovery records for
+  a bounded period, and preserves the device response behavior unchanged.
+
 - **Cover thumbnails load faster, and the gap widens the bigger your library
   gets.** Every cover request searched the whole thumbnail table instead of
   going straight to the row it wanted, and the book grid asked for each cover
