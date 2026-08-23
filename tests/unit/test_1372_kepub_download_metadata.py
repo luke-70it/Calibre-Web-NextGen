@@ -11,15 +11,17 @@ from cps.services import parallel
 from tests.fixtures.kepub_fixture import build_calibre_epub3_series_kepub
 
 
-def _book(series_name="Verify Series"):
+def _book(series_name="Verify Series", authors=None):
     now = datetime(2026, 8, 23, tzinfo=timezone.utc)
+    if authors is None:
+        authors = ["Alexandre Dumas", "Auguste Maquet"]
     return SimpleNamespace(
         id=1372,
         uuid="issue-1372-real-shape",
         identifiers=[],
         title="Fixture Title",
-        authors=[SimpleNamespace(name="Fixture Author")],
-        author_sort="Author, Fixture",
+        authors=[SimpleNamespace(name=name) for name in authors],
+        author_sort="Dumas, Alexandre & Maquet, Auguste",
         pubdate=now,
         comments=[SimpleNamespace(text="Library description")],
         publishers=[SimpleNamespace(name="Library Publisher")],
@@ -33,8 +35,24 @@ def _book(series_name="Verify Series"):
     )
 
 
-def _run_download_rewrite(monkeypatch, tmp_path, book):
+def _run_download_rewrite(monkeypatch, tmp_path, book, source_transform=None):
     source = build_calibre_epub3_series_kepub(tmp_path / "source.kepub")
+    if source_transform is not None:
+        package, package_name = helper.get_content_opf(source)
+        source_transform(package)
+        rewritten = tmp_path / "source-rewritten.kepub"
+        helper.updateEpub(
+            source,
+            rewritten,
+            package_name,
+            etree.tostring(
+                package,
+                xml_declaration=True,
+                encoding="utf-8",
+                pretty_print=True,
+            ),
+        )
+        source = rewritten
 
     class Query:
         def filter(self, *_args):
@@ -116,7 +134,7 @@ def test_kepub_download_keeps_library_series_in_epub3_collection_metadata(
         assert package.xpath(
             'string(//*[local-name()="meta"][@refines="#creator"]'
             '[@property="file-as"])'
-        ) == "Author, Fixture"
+        ) == "Dumas, Alexandre"
         assert package.xpath(
             'string(//*[local-name()="meta"][@refines="#creator"]'
             '[@property="role"])'
@@ -157,3 +175,55 @@ def test_kepub_download_clears_only_series_collection_metadata(monkeypatch, tmp_
             'string(//*[local-name()="meta"][@refines="#title"]'
             '[@property="title-type"])'
         ) == "main"
+
+
+def test_kepub_download_removes_dropped_creator_and_its_refinements(
+    monkeypatch, tmp_path
+):
+    _source, served = _run_download_rewrite(
+        monkeypatch,
+        tmp_path,
+        _book(authors=["Alexandre Dumas"]),
+    )
+
+    with ZipFile(served) as served_zip:
+        _package_name, package = _package(served_zip)
+        assert package.xpath(
+            '//*[local-name()="creator"]/text()'
+        ) == ["Alexandre Dumas"]
+        assert package.xpath(
+            '//*[local-name()="meta"][@refines="#creator-2"]'
+        ) == []
+
+
+def test_kepub_download_renames_generated_id_that_collides_with_identity_anchor(
+    monkeypatch, tmp_path
+):
+    def use_urn_uuid_identity(package):
+        identifier = package.xpath(
+            '//*[local-name()="identifier"][@id="bookid"]'
+        )[0]
+        package.set("unique-identifier", "uuid_id")
+        identifier.set("id", "uuid_id")
+        identifier.text = "urn:uuid:issue-1372-real-shape"
+
+    _source, served = _run_download_rewrite(
+        monkeypatch,
+        tmp_path,
+        _book(),
+        source_transform=use_urn_uuid_identity,
+    )
+
+    with ZipFile(served) as served_zip:
+        _package_name, package = _package(served_zip)
+        ids = package.xpath('//*[@id]/@id')
+        assert len(ids) == len(set(ids)), ids
+        unique_identifier = package.get("unique-identifier")
+        identity_targets = package.xpath(
+            '//*[local-name()="identifier"][@id=$identifier]',
+            identifier=unique_identifier,
+        )
+        assert len(identity_targets) == 1
+        assert "".join(identity_targets[0].itertext()) == (
+            "urn:uuid:issue-1372-real-shape"
+        )

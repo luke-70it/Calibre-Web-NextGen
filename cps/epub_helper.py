@@ -320,6 +320,7 @@ def merge_kepub_metadata(tree, package):
         generated_by_name.setdefault(_local_name(child), []).append(child)
     claimed_generated = set()
     preserved_anchors = set()
+    unmatched_referenced = []
     for old_child in metadata:
         local_name = _local_name(old_child)
         old_id = old_child.get("id") if isinstance(old_child.tag, str) else None
@@ -337,16 +338,33 @@ def merge_kepub_metadata(tree, package):
             ),
             None,
         )
-        if candidate is None and local_name != "identifier" and candidates:
-            candidate = candidates[0]
         if candidate is None:
-            # An identifier can be the package's identity without being a
-            # Calibre DB identifier. Preserve it instead of leaving the root's
-            # unique-identifier attribute dangling or changing its meaning.
-            preserved_anchors.add(old_child)
+            unmatched_referenced.append(old_child)
             continue
         candidate.set("id", old_id)
         claimed_generated.add(id(candidate))
+
+    # Give exact value matches first claim on their old ids. Only then use a
+    # positional fallback for changed non-identifier values. Otherwise, when
+    # the first of two authors is removed, it can steal the surviving author's
+    # generated element and leave the wrong file-as/role refinements attached.
+    for old_child in unmatched_referenced:
+        local_name = _local_name(old_child)
+        old_id = old_child.get("id")
+        candidates = [
+            candidate for candidate in generated_by_name.get(local_name, [])
+            if id(candidate) not in claimed_generated
+        ]
+        if local_name != "identifier" and candidates:
+            candidate = candidates[0]
+            candidate.set("id", old_id)
+            claimed_generated.add(id(candidate))
+        elif local_name == "identifier" and old_id == unique_identifier:
+            # The package identity can be a URI that is intentionally absent
+            # from the Calibre DB identifiers. It is the one managed element
+            # that must survive without a generated counterpart; every other
+            # removed managed value and its refinements must disappear.
+            preserved_anchors.add(old_child)
 
     removable = []
     for child in metadata:
@@ -363,9 +381,22 @@ def merge_kepub_metadata(tree, package):
         (metadata.index(child) for child in removable),
         default=len(metadata),
     )
+    removed_ids = {
+        child.get("id")
+        for child in removable
+        if isinstance(child.tag, str) and child.get("id")
+    }
     for child in removable:
         metadata.remove(child)
     for offset, child in enumerate(generated_children):
+        child_id = child.get("id") if isinstance(child.tag, str) else None
+        if child_id and tree.xpath('//*[@id=$identifier]', identifier=child_id):
+            replacement_id = _next_metadata_id(tree, child_id)
+            child.set("id", replacement_id)
+            for generated_child in generated_children:
+                for element in generated_child.iter():
+                    if element.get("refines") == f"#{child_id}":
+                        element.set("refines", f"#{replacement_id}")
         metadata.insert(insertion_index + offset, child)
 
     if series_name:
@@ -385,6 +416,17 @@ def merge_kepub_metadata(tree, package):
             series_children.append(group_position)
         for offset, child in enumerate(series_children, start=len(generated_children)):
             metadata.insert(insertion_index + offset, child)
+
+    surviving_ids = {
+        element.get("id")
+        for element in tree.iter()
+        if isinstance(element.tag, str) and element.get("id")
+    }
+    orphaned_removed_ids = removed_ids - surviving_ids
+    for child in list(metadata):
+        refined_id = (child.get("refines") or "").removeprefix("#")
+        if refined_id in orphaned_removed_ids:
+            metadata.remove(child)
 
     return etree.tostring(
         tree,
