@@ -329,6 +329,44 @@ def test_wire_deleting_the_last_highlight_syncs(wire):
         session.commit()
 
 
+def test_wire_delete_continuation_object_only_deletes_named_ids(wire):
+    """A Lua ``{}`` continuation is an empty live set, not wipe authority.
+
+    The client sends the complete live annotation list only with the first
+    delete chunk.  Lua's empty table is encoded as a JSON object for later
+    chunks, so this runs that exact second-request shape through the real Flask
+    route and production ``apply_push``.  A live row omitted from the
+    continuation must survive: only IDs explicitly named in ``deleted`` may be
+    tombstoned.
+    """
+    client, session, user = wire
+    first_chunk = [f"delete-first-{index}" for index in range(200)]
+    continuation_chunk = ["delete-continuation-1", "delete-continuation-2"]
+    for annotation_id in first_chunk + continuation_chunk + ["must-survive"]:
+        _seed(session, user, annotation_id)
+
+    first = client.put("/kosync/syncs/annotations", json={
+        "document": "digest-905",
+        "annotations": [
+            {"annotation_id": "must-survive", "highlighted_text": "keep me"},
+        ],
+        "deleted": first_chunk,
+        "delete_source": "koreader",
+    })
+    continuation = client.put("/kosync/syncs/annotations", json={
+        "document": "digest-905",
+        "annotations": {},
+        "deleted": continuation_chunk,
+        "delete_source": "koreader",
+    })
+
+    assert first.status_code == 200, first.get_json()
+    assert first.get_json()["deleted"] == 200
+    assert continuation.status_code == 200, continuation.get_json()
+    assert continuation.get_json()["deleted"] == 2
+    assert _live_ids(session, user) == {"must-survive"}
+
+
 @pytest.mark.parametrize("annotations", [None, "missing"])
 def test_wire_malformed_annotations_is_rejected(wire, annotations):
     """A null/absent `annotations` is a malformed request. It must not be read
