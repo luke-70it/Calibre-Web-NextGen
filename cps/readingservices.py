@@ -184,6 +184,8 @@ OWNERSHIP_UNKNOWN = object()
 # ─────────────────────────────────────────────────────────────────────────────
 ZZWB_EXPERIMENT_DIR = os.environ.get("ZZWB_EXPERIMENT_DIR", "/config/zzwb")
 ZZWB_EXPERIMENT_UUID = "d83c9bfd-91e1-4bed-a1a6-9c50d15ae46c"
+ZZWB_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
+ZZWB_ETAG_RE = re.compile(r'^(?:W/)?"[\x21\x23-\x7e]*"$')
 
 
 def _zzwb_armed():
@@ -197,22 +199,74 @@ def _zzwb_armed():
 def _zzwb_is_target(content_id):
     if not isinstance(content_id, str):
         return False
-    if not _zzwb_armed():
+    normalized_id = content_id.strip().strip("{}").strip().casefold()
+    if normalized_id != ZZWB_EXPERIMENT_UUID:
         return False
-    return content_id.strip().strip("{}").strip().casefold() == ZZWB_EXPERIMENT_UUID
+    return _zzwb_armed()
 
 
-def _zzwb_payload_bytes():
-    """The authored GET body, or None to fall through to the proxy."""
-    path = os.path.join(ZZWB_EXPERIMENT_DIR, "payload.json")
+def _zzwb_stage_shape_is_valid(parsed_payload):
+    """Recognize the complete annotations envelope required by this rig."""
+    return (
+        isinstance(parsed_payload, dict)
+        and isinstance(parsed_payload.get("annotations"), list)
+        and "nextPageOffsetToken" in parsed_payload
+        and (
+            parsed_payload["nextPageOffsetToken"] is None
+            or isinstance(parsed_payload["nextPageOffsetToken"], str)
+        )
+    )
+
+
+def _zzwb_etag_is_valid(etag):
+    """Accept an ASCII HTTP entity-tag, including the CWNG weak-tag format."""
+    return isinstance(etag, str) and ZZWB_ETAG_RE.fullmatch(etag) is not None
+
+
+def _zzwb_stage_warning(reason):
+    """Best-effort warning which cannot turn an unready stage into a failure."""
     try:
-        if not os.path.isfile(path):
-            return None
-        with open(path, "rb") as handle:
-            return handle.read()
+        log.warning("ZZWB: stage is not ready reason=%s", reason)
     except Exception:
-        log.exception("ZZWB: could not read the authored payload; falling through")
+        pass
+
+
+def _zzwb_load_stage():
+    """Read and validate one body/ETag pair from the arming directory."""
+    try:
+        if not _zzwb_armed():
+            return None
+        payload_path = os.path.join(ZZWB_EXPERIMENT_DIR, "payload.json")
+        etag_path = os.path.join(ZZWB_EXPERIMENT_DIR, "etag.txt")
+        with open(payload_path, "rb") as handle:
+            payload = handle.read(ZZWB_MAX_PAYLOAD_BYTES + 1)
+        if len(payload) > ZZWB_MAX_PAYLOAD_BYTES:
+            _zzwb_stage_warning("payload_too_large")
+            return None
+        parsed_payload = json.loads(payload)
+        if not _zzwb_stage_shape_is_valid(parsed_payload):
+            _zzwb_stage_warning("payload_shape")
+            return None
+        with open(etag_path, "rb") as handle:
+            raw_etag = handle.read(1025)
+        if len(raw_etag) > 1024:
+            _zzwb_stage_warning("etag_too_large")
+            return None
+        etag = raw_etag.decode("ascii").rstrip("\r\n")
+        if not _zzwb_etag_is_valid(etag):
+            _zzwb_stage_warning("etag_syntax")
+            return None
+        return payload, etag
+    except (OSError, UnicodeDecodeError, ValueError, TypeError):
+        _zzwb_stage_warning("missing_or_unreadable")
         return None
+
+
+def _zzwb_stage_for_target(content_id):
+    """Return a ready stage only for the one disposable probe UUID."""
+    if not _zzwb_is_target(content_id):
+        return None
+    return _zzwb_load_stage()
 
 
 def _zzwb_checkforchanges_entries_for_capture(entries):
@@ -556,26 +610,26 @@ def handle_annotations(entitlement_id):
     includes content (i.e. annotations come from Kobo). The dispatcher now
     persists independently of whether any external sync target is enabled.
     """
-    if request.method == "GET" and _zzwb_is_target(entitlement_id):
-        # Learn the real envelope first: proxy upstream and log exactly what
-        # Kobo answers, then (only if an authored payload has been staged)
-        # answer the device from CWNG instead. Never refuse the GET.
-        upstream = proxy_to_kobo_reading_services()
+    stage = (
+        _zzwb_stage_for_target(entitlement_id)
+        if request.method == "GET"
+        else None
+    )
+    if stage is not None:
+        # A ready local stage is the only experiment GET path. It deliberately
+        # ignores If-None-Match and always answers 200: hardware testing showed
+        # that 304, 503, and hung named-book GETs empty Nickel's local set.
+        payload, etag = stage
         try:
             log.warning(
-                "ZZWB upstream GET status=%s query=%s body=%s",
-                upstream.status_code, request.query_string.decode("utf-8", "replace"),
-                upstream.get_data(as_text=True)[:6000],
+                "ZZWB: serving staged annotations bytes=%d sha256=%s etag=%s",
+                len(payload), hashlib.sha256(payload).hexdigest(), etag,
             )
         except Exception:
-            log.exception("ZZWB: could not log the upstream GET body")
-        payload = _zzwb_payload_bytes()
-        if payload is None:
-            log.warning("ZZWB: no authored payload staged; forwarding upstream unchanged")
-            return upstream
-        log.warning("ZZWB: serving an authored payload of %d bytes", len(payload))
+            pass
         response = make_response(payload, 200)
         response.headers["Content-Type"] = "application/json"
+        response.headers["ETag"] = etag
         return response
 
     if request.method == "PATCH":
@@ -693,7 +747,7 @@ def _handle_check_for_changes():
     # SCRATCH EXPERIMENT: name the one disposable book so Nickel issues its GET.
     zzwb_ids = [
         entry["ContentId"] for entry in entries
-        if _zzwb_is_target(entry["ContentId"])
+        if _zzwb_stage_for_target(entry["ContentId"]) is not None
     ]
     capture_active = bool(zzwb_ids)
     if capture_active:
