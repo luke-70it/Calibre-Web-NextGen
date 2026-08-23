@@ -215,6 +215,58 @@ def _zzwb_payload_bytes():
         return None
 
 
+def _zzwb_checkforchanges_entries_for_capture(entries):
+    """Whitelist only the measured, non-credential request members."""
+    return [
+        {
+            "order": order,
+            "ContentId": entry["ContentId"],
+            "etag": entry.get("etag"),
+        }
+        for order, entry in enumerate(entries)
+    ]
+
+
+def _zzwb_checkforchanges_response_for_capture(response):
+    """Describe a response without logging arbitrary bodies or credentials."""
+    parsed = response.get_json(silent=True)
+    if isinstance(parsed, list) and all(
+        isinstance(entry, str)
+        or (isinstance(entry, dict) and isinstance(entry.get("ContentId"), str))
+        for entry in parsed
+    ):
+        body = [
+            entry if isinstance(entry, str) else {"ContentId": entry["ContentId"]}
+            for entry in parsed
+        ]
+    else:
+        raw_body = response.get_data()
+        body = {
+            "unrecognized": True,
+            "bytes": len(raw_body),
+            "sha256": hashlib.sha256(raw_body).hexdigest(),
+        }
+    headers = {
+        name: response.headers[name]
+        for name in ("Content-Type", "ETag")
+        if name in response.headers
+    }
+    return {"status": response.status_code, "headers": headers, "body": body}
+
+
+def _zzwb_capture_checkforchanges(record):
+    """Best-effort structured capture; observation can never fail the request."""
+    try:
+        log.warning(
+            "ZZWB checkforchanges %s",
+            json.dumps(record, separators=(",", ":"), ensure_ascii=True),
+        )
+    except Exception:
+        # The experiment's telemetry is deliberately lower priority than the
+        # request it observes. Do not recurse into the failing log sink.
+        pass
+
+
 
 def get_book_by_entitlement_id(entitlement_id):
     """Get book from database by UUID (entitlement_id).
@@ -643,6 +695,13 @@ def _handle_check_for_changes():
         entry["ContentId"] for entry in entries
         if _zzwb_is_target(entry["ContentId"])
     ]
+    capture_active = bool(zzwb_ids)
+    if capture_active:
+        _zzwb_capture_checkforchanges({
+            "phase": "request",
+            "count": len(entries),
+            "entries": _zzwb_checkforchanges_entries_for_capture(entries),
+        })
     if zzwb_ids:
         log.warning("ZZWB: naming %s in checkforchanges to trigger the GET", zzwb_ids)
 
@@ -653,22 +712,50 @@ def _handle_check_for_changes():
         )
     }
     outbound_entries = _filter_check_for_changes_entries(entries, filtered_ids)
+    if capture_active:
+        _zzwb_capture_checkforchanges({
+            "phase": "forwarded",
+            "count": len(outbound_entries),
+            "entries": _zzwb_checkforchanges_entries_for_capture(outbound_entries),
+        })
     if not outbound_entries:
-        return jsonify(zzwb_ids)
+        response = jsonify(zzwb_ids)
+        if capture_active:
+            _zzwb_capture_checkforchanges({
+                "phase": "upstream", "status": None, "skipped": "empty_forward_batch",
+            })
+            _zzwb_capture_checkforchanges({
+                "phase": "final", "status": response.status_code, "body": zzwb_ids,
+            })
+        return response
 
     upstream = proxy_to_kobo_reading_services(
         data=json.dumps(outbound_entries, separators=(",", ":")).encode("utf-8")
     )
+    if capture_active:
+        _zzwb_capture_checkforchanges({
+            "phase": "upstream", **_zzwb_checkforchanges_response_for_capture(upstream),
+        })
     if upstream.status_code in (401, 403):
         # An auth error is not a successful changed-ContentIds answer, even if
         # its body happens to parse as a list. Propagate it so Nickel can
         # re-authenticate without triggering a destructive annotation GET.
+        if capture_active:
+            final = _zzwb_checkforchanges_response_for_capture(upstream)
+            _zzwb_capture_checkforchanges({
+                "phase": "final", "status": final["status"], "body": final["body"],
+            })
         return upstream
     upstream_entries = upstream.get_json(silent=True)
     response_ids = _check_for_changes_response_content_ids(upstream_entries)
     if response_ids is None:
         log.warning("Discarding an unrecognized Kobo checkforchanges response")
-        return jsonify(zzwb_ids)
+        response = jsonify(zzwb_ids)
+        if capture_active:
+            _zzwb_capture_checkforchanges({
+                "phase": "final", "status": response.status_code, "body": zzwb_ids,
+            })
+        return response
 
     filtered_ids.update(
         content_id for content_id in response_ids
@@ -677,7 +764,13 @@ def _handle_check_for_changes():
         )
     )
     answer = _filter_check_for_changes_entries(upstream_entries, filtered_ids)
-    return jsonify(list(answer) + zzwb_ids)
+    final_body = list(answer) + zzwb_ids
+    response = jsonify(final_body)
+    if capture_active:
+        _zzwb_capture_checkforchanges({
+            "phase": "final", "status": response.status_code, "body": final_body,
+        })
+    return response
 
 
 @csrf.exempt
