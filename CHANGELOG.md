@@ -16,6 +16,16 @@ is for things you can see or feel when running the app.
 
 ## [Unreleased]
 
+### Added
+
+- **Kobo hardware experiments can now record the complete Reading Services
+  exchange instead of relying on request-line access logs.** Operators can use
+  a deliberately explicit private-data environment gate to capture the device
+  request, the actual filtered request sent to Kobo, Kobo's raw response, and
+  the final byte stream returned to the device for `checkforchanges` and
+  annotation GET/PATCH calls. Credentials are redacted, records never enter
+  ordinary logs or support bundles, and local retention is capped.
+
 ### Fixed
 
 - **Cover thumbnails load faster, and the gap widens the bigger your library

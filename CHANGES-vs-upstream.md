@@ -61,6 +61,19 @@ Format: each row is one fork-PR, mapped to its upstream PR or issue (if any), wi
 
 ### Bug fixes
 
+- **Private, bounded Kobo Reading Services exchange capture** — the access log
+  exposed only request lines, which left the device request order, filtered
+  upstream batch, upstream response, and final device response unobservable.
+  An exact acknowledgement gate now enables mode-0700 local gzip captures for
+  `checkforchanges` and annotation GET/PATCH. Each record preserves all four
+  bodies and per-entry owned/unowned/authority decisions while redacting
+  credential-bearing headers. The observer finalizes after Flask has produced
+  the response, swallows every storage failure, and has byte-for-byte response
+  invariance tests. Retention is bounded to 256 files, 64 MiB compressed, seven
+  days, and 16 MiB per body. Nine new behavioral tests were RED 9/9 before the
+  implementation and GREEN 9/9 after it; the related containment/Stage-0 set is
+  70/70 GREEN. | SHA `TBD` | release `TBD`.
+
 - **Kobo `checkforchanges` containment now covers session/config transition
   windows and alternate route spellings** (finding F-30d264) — the shared
   Reading Services decorator previously proxied the request untouched when the
