@@ -83,3 +83,82 @@ accepted solely as an empty annotation list; because `apply_push` only acts on
 portable rows present in that list and IDs explicitly named in `deleted`, it
 cannot interpret the continuation as permission to wipe the device's omitted
 live set.
+
+## Deliverable 2 — digest-bound provider read
+
+Verdict: **OBSERVED SAFE** at the executable provider/planner boundary.
+
+New focused suite: `digest_binding_test.lua`. It executes the production
+singleton provider and orders the positive case first so an always-refuse guard
+cannot masquerade as safety. It proves three behaviors:
+
+1. a normal single-book read whose expected/current digests are equal returns
+   its real annotation list;
+2. after the singleton moves to another digest, the stale callback gets `nil`;
+3. a caller omitting the optional expected digest retains the old readable
+   contract rather than being refused.
+
+The existing `sync_logic_test.lua` then proves a mismatch becomes
+`known=false`, `deletions={}`, and `may_save_watermark=false`; the Python source
+gate pins the two wiring legs that pass `digest` from `main.lua` through the
+planner to the delayed provider read.
+
+### Green execution
+
+Command:
+
+```text
+pytest -q --tb=short tests/unit/test_920_koreader_local_set_read_authority.py
+```
+
+Output after restoration:
+
+```text
+collected 7 items
+tests/unit/test_920_koreader_local_set_read_authority.py ....... [100%]
+7 passed in 0.15s
+```
+
+### Red-first and predicate mutations
+
+All mutations keep the relevant call/conditional present. No failure is an
+`unexpected keyword argument` or other new-signature artifact; every failure
+names the incorrect runtime behavior.
+
+Mutation point D2-P1 is the provider predicate.
+
+Constant-false (the pre-fix behavior: never reject a replaced context):
+
+```lua
+if false then return nil end
+```
+
+Output: `2 failed, 5 passed in 0.17s`. Both failing executable suites report
+that a stale callback returned a table instead of `nil`:
+`device_annotations_test.lua` and `digest_binding_test.lua`. This is the RED
+regression observation for c4847da49.
+
+Constant-true (the over-strict mutation: reject every context):
+
+```lua
+if true then return nil end
+```
+
+Output: `2 failed, 5 passed in 0.16s`. The dedicated suite fails first at
+`a normal single-book sync accepts its own digest` (`table` expected, `nil`
+actual); the pre-existing provider suite independently fails its readable
+attached-reader case.
+
+Mutation point D2-W1 drops the digest between planner and provider while
+leaving the parameter/call present (`resolveLocalSet(..., nil)`). Output:
+`1 failed, 6 passed in 0.15s`; `sync_logic_test.lua` reports the matching
+context as unreadable (`true` expected, `false` actual).
+
+Mutation point D2-W2 drops the digest at the `main.lua` call while leaving the
+fourth argument present (`planLocalContribution(..., nil)`). Output:
+`1 failed, 6 passed in 0.15s`; the call-site wiring gate reports that the
+expected document digest no longer reaches the delayed read.
+
+Mutation counts at D2-P1 are therefore **constant-false: 2 failures** and
+**constant-true: 2 failures**. The two wiring points each add one independent
+detection failure when degraded.
