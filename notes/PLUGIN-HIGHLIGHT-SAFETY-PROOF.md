@@ -378,3 +378,102 @@ contexts, and its refusal removes only authority the callback no longer owns.
 work is redundant live-set replay, and the only newly stopped work is the
 unattempted suffix after a logical failure; both are pinned to preserve retry
 authority and user-data safety.
+
+## Deliverable 5 — full plugin-related suite
+
+The final command selects every unit file whose filename names annotations,
+KOReader, or cwasync, then adds the adjacent plugin publish, kosync edge,
+real-provider schema, colour-contract, digest, and packaged-asset gates. The
+filename selector already includes the Dockerfile KOReader packaging test, so
+it is not listed a second time.
+
+Command:
+
+```text
+pytest -q $(rg --files tests/unit | \
+  rg '/test_.*(annotation|koreader|cwasync).*\.py$' | sort) \
+  tests/unit/test_1253_plugin_release_asset_publish_paths.py \
+  tests/unit/test_kosync_plugin_no_active_document_handling.py \
+  tests/unit/test_kosync_plugin_no_book_handling.py \
+  tests/unit/test_kobo_sqlite_provider_real_schema.py \
+  tests/unit/test_kobo_colour_table_agrees_with_the_plugin.py \
+  tests/unit/test_991_document_digest_precedence.py \
+  tests/unit/test_static_asset_integrity.py
+```
+
+Output:
+
+```text
+collected 562 items
+555 passed, 7 skipped, 49 warnings in 17.77s
+```
+
+Counts: **555 passed / 0 failed / 7 skipped**.
+
+The skips were audited with:
+
+```text
+pytest -q -rs tests/unit/test_cwasync_plugin_wire_contract.py \
+  tests/unit/test_kobo_sqlite_provider_real_schema.py
+```
+
+Output: `22 passed, 7 skipped in 0.19s`. Six skips are expected
+parameterizations for the three GET/no-body methods (`authorize`,
+`get_progress`, `pull_annotations`) in each of two body-only invariants. The
+seventh is the opt-in real-device database replay requiring
+`CWNG_REAL_KOBO_DB`; no changed path depends on that device DB because the
+digest guard reads the live KOReader collection and chunking changes HTTP
+transport only.
+
+### Release-version gate
+
+- **OBSERVED:** newest fetched release tag: `v4.1.39`.
+- **OBSERVED:** newest dated `CHANGELOG.md` section: `v4.1.39` (2026-08-21).
+- **OBSERVED:** `_meta.lua` and `main.lua` both declare `4.1.39`.
+- **OBSERVED:** `test_cwasync_plugin_version_bump_gate.py` ran all six tests in
+  the 562-item suite and passed all six.
+
+No gate was weakened, skipped, xfailed, or edited. This parked branch changes
+plugin substance outside a release cut, so the gate takes its allowed changed-
+plugin branch and requires the declaration to equal the version read from the
+newest dated changelog section. All three values are the already-shipped
+`4.1.39`, so the branch is green without inventing a future version. The next
+release cut remains responsible for advancing the changelog and both plugin
+declarations together before publication.
+
+## Final ship verdicts
+
+### c4847da49
+
+**SAFE TO SHIP AT NEXT CUT.**
+
+- **OBSERVED:** constant-false recreates the cross-book read and is caught by
+  two executable tests.
+- **OBSERVED:** constant-true is caught by two executable tests, including the
+  normal matching-digest path first.
+- **OBSERVED:** mismatch degrades to no local contribution, no named deletes,
+  and no watermark update; it does not abort the completed pull or progress
+  sync.
+- **OBSERVED:** nil expectation and same-digest context replacement remain
+  accepted, so no legitimate same-book/nondigest caller is made stricter.
+
+### d5f37bfc6
+
+**SAFE TO SHIP AT NEXT CUT.**
+
+- **OBSERVED:** the unbounded mutation is red; 0/200/201/451 boundaries are
+  executable and green.
+- **OBSERVED:** every load-bearing branch is detected constant-true and
+  constant-false.
+- **OBSERVED:** the actual server route accepts the continuation object, acts
+  only on named IDs, and preserves an omitted live row.
+- **OBSERVED:** a partial failure cannot report logical success or advance the
+  watermark; retrying completed chunks is a server no-op.
+
+Confidence for the two requested safety questions is **100%**: there are no
+remaining assumed causal links in either verdict. The only explicit assumption
+recorded above is the pre-existing kosync digest collision-resistance model; it
+would weaken mismatch detection rather than create an over-strict refusal, and
+neither commit changes that identity model. The opt-in real-device DB replay is
+not a missing observation for these paths because neither fix reads or mutates
+KoboReader.sqlite.
