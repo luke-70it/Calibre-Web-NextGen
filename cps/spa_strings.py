@@ -33,6 +33,8 @@ _("{succeeded} added to the shelf; {failed} failed.")
 _("{succeeded} book(s) deleted; {failed} failed.")
 _("{succeeded} updated; {failed} failed.")
 _("Metadata applied to {succeeded}; {failed} failed.")
+_("Could not delete this format.")
+_("Format deleted.")
 
 
 # #577 — the new-UI "open the reader" button. A distinct msgid from the "Read"
