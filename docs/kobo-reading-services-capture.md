@@ -68,10 +68,19 @@ does not automatically reapply a PATCH or risk applying the same delta twice.
 interrupted records and `load_spooled_patch(path)` verifies the stored length
 and digest before returning the original bytes.
 
-The spool uses the same mode-0700 private parent and mode-0600 atomic,
-fsynced gzip records as the observer. It is capped at 512 files, 64 MiB
-compressed total, 14 days, and 16 MiB per PATCH body. An oversized body or any
-storage failure is reported without body content and cannot change parsing,
-dispatch, the existing ownership-unknown 503, or the upstream response returned
-to the Kobo. The same repository, support-bundle, and external-backup exclusions
-described above apply.
+The spool uses a mode-0700 private parent and mode-0600 gzip records. Before a
+stage is reported successful, the record and every newly created directory
+entry have been fsynced. Blocking storage work runs outside the gevent hub and
+the request waits at most 100 ms; timeout, lock contention, or any storage
+failure degrades to no new recovery record without changing the PATCH route.
+
+It is capped at 512 files, 64 MiB compressed total, 14 days, and 16 MiB per
+PATCH body. `staged` and `dispatch_exception` records are protected: when the
+only way to admit a new body would be to remove one, the new body is not
+staged. Evictable completed records are moved through a durable transaction so
+a failed new write restores the prior record set. A deadline-driven maintenance
+worker enforces the age limit even while no new PATCHes arrive. An oversized
+body or any storage failure is reported without body content and cannot change
+parsing, dispatch, the existing ownership-unknown 503, or the upstream response
+returned to the Kobo. The same repository, support-bundle, and external-backup
+exclusions described above apply.

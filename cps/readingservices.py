@@ -369,7 +369,7 @@ def _capture_ownership_label(ownership):
 
 
 def _stage_patch_for_recovery(raw_body, entitlement_id):
-    """Fsync PATCH bytes before parsing/dispatch; never change route success."""
+    """Bounded off-hub durable stage; never change route success."""
     try:
         from .services import kobo_patch_spool
         return kobo_patch_spool.stage_patch(

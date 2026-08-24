@@ -12,6 +12,7 @@ import multiprocessing
 import os
 import stat
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -235,6 +236,7 @@ def test_patch_spool_is_bounded_and_never_stores_request_headers(monkeypatch, tm
             entitlement_id=f"book-{index}", user_id=7, origin_device_id=None,
         )
         assert ticket is not None
+        assert ticket.mark_dispatch_outcome("dispatch_completed") is True
 
     records = _records(spool, root)
     assert len(records) == 2
@@ -284,6 +286,7 @@ def test_failed_new_write_does_not_destroy_the_existing_recovery_record(
         entitlement_id="book-first", user_id=7, origin_device_id=None,
     )
     assert first is not None
+    assert first.mark_dispatch_outcome("dispatch_completed") is True
 
     def _fail_write(*_args, **_kwargs):
         raise OSError("simulated disk failure after pruning")
@@ -344,6 +347,26 @@ def test_cross_process_lock_contention_fails_open_without_waiting(monkeypatch, t
 
 
 @pytest.mark.unit
+def test_busy_spool_rejects_new_work_immediately(monkeypatch, tmp_path):
+    """A wedged worker opens the circuit instead of accumulating more work."""
+    spool, root = _root(monkeypatch, tmp_path)
+    assert spool._REQUEST_IO_GATE.acquire(blocking=False)
+    try:
+        started = time.monotonic()
+        ticket = spool.stage_patch(
+            raw_body=RAW_PATCH, entitlement_id=BOOK_UUID,
+            user_id=7, origin_device_id=None,
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        spool._REQUEST_IO_GATE.release()
+
+    assert ticket is None
+    assert elapsed < 0.05
+    assert not root.exists()
+
+
+@pytest.mark.unit
 def test_outcome_rewrite_cannot_grow_spool_past_total_byte_bound(monkeypatch, tmp_path):
     """The cap applies after status rewrites, not only after initial staging."""
     spool, _root_path = _root(monkeypatch, tmp_path)
@@ -383,6 +406,45 @@ def test_expired_record_is_removed_without_requiring_another_patch(monkeypatch, 
 
     assert list(spool.iter_replay_candidates()) == []
     assert not ticket.path.exists()
+
+
+@pytest.mark.unit
+def test_age_retention_runs_while_spool_has_no_new_traffic(monkeypatch, tmp_path):
+    """The deadline worker, not replay enumeration, enforces quiet-spool age."""
+    spool, _root_path = _root(monkeypatch, tmp_path)
+    monkeypatch.setattr(spool, "MAX_AGE_SECONDS", 0.05)
+    ticket = spool.stage_patch(
+        raw_body=RAW_PATCH, entitlement_id=BOOK_UUID,
+        user_id=7, origin_device_id=None,
+    )
+    assert ticket is not None
+
+    deadline = time.monotonic() + 1.0
+    while ticket.path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert not ticket.path.exists(), "retention still depended on later spool traffic"
+
+
+@pytest.mark.unit
+def test_startup_retention_expires_records_before_any_new_patch(monkeypatch, tmp_path):
+    """A restarted process schedules existing records without request traffic."""
+    spool, _root_path = _root(monkeypatch, tmp_path)
+    ticket = spool.stage_patch(
+        raw_body=RAW_PATCH, entitlement_id=BOOK_UUID,
+        user_id=7, origin_device_id=None,
+    )
+    assert ticket is not None
+    expired = spool.time.time() - spool.MAX_AGE_SECONDS - 1
+    os.utime(ticket.path, (expired, expired))
+    monkeypatch.setattr(spool, "_RETENTION_STARTED", False)
+
+    assert spool.start_retention_maintenance() is True
+    deadline = time.monotonic() + 1.0
+    while ticket.path.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    assert not ticket.path.exists(), "startup did not enforce age without a PATCH"
 
 
 @pytest.mark.unit
