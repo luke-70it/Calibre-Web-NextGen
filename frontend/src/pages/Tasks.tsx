@@ -7,15 +7,46 @@ import { EmptyState } from '../components/EmptyState';
 import { useT } from '../lib/i18n';
 import styles from './Tasks.module.css';
 
+type TaskMessageParts = NonNullable<TaskItem['taskMessageParts']>;
+
+function decodeTaskEntities(text: string) {
+  return text.replace(/&(#(?:x[0-9a-f]+|\d+)|amp|lt|gt|quot|apos);/gi, (entity, token: string) => {
+    if (token.startsWith('#')) {
+      const hex = token[1]?.toLowerCase() === 'x';
+      const codePoint = Number.parseInt(token.slice(hex ? 2 : 1), hex ? 16 : 10);
+      if (Number.isInteger(codePoint) && codePoint >= 0 && codePoint <= 0x10ffff) {
+        try { return String.fromCodePoint(codePoint); } catch { return entity; }
+      }
+      return entity;
+    }
+    return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" } as Record<string, string>)[token.toLowerCase()] ?? entity;
+  });
+}
+
+function taskMessageParts(task: TaskItem): TaskMessageParts | undefined {
+  if (task.taskMessageParts) return task.taskMessageParts;
+
+  // Rolling upgrades and the PR E2E rig can briefly pair this SPA with a
+  // server that only has the Classic HTML field. Accept exactly its known
+  // anchor shape; arbitrary or additional markup stays visible as plain text.
+  const match = /^([^<>]+): <a href="\/book\/(\d+)">([^<>]*)<\/a>([^<>]*)$/.exec(task.taskMessage);
+  if (!match) return undefined;
+  return {
+    prefix: `${decodeTaskEntities(match[1])}: `,
+    book: { id: match[2], title: decodeTaskEntities(match[3]) },
+    suffix: decodeTaskEntities(match[4]),
+  };
+}
+
 function taskMessageText(task: TaskItem) {
-  const parts = task.taskMessageParts;
+  const parts = taskMessageParts(task);
   return parts
     ? `${parts.prefix}${parts.book.title}${parts.suffix}`
     : task.taskMessage;
 }
 
 function TaskMessage({ task }: { task: TaskItem }) {
-  const parts = task.taskMessageParts;
+  const parts = taskMessageParts(task);
   if (!parts) return <>{task.taskMessage}</>;
   return (
     <>
