@@ -18,6 +18,12 @@ is for things you can see or feel when running the app.
 
 ### Fixed
 
+- **Text files can be scrolled with the keyboard again.** The plain-text reader
+  puts its content in a scrolling panel, and that panel could not be reached by
+  the Tab key — so on Safari, which includes every browser on iPhone and iPad,
+  a reader using a keyboard could not move through a long text file at all.
+  The panel now takes keyboard focus and shows a focus ring when it does.
+
 - **Cover thumbnails load faster, and the gap widens the bigger your library
   gets.** Every cover request searched the whole thumbnail table instead of
   going straight to the row it wanted, and the book grid asked for each cover
