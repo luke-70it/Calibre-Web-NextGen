@@ -170,6 +170,10 @@ is for things you can see or feel when running the app.
   check after that release is tagged.** The guard now considers only releases
   contained in the branch under test, while retaining the committed release
   ledger as a strict fallback when Git tag reachability is unavailable.
+- **Deleting a book format can no longer leave an empty book behind.** The API
+  now rejects attempts to remove a book's final format, and the edit page keeps
+  the delete control visible but disabled with an explanation when only one
+  format remains.
 
 - **Cover thumbnails load faster, and the gap widens the bigger your library
   gets.** Every cover request searched the whole thumbnail table instead of
