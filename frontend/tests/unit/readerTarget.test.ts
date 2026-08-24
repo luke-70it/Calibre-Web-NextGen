@@ -1,7 +1,9 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { getPrimaryReadTarget, isReadableFormat } from '../../src/lib/readerTarget.ts';
+import {
+  getPrimaryReadTarget, getReaderContentUrl, isReadableFormat,
+} from '../../src/lib/readerTarget.ts';
 
 const SPA_FORMATS = ['epub', 'kepub'];
 const SERVER_FORMATS = [
@@ -32,5 +34,16 @@ describe('reader targets honor the viewer role across every supported format', (
       assert.equal(getPrimaryReadTarget(197, [format], true), null);
       assert.equal(isReadableFormat(format), false);
     }
+  });
+});
+
+describe('EPUB archive targets remain viewer-gated across rolling deployments', () => {
+  test('uses the content URL supplied by a current API', () => {
+    assert.equal(getReaderContentUrl(197, 'EPUB', '/show/197/epub'), '/show/197/epub');
+  });
+
+  test('derives the same viewer route when an older API omits content_url', () => {
+    assert.equal(getReaderContentUrl(197, 'EPUB'), '/show/197/epub');
+    assert.equal(getReaderContentUrl(198, 'KEPUB', ''), '/show/198/kepub');
   });
 });
