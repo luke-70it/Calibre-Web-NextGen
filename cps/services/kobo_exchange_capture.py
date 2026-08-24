@@ -286,7 +286,13 @@ class CaptureSession:
 
         root = _capture_root()
         with _PROCESS_LOCK:
-            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            # mkdir(parents=True) does NOT apply `mode` to the intermediates it
+            # creates, so the private-observability parent would land at
+            # 0777 & ~umask while only the leaf got 0700. Create and tighten it
+            # explicitly.
+            root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(root.parent, 0o700)
+            root.mkdir(exist_ok=True, mode=0o700)
             os.chmod(root, 0o700)
             lock_path = root / ".capture.lock"
             lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)

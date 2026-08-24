@@ -302,4 +302,4 @@ wiki-generated/
 # These contain private annotation text. In Docker they live under /config;
 # a bare source run falls back to the repository root, so make the entire
 # private-observability parent structurally uncommittable.
-/.cwng-private-observability/
+.cwng-private-observability/

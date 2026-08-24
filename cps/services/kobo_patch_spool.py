@@ -210,7 +210,9 @@ def _write_new_record(spool_id, compressed):
         raise ValueError("one Kobo PATCH spool record exceeds total bound")
     root = _spool_root()
     with _PROCESS_LOCK:
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(root.parent, 0o700)
+        root.mkdir(exist_ok=True, mode=0o700)
         os.chmod(root, 0o700)
         with _locked_root(root):
             _prune_locked(root, incoming_bytes=len(compressed))

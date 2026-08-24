@@ -44,7 +44,10 @@ def _records(spool, root):
 def _app(monkeypatch, *, dispatch):
     app = Flask(__name__)
 
-    @app.patch("/annotations/<content_id>")
+    # GET is registered too: the body-read guard has to behave DIFFERENTLY for
+    # GET than for PATCH, and a PATCH-only app makes that assertion vacuous -
+    # the GET would 405 and trivially satisfy "not 503".
+    @app.route("/annotations/<content_id>", methods=["GET", "PATCH"])
     def annotations(content_id):
         return rs.handle_annotations.__wrapped__(content_id)
 
@@ -281,3 +284,35 @@ def test_private_observability_root_is_excluded_from_docker_context():
     assert private_parent in patterns, (
         f"{private_parent!r} can contain raw annotation text and must not enter images"
     )
+
+
+@pytest.mark.unit
+def test_unreadable_patch_body_still_refuses_but_unreadable_get_body_does_not(
+    monkeypatch, tmp_path,
+):
+    """Moving the body read earlier must not change either hazard.
+
+    The read moved out of the PATCH try-block so the exchange capture could see
+    the bytes.  Two things must survive that move:
+      * a PATCH whose body cannot be read is still refused with 503, because
+        nothing was stored (F-5c1146 / #1825);
+      * a GET whose body cannot be read is NOT refused, because a 503 on the
+        annotations GET is a measured way to make Nickel empty the book's local
+        annotation set.
+    """
+    _root(monkeypatch, tmp_path)
+    app = _app(monkeypatch, dispatch=lambda *_a, **_k: None)
+
+    def _unreadable(self, *args, **kwargs):
+        del self, args, kwargs
+        raise RuntimeError("body read exploded")
+
+    monkeypatch.setattr(app.request_class, "get_data", _unreadable)
+
+    patch_response = app.test_client().patch(
+        f"/annotations/{BOOK_UUID}", data=RAW_PATCH, content_type="application/json",
+    )
+    assert patch_response.status_code == 503
+
+    get_response = app.test_client().get(f"/annotations/{BOOK_UUID}")
+    assert get_response.status_code != 503

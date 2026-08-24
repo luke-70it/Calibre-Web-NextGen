@@ -600,7 +600,24 @@ def handle_annotations(entitlement_id):
     interrupted local capture can be replayed server-side. Local persistence is
     independent of whether any external sync target is enabled.
     """
-    raw_body = request.get_data(cache=True)
+    try:
+        raw_body = request.get_data(cache=True)
+    except Exception:
+        # Reading the body used to sit inside the PATCH try-block, so a failed
+        # read (oversized body, client disconnect) became the deliberate 503.
+        # The capture needs the bytes earlier than that, so the guard has to
+        # move with it -- but it must NOT become a blanket 503: a 503 on the
+        # annotations GET is one of the three measured answers that makes Nickel
+        # empty the book's local annotation set. Refuse the PATCH, proxy the GET.
+        log.exception(
+            "Could not read the annotation request body for entitlement %s",
+            entitlement_id,
+        )
+        if request.method == "PATCH":
+            return make_response(
+                jsonify({"error": "Annotation capture temporarily unavailable"}), 503,
+            )
+        return proxy_to_kobo_reading_services()
     capture_session = _begin_exchange_capture(
         "annotations_patch" if request.method == "PATCH" else "annotations_get",
         raw_body,
