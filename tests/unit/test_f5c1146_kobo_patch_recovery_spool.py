@@ -4,10 +4,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import importlib
 import inspect
 import json
+import multiprocessing
+import os
 import stat
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +43,18 @@ def _root(monkeypatch, tmp_path):
 def _records(spool, root):
     paths = sorted(root.glob("patch-*.json.gz"))
     return [(path, spool.load_spooled_patch(path)) for path in paths]
+
+
+def _hold_advisory_lock(lock_path, ready, release):
+    """Hold the real cross-process spool lock until the parent releases it."""
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ready.send(True)
+        release.recv()
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def _app(monkeypatch, *, dispatch):
@@ -230,6 +246,172 @@ def test_patch_spool_is_bounded_and_never_stores_request_headers(monkeypatch, tm
         ).lower()
     assert sum(path.stat().st_size for path in root.glob("patch-*.json.gz")) \
         <= spool.MAX_TOTAL_BYTES
+
+
+@pytest.mark.unit
+def test_full_spool_never_evicts_an_unresolved_recovery_record(monkeypatch, tmp_path):
+    """A staged body is the only surviving copy and is not safe to prune."""
+    spool, root = _root(monkeypatch, tmp_path)
+    monkeypatch.setattr(spool, "MAX_FILES", 1)
+    monkeypatch.setattr(spool, "MAX_TOTAL_BYTES", 1024 * 1024)
+
+    first = spool.stage_patch(
+        raw_body=b'{"updatedAnnotations":[{"id":"must-survive"}]}',
+        entitlement_id="book-first", user_id=7, origin_device_id=None,
+    )
+    second = spool.stage_patch(
+        raw_body=b'{"updatedAnnotations":[{"id":"new-arrival"}]}',
+        entitlement_id="book-second", user_id=7, origin_device_id=None,
+    )
+
+    assert first is not None
+    assert first.path.exists(), "making room deleted the only copy of an unresolved PATCH"
+    assert spool.load_spooled_patch(first.path)["dispatch_status"] == "staged"
+    assert second is None, "the new record must fail open when only protected records remain"
+    assert len(list(root.glob("patch-*.json.gz"))) == 1
+
+
+@pytest.mark.unit
+def test_failed_new_write_does_not_destroy_the_existing_recovery_record(
+    monkeypatch, tmp_path,
+):
+    """Pruning cannot commit before the replacement record is durable."""
+    spool, _root_path = _root(monkeypatch, tmp_path)
+    monkeypatch.setattr(spool, "MAX_FILES", 1)
+    monkeypatch.setattr(spool, "MAX_TOTAL_BYTES", 1024 * 1024)
+    first = spool.stage_patch(
+        raw_body=b'{"updatedAnnotations":[{"id":"only-copy"}]}',
+        entitlement_id="book-first", user_id=7, origin_device_id=None,
+    )
+    assert first is not None
+
+    def _fail_write(*_args, **_kwargs):
+        raise OSError("simulated disk failure after pruning")
+
+    monkeypatch.setattr(spool, "_replace_record_locked", _fail_write)
+    second = spool.stage_patch(
+        raw_body=b'{"updatedAnnotations":[{"id":"write-fails"}]}',
+        entitlement_id="book-second", user_id=7, origin_device_id=None,
+    )
+
+    assert second is None
+    assert first.path.exists(), "a failed spool write destructively committed its prune"
+    assert spool.load_spooled_patch(first.path)["body"].endswith(b'"only-copy"}]}')
+
+
+@pytest.mark.unit
+def test_cross_process_lock_contention_fails_open_without_waiting(monkeypatch, tmp_path):
+    """A busy peer must not block this gevent worker's entire request hub."""
+    spool, root = _root(monkeypatch, tmp_path)
+    root.mkdir(parents=True)
+    context = multiprocessing.get_context("fork")
+    ready_parent, ready_child = context.Pipe(duplex=False)
+    release_child, release_parent = context.Pipe(duplex=False)
+    holder = context.Process(
+        target=_hold_advisory_lock,
+        args=(root / ".spool.lock", ready_child, release_child),
+    )
+    holder.start()
+    assert ready_parent.poll(5), "lock-holder process did not start"
+    ready_parent.recv()
+
+    result = []
+    finished = threading.Event()
+
+    def _stage():
+        try:
+            result.append(spool.stage_patch(
+                raw_body=RAW_PATCH, entitlement_id=BOOK_UUID,
+                user_id=7, origin_device_id=None,
+            ))
+        finally:
+            finished.set()
+
+    caller = threading.Thread(target=_stage, daemon=True)
+    caller.start()
+    completed_while_lock_was_busy = finished.wait(0.2)
+    release_parent.send(True)
+    caller.join(5)
+    holder.join(5)
+
+    assert not caller.is_alive()
+    assert not holder.is_alive()
+    assert completed_while_lock_was_busy, (
+        "blocking flock waited on another process; in production that stalls "
+        "every greenlet in this worker's gevent hub"
+    )
+    assert result == [None]
+
+
+@pytest.mark.unit
+def test_outcome_rewrite_cannot_grow_spool_past_total_byte_bound(monkeypatch, tmp_path):
+    """The cap applies after status rewrites, not only after initial staging."""
+    spool, _root_path = _root(monkeypatch, tmp_path)
+    ticket = spool.stage_patch(
+        raw_body=bytes(range(256)) * 16, entitlement_id=BOOK_UUID,
+        user_id=7, origin_device_id=None,
+    )
+    assert ticket is not None
+    staged_record = spool._load_disk_record(ticket.path)
+    staged_size = ticket.path.stat().st_size
+
+    fixed_now = spool.datetime.fromisoformat(staged_record["dispatch_updated_at"])
+    monkeypatch.setattr(
+        spool, "datetime", SimpleNamespace(now=lambda _timezone: fixed_now),
+    )
+    exception_record = dict(staged_record)
+    exception_record["dispatch_status"] = "dispatch_exception"
+    assert len(spool._compress(exception_record)) > staged_size
+    monkeypatch.setattr(spool, "MAX_TOTAL_BYTES", staged_size)
+
+    ticket.mark_dispatch_outcome("dispatch_exception")
+
+    assert ticket.path.stat().st_size <= spool.MAX_TOTAL_BYTES
+
+
+@pytest.mark.unit
+def test_expired_record_is_removed_without_requiring_another_patch(monkeypatch, tmp_path):
+    """A quiet spool must not retain private annotation text past 14 days."""
+    spool, _root_path = _root(monkeypatch, tmp_path)
+    ticket = spool.stage_patch(
+        raw_body=RAW_PATCH, entitlement_id=BOOK_UUID,
+        user_id=7, origin_device_id=None,
+    )
+    assert ticket is not None
+    expired = spool.time.time() - spool.MAX_AGE_SECONDS - 1
+    os.utime(ticket.path, (expired, expired))
+
+    assert list(spool.iter_replay_candidates()) == []
+    assert not ticket.path.exists()
+
+
+@pytest.mark.unit
+def test_first_record_fsyncs_each_new_directory_entry(monkeypatch, tmp_path):
+    """First-use durability requires fsyncing the newly created directory chain."""
+    spool = _module()
+    root = tmp_path / "private-parent" / "kobo-patch-spool"
+    monkeypatch.setattr(spool, "_spool_root", lambda: root)
+    real_fsync = spool.os.fsync
+    fsynced_inodes = set()
+
+    def _track_fsync(fd):
+        fsynced_inodes.add(os.fstat(fd).st_ino)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(spool.os, "fsync", _track_fsync)
+    ticket = spool.stage_patch(
+        raw_body=RAW_PATCH, entitlement_id=BOOK_UUID,
+        user_id=7, origin_device_id=None,
+    )
+
+    assert ticket is not None
+    assert root.stat().st_ino in fsynced_inodes
+    assert root.parent.stat().st_ino in fsynced_inodes, (
+        "the spool directory entry was never fsynced in its parent"
+    )
+    assert tmp_path.stat().st_ino in fsynced_inodes, (
+        "the private-parent directory entry was never fsynced in CONFIG_DIR"
+    )
 
 
 @pytest.mark.unit
