@@ -166,6 +166,8 @@ export interface BookFormat {
   size_bytes: number;
   download_url: string;
   read_url: string;
+  /** Raw book bytes served inline under viewer_required (used by epub.js). */
+  content_url: string;
 }
 
 /** A linked entity (author, series, tag, publisher, language). id is numeric
