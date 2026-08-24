@@ -14091,3 +14091,8 @@ msgstr "Toon gelezen/niet gelezen selectie"
 #~ msgstr ""
 #~ "Boeken moeten eerst worden gearchiveerd en het apparaat moet worden "
 #~ "gesynchroniseerd, voordat een boek veilig kan worden verwijderd."
+msgid "Could not delete this format."
+msgstr "Kan dit formaat niet verwijderen."
+
+msgid "Format deleted."
+msgstr "Formaat verwijderd."

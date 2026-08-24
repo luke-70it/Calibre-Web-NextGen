@@ -14570,3 +14570,8 @@ msgstr "Afficher la section Lu / Non lu"
 #~ msgstr ""
 #~ "Les livres doivent d'abord être archivés et l'appareil synchronisé avant "
 #~ "qu'un livre puisse être supprimé en tout sécurité."
+msgid "Could not delete this format."
+msgstr "Impossible de supprimer ce format."
+
+msgid "Format deleted."
+msgstr "Format supprimé."
