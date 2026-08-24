@@ -18,6 +18,11 @@ is for things you can see or feel when running the app.
 
 ### Fixed
 
+- **Bulk actions now report partial failures truthfully.** Delete, read/unread,
+  add-to-shelf, and metadata updates count each request separately; failed books
+  are reported instead of being included in a false success total, and only
+  confirmed deletions are removed from the library cache.
+
 - **Cover thumbnails load faster, and the gap widens the bigger your library
   gets.** Every cover request searched the whole thumbnail table instead of
   going straight to the row it wanted, and the book grid asked for each cover
