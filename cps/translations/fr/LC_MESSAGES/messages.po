@@ -7349,7 +7349,7 @@ msgstr "Sauvegarde des métadonnées"
 msgid "Convert Library – full run"
 msgstr "Convertir la bibliothèque – exécution complète"
 
-#: cps/tasks/ops.py
+#: cps/spa_strings.py cps/tasks/ops.py
 msgid "Convert Library"
 msgstr "Convertir la bibliothèque"
 
@@ -7357,7 +7357,7 @@ msgstr "Convertir la bibliothèque"
 msgid "EPUB Fixer – full run"
 msgstr "EPUB Fixer – exécution complète"
 
-#: cps/tasks/ops.py
+#: cps/spa_strings.py cps/tasks/ops.py
 msgid "EPUB Fixer"
 msgstr "EPUB Fixer"
 
@@ -12555,15 +12555,15 @@ msgstr "Durée"
 msgid "Actions"
 msgstr "Actions"
 
-#: cps/templates/tasks.html
+#: cps/spa_strings.py cps/templates/tasks.html
 msgid "Upcoming scheduled sends"
 msgstr "Prochains envois programmés"
 
-#: cps/templates/tasks.html
+#: cps/spa_strings.py cps/templates/tasks.html
 msgid "Scheduled Time"
 msgstr "Heure prévue"
 
-#: cps/templates/tasks.html
+#: cps/spa_strings.py cps/templates/tasks.html
 msgid "State"
 msgstr "État"
 
@@ -12576,11 +12576,11 @@ msgstr ""
 "que tâches à l'heure prévue. Vous pouvez annuler un envoi en attente avant "
 "qu'il ne soit exécuté."
 
-#: cps/templates/tasks.html
+#: cps/spa_strings.py cps/templates/tasks.html
 msgid "Upcoming scheduled operations"
 msgstr "Opérations prévues prochainement"
 
-#: cps/templates/tasks.html
+#: cps/spa_strings.py cps/templates/tasks.html
 msgid "Type"
 msgstr "Type"
 
@@ -12615,6 +12615,22 @@ msgstr "Élément planifié annulé avec succès"
 #: cps/templates/tasks.html
 msgid "Error cancelling scheduled item"
 msgstr "Erreur lors de l'annulation d'un élément planifié"
+
+#: cps/spa_strings.py
+msgid "No upcoming scheduled sends."
+msgstr "Aucun envoi programmé à venir."
+
+#: cps/spa_strings.py
+msgid "No upcoming scheduled operations."
+msgstr "Aucune opération programmée à venir."
+
+#: cps/spa_strings.py
+msgid "Could not load scheduled tasks."
+msgstr "Impossible de charger les tâches planifiées."
+
+#: cps/spa_strings.py
+msgid "Cancel scheduled item \"{title}\"? This cannot be undone."
+msgstr "Annuler l’élément planifié « {title} » ? Cette action est irréversible."
 
 #: cps/templates/update_now_modal.html
 #, fuzzy

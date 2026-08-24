@@ -12,7 +12,7 @@ import type {
   Me, Book, BooksPage, BookDetail, EntityList, Shelf, ShelfDetail,
   SearchOptions, AdvancedSearchParams, AdvSearchResult, Account, ProfileUpdate,
   BookMetadata, MetadataUpdate, UploadResult, AdminUser, AboutInfo, TaskItem, AuthConfig,
-  NoticeInbox,
+  NoticeInbox, ScheduledSend, ScheduledOperation, ScheduledQueues,
 } from './api';
 
 /** Entity kinds the catalog can be filtered by. Singular here; the browse-list
@@ -1305,5 +1305,33 @@ export function useCancelTask() {
     mutationFn: (taskId: number | string) =>
       apiPost(`/api/v1/tasks/${encodeURIComponent(String(taskId))}/cancel`),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ['tasks'] }),
+  });
+}
+
+/** Persistent scheduler queues shown in Classic. These predate /api/v1 but are
+ * already JSON, same-origin and server-gated with admin_required. Keeping the
+ * SPA on the canonical routes avoids a proxy endpoint whose only job would be
+ * to reshape two identical `{items}` responses. */
+export function useScheduledQueues(enabled: boolean) {
+  return useQuery<ScheduledQueues>({
+    queryKey: ['scheduled-queues'],
+    queryFn: async () => {
+      const [sends, operations] = await Promise.all([
+        apiGet<{ items: ScheduledSend[] }>('/cwa-scheduled/upcoming'),
+        apiGet<{ items: ScheduledOperation[] }>('/cwa-scheduled/upcoming-ops'),
+      ]);
+      return { sends: sends.items, operations: operations.items };
+    },
+    enabled,
+    refetchInterval: 4000,
+  });
+}
+
+export function useCancelScheduledItem() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => apiPost<{ status: string; id: number }>(
+      '/cwa-scheduled/cancel', { id }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ['scheduled-queues'] }),
   });
 }

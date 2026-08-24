@@ -1029,6 +1029,22 @@ _("Versions")
 _("View")
 _("View settings")
 _("Viewer")
+
+# F-f61640 — persistent scheduled queues on the SPA Tasks page. Most column
+# labels are shared with Classic; anchoring them here still matters because the
+# React source is not part of pybabel's extraction inputs.
+_("Upcoming scheduled sends")
+_("Upcoming scheduled operations")
+_("Scheduled Time")
+_("Book ID")
+_("State")
+_("Type")
+_("Convert Library")
+_("EPUB Fixer")
+_("No upcoming scheduled sends.")
+_("No upcoming scheduled operations.")
+_("Could not load scheduled tasks.")
+_("Cancel scheduled item \"{title}\"? This cannot be undone.")
 _("Waiting for you to authorise…")
 _("Warning: this highlight can’t be shown in the book")
 _("We repaired this book for your Kobo. If you were having trouble highlighting, try after sync — and if it still doesn’t work, remove the book from your Kobo and let it download again.")

@@ -929,6 +929,11 @@ jobs:
         env:
           CI: 'true'
           E2E_BASE_URL: http://localhost:8083
+          # Lets the scheduled-queue spec seed the isolated cwa.db through the
+          # same CWA_DB methods production scheduling uses, then independently
+          # observe the persisted cancellation state. This is the container
+          # created by this job above — never an external/shared instance.
+          E2E_CONTAINER_NAME: cwn-e2e
         run: npm run test:e2e
 
       - name: Upload Playwright report

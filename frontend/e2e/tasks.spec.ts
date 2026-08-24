@@ -1,4 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
+import { execFileSync } from 'node:child_process';
 import { assertNoHorizontalOverflow, assertNoPageErrors, collectPageErrors } from './utils';
 
 interface MailSettings {
@@ -24,6 +26,64 @@ async function csrfToken(page: Page): Promise<string> {
   const response = await page.request.get('/api/v1/auth/csrf');
   expect(response.ok(), 'CSRF token request should succeed').toBeTruthy();
   return ((await response.json()) as { csrf_token: string }).csrf_token;
+}
+
+interface ScheduledSeed {
+  sendId: number;
+  operationId: number;
+}
+
+const SCHEDULE_CONTAINER = process.env.E2E_CONTAINER_NAME;
+
+function containerPython(source: string, ...args: string[]): string {
+  if (!SCHEDULE_CONTAINER) {
+    throw new Error('E2E_CONTAINER_NAME must name the isolated app container for scheduled-queue tests');
+  }
+  return execFileSync('docker', [
+    'exec', '-w', '/app/calibre-web-automated', SCHEDULE_CONTAINER,
+    'python3', '-c', source, ...args,
+  ], { encoding: 'utf8' });
+}
+
+function markedJson<T>(output: string, marker: string): T {
+  const line = output.split(/\r?\n/).find((candidate) => candidate.startsWith(marker));
+  if (!line) throw new Error(`container helper did not emit ${marker}:\n${output}`);
+  return JSON.parse(line.slice(marker.length)) as T;
+}
+
+function seedScheduledQueues(bookId: number, userId: number, username: string): ScheduledSeed {
+  const output = containerPython(`
+import json, sys
+from datetime import datetime, timedelta, timezone
+from cps.cwa_db_loader import load_cwa_db
+
+db = load_cwa_db().CWA_DB()
+run_at = (datetime.now(timezone.utc) + timedelta(minutes=55)).isoformat().replace('+00:00', 'Z')
+send_id = db.scheduled_add_autosend(int(sys.argv[1]), int(sys.argv[2]), run_at, sys.argv[3], 'Scheduled queue E2E send')
+operation_id = db.scheduled_add_job('epub_fixer', run_at, username=sys.argv[3], title='Scheduled queue E2E operation')
+print('SCHEDULE_SEED=' + json.dumps({'sendId': send_id, 'operationId': operation_id}))
+`, String(bookId), String(userId), username);
+  return markedJson<ScheduledSeed>(output, 'SCHEDULE_SEED=');
+}
+
+function scheduledState(id: number): string | null {
+  const output = containerPython(`
+import json, sys
+from cps.cwa_db_loader import load_cwa_db
+row = load_cwa_db().CWA_DB().scheduled_get_by_id(int(sys.argv[1]))
+print('SCHEDULE_STATE=' + json.dumps(None if row is None else row.get('state')))
+`, String(id));
+  return markedJson<string | null>(output, 'SCHEDULE_STATE=');
+}
+
+function removeScheduledSeeds(ids: number[]): void {
+  containerPython(`
+import sys
+from cps.cwa_db_loader import load_cwa_db
+db = load_cwa_db().CWA_DB()
+db.cur.executemany('DELETE FROM cwa_scheduled_jobs WHERE id=?', [(int(value),) for value in sys.argv[1:]])
+db.con.commit()
+`, ...ids.map(String));
 }
 
 /**
@@ -176,5 +236,155 @@ test('convert and failed send expose SPA-native book links in both task UIs', as
         mail_server_type: original.mail_server_type,
       },
     });
+  }
+});
+
+/**
+ * F-f61640 — one serial, real-stack flow owns the shared cwa.db fixture. Rows
+ * are inserted through the same CWA_DB methods used by the scheduler, then all
+ * assertions go through the real HTTP/UI surfaces. The post-cancel state is
+ * read independently from cwa.db so a 200 response or a filtered-out row can
+ * never masquerade as proof that cancellation persisted.
+ */
+test('admin can inspect and cancel persisted scheduled queues; non-admin cannot', async ({ page, browser, baseURL }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'one persisted scheduler flow covers desktop and 375px');
+  test.skip(!SCHEDULE_CONTAINER, 'requires E2E_CONTAINER_NAME for isolated cwa.db seeding');
+
+  await page.goto('/app');
+  const errors = collectPageErrors(page);
+  const csrf = await csrfToken(page);
+  const headers = { 'X-CSRFToken': csrf };
+
+  const meResponse = await page.request.get('/api/v1/auth/me');
+  expect(meResponse.ok(), 'admin identity request should succeed').toBeTruthy();
+  const me = (await meResponse.json()) as { id: number; name: string; role: { admin?: boolean } };
+  expect(me.role.admin, 'the seeded Playwright account must be an admin').toBe(true);
+
+  const booksResponse = await page.request.get('/api/v1/books?per_page=1');
+  expect(booksResponse.ok(), 'book seed request should succeed').toBeTruthy();
+  const books = (await booksResponse.json()) as { items: Array<{ id: number }> };
+  expect(books.items.length, 'the e2e seed must contain a book for the scheduled send').toBeGreaterThan(0);
+
+  const username = `scheduled-e2e-${Date.now()}`;
+  const password = 'CWNG-scheduled-E2E-42!';
+  const created = await page.request.post('/api/v1/admin/users', {
+    headers,
+    data: {
+      name: username,
+      email: `${username}@example.test`,
+      password,
+      roles: { viewer: true, download: true, admin: false },
+    },
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const nonAdmin = (await created.json()) as { id: number };
+
+  let seeded: ScheduledSeed | undefined;
+  let nonAdminContext: Awaited<ReturnType<typeof browser.newContext>> | undefined;
+
+  try {
+    seeded = seedScheduledQueues(books.items[0].id, me.id, me.name);
+    nonAdminContext = await browser.newContext({ baseURL });
+    const nonAdminPage = await nonAdminContext.newPage();
+
+    const sends = await page.request.get('/cwa-scheduled/upcoming');
+    const operations = await page.request.get('/cwa-scheduled/upcoming-ops');
+    expect(sends.ok(), await sends.text()).toBeTruthy();
+    expect(operations.ok(), await operations.text()).toBeTruthy();
+    expect((await sends.json()).items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: seeded.sendId, state: 'scheduled' }),
+    ]));
+    expect((await operations.json()).items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: seeded.operationId, state: 'scheduled', job_type: 'epub_fixer' }),
+    ]));
+
+    await page.goto('/app/tasks');
+    const sendsSection = page.getByRole('region', { name: 'Upcoming scheduled sends' });
+    const operationsSection = page.getByRole('region', { name: 'Upcoming scheduled operations' });
+    await expect(sendsSection).toBeVisible();
+    await expect(operationsSection).toBeVisible();
+    const sendRow = sendsSection.getByRole('row').filter({ hasText: 'Scheduled queue E2E send' });
+    const operationRow = operationsSection.getByRole('row').filter({ hasText: 'Scheduled queue E2E operation' });
+    await expect(sendRow).toContainText('scheduled');
+    await expect(operationRow).toContainText('scheduled');
+    await expect(sendRow.locator('time')).not.toHaveText('');
+    await expect(operationRow.locator('time')).not.toHaveText('');
+    const accessibility = await new AxeBuilder({ page })
+      .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa', 'wcag22aa'])
+      .analyze();
+    expect(
+      accessibility.violations
+        .filter((violation) => ['critical', 'serious'].includes(violation.impact ?? ''))
+        .map((violation) => `${violation.id}: ${violation.help}`),
+      'populated scheduled queues must have no critical/serious accessibility violations',
+    ).toEqual([]);
+
+    await page.context().addCookies([{
+      name: 'cwng_prefer_spa',
+      value: '0',
+      url: new URL(page.url()).origin,
+    }]);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto('/tasks', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('#upcomingtable tbody tr').filter({ hasText: 'Scheduled queue E2E send' })).toContainText('scheduled');
+    await expect(page.locator('#upcomingopstable tbody tr').filter({ hasText: 'Scheduled queue E2E operation' })).toContainText('scheduled');
+
+    await page.setViewportSize({ width: 375, height: 667 });
+    await page.goto('/app/tasks');
+    await assertNoHorizontalOverflow(page);
+
+    page.once('dialog', async (dialog) => {
+      expect(dialog.type()).toBe('confirm');
+      expect(dialog.message()).toContain('Scheduled queue E2E send');
+      expect(dialog.message()).toContain('cannot be undone');
+      await dialog.dismiss();
+    });
+    await sendRow.getByRole('button', { name: /cancel/i }).click();
+    expect(scheduledState(seeded.sendId), 'dismissing confirmation must not mutate the row').toBe('scheduled');
+    await expect(sendRow).toContainText('scheduled');
+
+    page.once('dialog', async (dialog) => {
+      expect(dialog.type()).toBe('confirm');
+      await dialog.accept();
+    });
+    await sendRow.getByRole('button', { name: /cancel/i }).click();
+    await expect.poll(() => scheduledState(seeded.sendId), {
+      message: 'cancellation should persist the send state transition in cwa.db',
+    }).toBe('cancelled');
+    await expect(sendRow).toHaveCount(0);
+    await expect(operationRow).toContainText('scheduled');
+
+    const nonAdminCsrf = await csrfToken(nonAdminPage);
+    const login = await nonAdminPage.request.post('/api/v1/auth/login', {
+      headers: { 'X-CSRFToken': nonAdminCsrf },
+      data: { username, password },
+    });
+    expect(login.ok(), await login.text()).toBeTruthy();
+
+    const forbiddenSends = await nonAdminPage.request.get('/cwa-scheduled/upcoming');
+    const forbiddenOperations = await nonAdminPage.request.get('/cwa-scheduled/upcoming-ops');
+    expect(forbiddenSends.status(), 'non-admin scheduled-send data must be server-forbidden').toBe(403);
+    expect(forbiddenOperations.status(), 'non-admin scheduled-operation data must be server-forbidden').toBe(403);
+    const forbiddenCancel = await nonAdminPage.request.post('/cwa-scheduled/cancel', {
+      data: { id: seeded.operationId },
+    });
+    expect(forbiddenCancel.status(), 'non-admin scheduled cancellation must be server-forbidden').toBe(403);
+    expect(scheduledState(seeded.operationId), 'a forbidden cancellation must not mutate the row').toBe('scheduled');
+
+    await nonAdminPage.goto('/app/tasks');
+    await expect(nonAdminPage.getByRole('region', { name: 'Upcoming scheduled sends' })).toHaveCount(0);
+    await expect(nonAdminPage.getByRole('region', { name: 'Upcoming scheduled operations' })).toHaveCount(0);
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto('/tasks', { waitUntil: 'domcontentloaded' });
+    await expect(page.locator('#upcomingtable tbody tr').filter({ hasText: 'Scheduled queue E2E send' })).toHaveCount(0);
+    await expect(page.locator('#upcomingopstable tbody tr').filter({ hasText: 'Scheduled queue E2E operation' })).toContainText('scheduled');
+
+    assertNoPageErrors(errors);
+  } finally {
+    await nonAdminContext?.close();
+    if (seeded) removeScheduledSeeds([seeded.sendId, seeded.operationId]);
+    const deleted = await page.request.post(`/api/v1/admin/users/${nonAdmin.id}/delete`, { headers });
+    expect(deleted.status(), await deleted.text()).toBe(204);
   }
 });
