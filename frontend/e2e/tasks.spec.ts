@@ -140,16 +140,24 @@ test('convert and failed send expose SPA-native book links in both task UIs', as
     const sendClassicRow = page.locator('#tasktable tbody tr').filter({ hasText: 'Failed' }).last();
     await expect(convertClassicRow).toBeVisible();
     await expect(sendClassicRow).toBeVisible();
-    await expect(convertClassicRow.getByRole('link', { name: book!.title })).toHaveAttribute(
-      'href',
-      `/book/${book!.id}`,
-    );
-    await expect(sendClassicRow.getByRole('link', { name: book!.title })).toHaveAttribute(
-      'href',
-      `/book/${book!.id}`,
-    );
+    const convertClassicLink = convertClassicRow.getByRole('link', { name: book!.title });
+    const sendClassicLink = sendClassicRow.getByRole('link', { name: book!.title });
+    await expect(convertClassicLink).toHaveAttribute('href', `/book/${book!.id}`);
+    await expect(sendClassicLink).toHaveAttribute('href', `/book/${book!.id}`);
     await expect(sendClassicRow).toContainText(failedTask!.starttime!);
     await expect(sendClassicRow).toContainText(failedTask!.error!);
+
+    await convertClassicLink.click();
+    await expect(page).toHaveURL(new RegExp(`/book/${book!.id}$`));
+    await expect(page.getByText(book!.title, { exact: true }).first()).toBeVisible();
+    await page.waitForLoadState('networkidle');
+
+    await page.goto('/tasks', { waitUntil: 'domcontentloaded' });
+    await page.locator('#tasktable tbody tr').filter({ hasText: 'Failed' }).last()
+      .getByRole('link', { name: book!.title }).click();
+    await expect(page).toHaveURL(new RegExp(`/book/${book!.id}$`));
+    await expect(page.getByText(book!.title, { exact: true }).first()).toBeVisible();
+    await page.waitForLoadState('networkidle');
 
     assertNoPageErrors(errors);
   } finally {
