@@ -13,8 +13,12 @@ from cps.services.worker import CalibreTask, STAT_FINISH_SUCCESS
 
 
 class TaskUpload(CalibreTask):
-    def __init__(self, task_message, book_title):
-        super(TaskUpload, self).__init__(task_message)
+    def __init__(self, task_message, book_title, book_id=None):
+        super(TaskUpload, self).__init__(
+            task_message,
+            book_id=book_id,
+            book_title=book_title if book_id else None,
+        )
         self.start_time = self.end_time = datetime.now()
         self.stat = STAT_FINISH_SUCCESS
         self.progress = 1

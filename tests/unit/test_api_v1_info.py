@@ -203,6 +203,58 @@ def test_tasks_uses_render_task_status():
     assert "render_task_status" in src
 
 
+def _render_book_task(message, *, task_name="Convert", book_id=197,
+                      book_title="The Enchanted & April"):
+    from cps import tasks_status
+    task = SimpleNamespace(
+        name=task_name,
+        message=message,
+        book_id=book_id,
+        book_title=book_title,
+        start_time=None,
+        stat="finished",
+        progress=1,
+        id="task-1",
+        is_cancellable=False,
+        error=None,
+    )
+    with _ctx("/api/v1/tasks", method="GET"):
+        with patch.object(tasks_status, "current_user",
+                          SimpleNamespace(name="alice", role_admin=lambda: False)):
+            return tasks_status.render_task_status([(0, "alice", 0, task, 0)])[0]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("task_name, message, expected_prefix, expected_suffix", [
+    ("Convert", 'EPUB -> MOBI: <a href="/book/197">The Enchanted &amp; April</a>',
+     "Convert: EPUB -> MOBI: ", ""),
+    ("E-mail", '<a href="/library/book/197">The Enchanted &amp; April</a> send to eReader',
+     "E-mail: ", " send to eReader"),
+])
+def test_tasks_structures_any_known_book_anchor(
+        task_name, message, expected_prefix, expected_suffix):
+    rendered = _render_book_task(message, task_name=task_name)
+
+    assert rendered["taskMessageParts"] == {
+        "prefix": expected_prefix,
+        "book": {"id": 197, "title": "The Enchanted & April"},
+        "suffix": expected_suffix,
+    }
+    assert rendered["taskMessage"] == "{}: {}".format(task_name, message)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("message", [
+    '<a href="/book/999">The Enchanted &amp; April</a>',
+    '<a href="//example.invalid/book/197">The Enchanted &amp; April</a>',
+])
+def test_tasks_does_not_structure_an_unrelated_anchor(message):
+    rendered = _render_book_task(message)
+
+    assert "taskMessageParts" not in rendered
+    assert rendered["taskMessage"] == "Convert: {}".format(message)
+
+
 @pytest.mark.unit
 def test_cancel_task_not_found_404():
     from cps.api import info as mod

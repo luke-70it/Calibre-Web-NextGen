@@ -2169,7 +2169,7 @@ def upload_book_formats(requested_files, book, book_id, no_cover=True):
             # Queue uploader info
             link = '<a href="{}">{}</a>'.format(url_for('web.show_book', book_id=book.id), escape(book.title))
             upload_text = N_("File format %(ext)s added to %(book)s", ext=file_ext.upper(), book=link)
-            WorkerThread.add(current_user.name, TaskUpload(upload_text, escape(book.title)))
+            WorkerThread.add(current_user.name, TaskUpload(upload_text, book.title, book_id=book.id))
             meta = uploader.process(
                 saved_filename,
                 *os.path.splitext(current_filename),

@@ -28,12 +28,12 @@ async function csrfToken(page: Page): Promise<string> {
 
 /**
  * F-57c90e / F-b19131 — this is deliberately one real, serial flow. It changes
- * SMTP settings, queues a genuine send, waits for the worker's DNS failure,
- * then renders that same task in both UIs. Running one copy avoids racing the
- * shared seeded admin's settings between Playwright projects.
+ * SMTP settings, queues a genuine conversion and send, waits for both workers,
+ * then renders those same tasks in both UIs. Running one copy avoids racing the
+ * shared seeded admin's settings and formats between Playwright projects.
  */
-test('failed send exposes its reason, start time, and SPA-native book link in both task UIs', async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== 'desktop', 'one real failed-send flow covers both UIs and the 375px viewport');
+test('convert and failed send expose SPA-native book links in both task UIs', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'one real worker flow covers both UIs and the 375px viewport');
 
   await page.goto('/app');
   const errors = collectPageErrors(page);
@@ -43,6 +43,7 @@ test('failed send exposes its reason, start time, and SPA-native book link in bo
   const originalResponse = await page.request.get('/api/v1/admin/mailsettings');
   expect(originalResponse.ok(), 'reading the original SMTP settings should succeed').toBeTruthy();
   const original = (await originalResponse.json()) as MailSettings;
+  let convertedBookId: number | undefined;
 
   try {
     const configure = await page.request.post('/api/v1/admin/mailsettings', {
@@ -64,9 +65,18 @@ test('failed send exposes its reason, start time, and SPA-native book link in bo
     const books = (await booksResponse.json()) as {
       items: Array<{ id: number; title: string; formats: string[] }>;
     };
-    const book = books.items.find((item) =>
-      item.formats.some((format) => format.toLowerCase() === 'epub'));
-    expect(book, 'the e2e seed must contain an EPUB book for the real send failure').toBeTruthy();
+    const book = books.items.find((item) => {
+      const formats = item.formats.map((format) => format.toLowerCase());
+      return formats.includes('epub') && !formats.includes('mobi');
+    });
+    expect(book, 'the e2e seed must contain an EPUB-only book for the real conversion').toBeTruthy();
+    convertedBookId = book!.id;
+
+    const convert = await page.request.post(`/api/v1/books/${book!.id}/convert`, {
+      headers,
+      data: { from: 'EPUB', to: 'MOBI' },
+    });
+    expect(convert.ok(), await convert.text()).toBeTruthy();
 
     const queued = await page.request.post(`/api/v1/books/${book!.id}/send`, {
       headers,
@@ -74,39 +84,48 @@ test('failed send exposes its reason, start time, and SPA-native book link in bo
     });
     expect(queued.ok(), await queued.text()).toBeTruthy();
 
+    let convertTask: TaskItem | undefined;
     let failedTask: TaskItem | undefined;
     await expect.poll(async () => {
       const response = await page.request.get('/api/v1/tasks');
       if (!response.ok()) return `HTTP ${response.status()}`;
       const body = (await response.json()) as { items: TaskItem[] };
-      failedTask = body.items.find((item) => item.taskMessage.includes(`/book/${book!.id}`));
-      return failedTask?.status;
+      convertTask = body.items.find((item) =>
+        item.taskMessage.includes('EPUB -> MOBI') && item.taskMessage.includes(`/book/${book!.id}`));
+      failedTask = body.items.find((item) =>
+        item.taskMessage.includes('send to eReader') && item.taskMessage.includes(`/book/${book!.id}`));
+      return `${convertTask?.status}/${failedTask?.status}`;
     }, {
-      message: 'the real SMTP task should fail in the worker',
-      timeout: 20_000,
+      message: 'the real conversion should finish and SMTP task should fail in the worker',
+      timeout: 30_000,
       intervals: [250, 500, 1_000],
-    }).toBe('Failed');
+    }).toBe('Finished/Failed');
 
     expect(failedTask?.starttime, 'failed task payload should carry its start time').toBeTruthy();
     expect(failedTask?.error, 'failed task payload should carry its failure reason')
       .toMatch(/Socket Error sending e-mail:.*(Name or service not known|nodename nor servname)/i);
 
     await page.goto('/app/tasks');
-    const spaRow = page.getByRole('row').filter({ hasText: 'Failed' }).last();
-    await expect(spaRow).toBeVisible();
-    const bookLink = spaRow.getByRole('link', { name: book!.title });
-    await expect(bookLink).toBeVisible();
-    await expect(bookLink).toHaveAttribute('href', new RegExp(`/app/book/${book!.id}$`));
-    await expect(spaRow).toContainText(failedTask!.starttime!);
-    await expect(spaRow).toContainText(failedTask!.error!);
-    await expect(spaRow).not.toContainText('<a href=');
+    const convertSpaRow = page.getByRole('row').filter({ hasText: 'EPUB -> MOBI' }).last();
+    const sendSpaRow = page.getByRole('row').filter({ hasText: 'Failed' }).last();
+    await expect(convertSpaRow).toBeVisible();
+    await expect(sendSpaRow).toBeVisible();
+    const convertBookLink = convertSpaRow.getByRole('link', { name: book!.title });
+    const sendBookLink = sendSpaRow.getByRole('link', { name: book!.title });
+    await expect(convertBookLink).toHaveAttribute('href', new RegExp(`/app/book/${book!.id}$`));
+    await expect(sendBookLink).toHaveAttribute('href', new RegExp(`/app/book/${book!.id}$`));
+    await expect(sendSpaRow).toContainText(failedTask!.starttime!);
+    await expect(sendSpaRow).toContainText(failedTask!.error!);
+    await expect(convertSpaRow).not.toContainText('<a href=');
+    await expect(sendSpaRow).not.toContainText('<a href=');
 
-    await bookLink.click();
+    await convertBookLink.click();
     await expect(page).toHaveURL(new RegExp(`/app/book/${book!.id}$`));
     await expect(page.getByRole('heading', { name: book!.title }).first()).toBeVisible();
 
     await page.setViewportSize({ width: 375, height: 667 });
     await page.goto('/app/tasks');
+    await expect(page.getByRole('row').filter({ hasText: 'EPUB -> MOBI' }).last()).toBeVisible();
     await expect(page.getByRole('row').filter({ hasText: 'Failed' }).last()).toBeVisible();
     await assertNoHorizontalOverflow(page);
 
@@ -117,17 +136,26 @@ test('failed send exposes its reason, start time, and SPA-native book link in bo
     }]);
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto('/tasks', { waitUntil: 'domcontentloaded' });
-    const classicRow = page.locator('#tasktable tbody tr').filter({ hasText: book!.title });
-    await expect(classicRow).toBeVisible();
-    await expect(classicRow.getByRole('link', { name: book!.title })).toHaveAttribute(
+    const convertClassicRow = page.locator('#tasktable tbody tr').filter({ hasText: 'EPUB -> MOBI' }).last();
+    const sendClassicRow = page.locator('#tasktable tbody tr').filter({ hasText: 'Failed' }).last();
+    await expect(convertClassicRow).toBeVisible();
+    await expect(sendClassicRow).toBeVisible();
+    await expect(convertClassicRow.getByRole('link', { name: book!.title })).toHaveAttribute(
       'href',
       `/book/${book!.id}`,
     );
-    await expect(classicRow).toContainText(failedTask!.starttime!);
-    await expect(classicRow).toContainText(failedTask!.error!);
+    await expect(sendClassicRow.getByRole('link', { name: book!.title })).toHaveAttribute(
+      'href',
+      `/book/${book!.id}`,
+    );
+    await expect(sendClassicRow).toContainText(failedTask!.starttime!);
+    await expect(sendClassicRow).toContainText(failedTask!.error!);
 
     assertNoPageErrors(errors);
   } finally {
+    if (convertedBookId !== undefined) {
+      await page.request.post(`/api/v1/books/${convertedBookId}/formats/MOBI/delete`, { headers });
+    }
     await page.request.post('/api/v1/admin/mailsettings', {
       headers,
       data: {

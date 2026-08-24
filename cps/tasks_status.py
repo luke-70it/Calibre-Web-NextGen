@@ -4,6 +4,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # See CONTRIBUTORS for full list of authors.
 
+import re
+
 from markupsafe import escape
 
 from flask import Blueprint, jsonify
@@ -65,18 +67,28 @@ def render_task_status(tasklist):
                 else:
                     ret['status'] = _('Unknown Status')
 
-            ret['taskMessage'] = "{}: {}".format(task.name, task.message) if task.message else task.name
-            message_template = getattr(task, 'spa_message_template', None)
-            message_token = getattr(task, 'spa_message_token', None)
+            task_name = str(task.name)
+            message = str(task.message) if task.message else ''
+            ret['taskMessage'] = "{}: {}".format(task_name, message) if message else task_name
             book_title = getattr(task, 'book_title', None)
             book_id = getattr(task, 'book_id', None)
-            if message_template and message_token and book_title and book_id:
-                prefix, token, suffix = str(message_template).partition(message_token)
-                if token:
+            if book_title is not None and book_id is not None:
+                # Classic task messages intentionally contain an anchor. Match
+                # only the anchor for this task's known book pair, then expose
+                # plain message segments so the SPA can build its own in-app
+                # link. Any unrelated markup remains text in the SPA.
+                anchor = re.search(
+                    r'<a href="/(?:[^"<>:/]+/)*book/{}">{}</a>'.format(
+                        re.escape(str(book_id)),
+                        re.escape(str(escape(book_title))),
+                    ),
+                    message,
+                )
+                if anchor:
                     ret['taskMessageParts'] = {
-                        'prefix': "{}: {}".format(task.name, prefix),
+                        'prefix': "{}: {}".format(task_name, message[:anchor.start()]),
                         'book': {'id': book_id, 'title': str(book_title)},
-                        'suffix': suffix,
+                        'suffix': message[anchor.end():],
                     }
             ret['progress'] = "{} %".format(int(task.progress * 100))
             ret['user'] = escape(user)  # prevent xss

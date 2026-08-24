@@ -199,13 +199,19 @@ class WorkerThread(threading.Thread):
 class CalibreTask:
     __metaclass__ = abc.ABCMeta
 
-    def __init__(self, message):
+    def __init__(self, message, book_id=None, book_title=None):
         self._progress = 0
         self.stat = STAT_WAITING
         self.error = None
         self.start_time = None
         self.end_time = None
         self.message = message
+        # Tasks keep their Classic HTML message for bootstrap-table. When a
+        # message contains a linked book, these fields give other serializers
+        # enough structure to render their own native link without trusting
+        # that HTML. Non-book tasks leave both fields unset.
+        self.book_id = book_id
+        self.book_title = book_title
         self.id = uuid.uuid4()
         self.self_cleanup = False
         self._scheduled = False

@@ -381,7 +381,7 @@ def convert_book_format(book_id, calibre_path, old_book_format, new_book_format,
            link)
     settings['old_book_format'] = old_book_format
     settings['new_book_format'] = new_book_format
-    task = TaskConvert(file_path, book.id, txt, settings, ereader_mail, user_id)
+    task = TaskConvert(file_path, book.id, txt, settings, ereader_mail, user_id, book_title=book.title)
     WorkerThread.add(user_id, task)
     if blocking:
         # Only the context-free Event wait crosses onto the bounded native

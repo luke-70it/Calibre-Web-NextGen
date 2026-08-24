@@ -63,11 +63,11 @@ current_milli_time = lambda: int(round(time() * 1000))
 
 
 class TaskConvert(CalibreTask):
-    def __init__(self, file_path, book_id, task_message, settings, ereader_mail, user=None):
-        super(TaskConvert, self).__init__(task_message)
+    def __init__(self, file_path, book_id, task_message, settings, ereader_mail,
+                 user=None, book_title=None):
+        super(TaskConvert, self).__init__(task_message, book_id=book_id, book_title=book_title)
         self.worker_thread = None
         self.file_path = file_path
-        self.book_id = book_id
         self.title = ""
         self.settings = settings
         self.ereader_mail = ereader_mail

@@ -27,12 +27,13 @@ function taskMessageParts(task: TaskItem): TaskMessageParts | undefined {
   if (task.taskMessageParts) return task.taskMessageParts;
 
   // Rolling upgrades and the PR E2E rig can briefly pair this SPA with a
-  // server that only has the Classic HTML field. Accept exactly its known
-  // anchor shape; arbitrary or additional markup stays visible as plain text.
-  const match = /^([^<>]+): <a href="\/book\/(\d+)">([^<>]*)<\/a>([^<>]*)$/.exec(task.taskMessage);
+  // server that only has the Classic HTML field. Accept one known, local book
+  // anchor surrounded by plain text; arbitrary or additional markup stays
+  // visible as plain text.
+  const match = /^([^<]*)<a href="\/(?:[^"<>:/]+\/)*book\/(\d+)">([^<]*)<\/a>([^<]*)$/.exec(task.taskMessage);
   if (!match) return undefined;
   return {
-    prefix: `${decodeTaskEntities(match[1])}: `,
+    prefix: decodeTaskEntities(match[1]),
     book: { id: match[2], title: decodeTaskEntities(match[3]) },
     suffix: decodeTaskEntities(match[4]),
   };
