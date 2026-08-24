@@ -30,6 +30,7 @@ import uuid
 log = logger.create()
 
 CHUNKSIZE = 8192
+TASK_BOOK_TOKEN = "__CWNG_TASK_BOOK__"
 
 
 # Class for sending email with ability to get current progress
@@ -101,7 +102,7 @@ class EmailSSL(EmailBase, smtplib.SMTP_SSL):
 
 class TaskEmail(CalibreTask):
     def __init__(self, subject, filepath, attachment, settings, recipient, task_message, text, id=0, internal=False,
-                 html=None):
+                 html=None, book_title=None):
         super(TaskEmail, self).__init__(task_message)
         self.subject = subject
         self.attachment = attachment
@@ -117,6 +118,15 @@ class TaskEmail(CalibreTask):
         self.html = html
         self.asyncSMTP = None
         self.book_id = id
+        # ``task_message`` stays HTML for the Classic bootstrap-table contract.
+        # The SPA receives this separate, tokenized representation and composes
+        # its own safe in-app link instead of interpreting server HTML.
+        self.book_title = book_title
+        self.spa_message_token = TASK_BOOK_TOKEN if book_title and id else None
+        self.spa_message_template = (
+            N_("%(book)s send to eReader", book=TASK_BOOK_TOKEN)
+            if self.spa_message_token else None
+        )
         self.results = dict()
 
     # from calibre code:

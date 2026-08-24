@@ -421,6 +421,11 @@ export interface AboutInfo {
 export interface TaskItem {
   task_id: number | string;
   taskMessage: string;
+  taskMessageParts?: {
+    prefix: string;
+    book: { id: number | string; title: string };
+    suffix: string;
+  };
   status?: string;
   progress: string;
   starttime?: string;
@@ -428,6 +433,7 @@ export interface TaskItem {
   user: string;
   is_cancellable: boolean;
   stat: number;
+  error?: string | null;
 }
 
 export class ApiError extends Error {

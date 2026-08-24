@@ -66,6 +66,18 @@ def render_task_status(tasklist):
                     ret['status'] = _('Unknown Status')
 
             ret['taskMessage'] = "{}: {}".format(task.name, task.message) if task.message else task.name
+            message_template = getattr(task, 'spa_message_template', None)
+            message_token = getattr(task, 'spa_message_token', None)
+            book_title = getattr(task, 'book_title', None)
+            book_id = getattr(task, 'book_id', None)
+            if message_template and message_token and book_title and book_id:
+                prefix, token, suffix = str(message_template).partition(message_token)
+                if token:
+                    ret['taskMessageParts'] = {
+                        'prefix': "{}: {}".format(task.name, prefix),
+                        'book': {'id': book_id, 'title': str(book_title)},
+                        'suffix': suffix,
+                    }
             ret['progress'] = "{} %".format(int(task.progress * 100))
             ret['user'] = escape(user)  # prevent xss
 

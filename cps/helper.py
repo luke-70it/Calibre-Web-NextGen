@@ -516,7 +516,8 @@ def send_mail(book_id, book_format, convert, ereader_mail, calibrepath, user_id,
                 email = strip_whitespaces(email)
                 WorkerThread.add(user_id, TaskEmail(subject, book.path, converted_file_name,
                                                     config.get_mail_settings(), email,
-                                                    email_text, get_email_body_text(), book.id))
+                                                    email_text, get_email_body_text(), book.id,
+                                                    book_title=book.title))
             return None
     return _("The requested file could not be read. Maybe wrong permissions?")
 
