@@ -1,0 +1,11 @@
+{
+  "area": "spa",
+  "body": "OBSERVED in source, 2026-08-23.\n\nClassic's TXT reader is paged: `cps/templates/readtxt.html:28-32` renders left/right arrows\naround the text, and `cps/static/js/reading/txt_reader.js:27-65` binds arrow keys, arrow\nclicks, swipe and mouse wheel to `prevPage`/`nextPage`, which shift the `<pre>` by one content\nwidth (`txt_reader.js:67-85`).\n\nThe SPA fetches the file and emits one continuously scrolling block:\n`frontend/src/pages/NativeReader.tsx:33-41` (fetch) and `:70` (`<pre className={styles.text}>`).\nNo paging, no keyboard navigation, no arrows.\n\nStated honestly, this one is a product decision and not obviously a defect: classic's\nimplementation is crude (it offsets a `<pre>` and hijacks the wheel, so ordinary scrolling is\ntaken away), and continuous scroll is the better behaviour on touch. What is NOT defensible is\nrecording TXT as full parity — surface 33 is Partial, not Native.\n\nDecide one of: reach interaction parity, or write down that paged TXT reading is retired\ndeliberately. Do not leave it recorded as equivalent.",
+  "created": "2026-08-24",
+  "id": "F-062863",
+  "refs": [],
+  "severity": "ux",
+  "source": "audit",
+  "status": "open",
+  "title": "New UI TXT reader has no paging; classic paginates with arrows, keys, swipe and wheel"
+}
