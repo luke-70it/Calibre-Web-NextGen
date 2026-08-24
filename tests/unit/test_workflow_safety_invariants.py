@@ -1407,3 +1407,39 @@ def test_spa_e2e_uploads_its_playwright_report():
             "the upload must run on failure — that is the only run whose "
             "evidence anyone needs"
         )
+
+
+# ─── Wall 12: scheduled-queue E2E cannot silently skip ────────────────
+#
+# The spec deliberately refuses to guess a local Docker container. That is safe
+# for a developer but dangerous in CI unless the workflow-to-spec handoff is
+# pinned: removing one env key would turn every real-stack scheduler assertion
+# into a green skip, the same unexecuted-coverage class this file guards against.
+
+
+def test_spa_e2e_runner_names_its_isolated_container():
+    """The scheduled-queue E2E must never silently skip in CI.
+
+    Its local-safe contract is to skip when E2E_CONTAINER_NAME is absent rather
+    than guessing which developer container it may mutate. The CI workflow owns
+    an isolated container named cwn-e2e, so the exact step that executes the SPA
+    harness must supply that name. Pinning the producer beside the consumer
+    means a workflow cleanup cannot turn the feature's only real-stack coverage
+    into a green skip.
+    """
+    wf = _load(WF_DIR / "tests.yml")
+    runners = [
+        (job_name, step)
+        for job_name, step in _every_step(wf)
+        if str(step.get("run") or "").strip() == "npm run test:e2e"
+    ]
+    assert runners, "tests.yml must contain the step that runs npm run test:e2e"
+
+    for job_name, step in runners:
+        container = (step.get("env") or {}).get("E2E_CONTAINER_NAME")
+        assert container == "cwn-e2e", (
+            f"tests.yml/{job_name}/{step.get('name') or 'unnamed step'} runs "
+            "npm run test:e2e without E2E_CONTAINER_NAME: cwn-e2e; "
+            "tasks.spec.ts will silently skip all persisted scheduled-queue, "
+            "non-admin 403 and cancel-state coverage"
+        )

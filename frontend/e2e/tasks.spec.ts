@@ -245,10 +245,22 @@ test('convert and failed send expose SPA-native book links in both task UIs', as
  * assertions go through the real HTTP/UI surfaces. The post-cancel state is
  * read independently from cwa.db so a 200 response or a filtered-out row can
  * never masquerade as proof that cancellation persisted.
+ *
+ * The docker exec is intentional fixture setup, not a product-layer shortcut.
+ * The production HTTP scheduling path is localhost-gated and is unreachable in
+ * this harness, so the spec seeds the job's own isolated container through the
+ * exact CWA_DB.scheduled_add_autosend / scheduled_add_job methods production
+ * scheduling uses. Product behaviour is still exercised through the browser
+ * and real HTTP endpoints; the matching CWA_DB read only independently proves
+ * that cancellation persisted instead of trusting a 200 or a missing row.
  */
 test('admin can inspect and cancel persisted scheduled queues; non-admin cannot', async ({ page, browser, baseURL }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'one persisted scheduler flow covers desktop and 375px');
-  test.skip(!SCHEDULE_CONTAINER, 'requires E2E_CONTAINER_NAME for isolated cwa.db seeding');
+  if (!SCHEDULE_CONTAINER) {
+    const reason = 'requires E2E_CONTAINER_NAME for isolated cwa.db seeding; refusing to guess a developer container';
+    console.log(`[scheduled-queues] SKIP: ${reason}`);
+    test.skip(true, reason);
+  }
 
   await page.goto('/app');
   const errors = collectPageErrors(page);
