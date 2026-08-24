@@ -95,9 +95,16 @@ def test_patch_spool_is_durable_before_parse_and_dispatch(monkeypatch, tmp_path)
 
 
 @pytest.mark.unit
-def test_dispatch_exception_keeps_exact_replay_candidate_and_device_response(
+def test_dispatch_exception_spools_the_body_and_still_refuses_to_acknowledge(
     monkeypatch, tmp_path,
 ):
+    """The spool must not soften the #1825 refusal.
+
+    Spooling makes a lost delta recoverable server-side, which is why the
+    response code matters less than it did.  It does not make the PATCH stored,
+    so CWNG must still answer 503 rather than let the device retire a delta it
+    will never re-send.  Asserting 207 here would silently revert F-5c1146.
+    """
     spool, root = _root(monkeypatch, tmp_path)
 
     def _raise(*_args, **_kwargs):
@@ -108,8 +115,9 @@ def test_dispatch_exception_keeps_exact_replay_candidate_and_device_response(
         f"/annotations/{BOOK_UUID}", data=RAW_PATCH, content_type="application/json",
     )
 
-    assert response.status_code == 207
-    assert response.get_data() == b'{"upstream":"accepted"}'
+    assert response.status_code == 503
+    # not the proxied upstream body: we are refusing, not relaying an acceptance
+    assert b"upstream" not in response.get_data()
     [(path, record)] = _records(spool, root)
     assert record["body"] == RAW_PATCH
     assert record["dispatch_status"] == "dispatch_exception"
@@ -134,7 +142,9 @@ def test_parse_exception_still_leaves_staged_replay_candidate(monkeypatch, tmp_p
     )
     monkeypatch.setattr(app.request_class, "get_json", original)
 
-    assert response.status_code == 207
+    # Same contract as the dispatch-exception case: the body is recoverable, but
+    # nothing was stored, so the device must not be told the delta landed.
+    assert response.status_code == 503
     [(_path, record)] = _records(spool, root)
     assert record["body"] == RAW_PATCH
     assert record["dispatch_status"] == "dispatch_exception"

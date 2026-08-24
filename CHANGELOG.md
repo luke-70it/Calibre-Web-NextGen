@@ -30,8 +30,11 @@ is for things you can see or feel when running the app.
 
 - **A Kobo annotation upload is now recoverable even if local processing
   throws before it can persist the delta.** CWNG durably stages the exact raw
-  PATCH body before parsing or dispatch, keeps the private recovery records for
-  a bounded period, and preserves the device response behavior unchanged.
+  PATCH body before parsing or dispatch and keeps the private recovery record
+  for a bounded period, so a delta lost to an exception can be replayed on the
+  server instead of being gone for good. The device still receives the same
+  explicit failure it does today when nothing was stored — recovery is in
+  addition to that refusal, not a replacement for it.
 
 - **Cover thumbnails load faster, and the gap widens the bigger your library
   gets.** Every cover request searched the whole thumbnail table instead of
