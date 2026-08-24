@@ -2,9 +2,9 @@ import { expect, test, type Browser, type BrowserContext, type Page } from '@pla
 
 test.describe.configure({ mode: 'serial' });
 
-const BOOK_ID = 197;
-const COMIC_BOOK_ID = 19;
 const PASSWORD = 'CWNG-role-matrix-42!';
+const EPUB_FORMATS = new Set(['epub', 'kepub']);
+const COMIC_FORMATS = new Set(['cbz', 'cbr', 'cbt']);
 
 type RoleCase = {
   label: string;
@@ -21,6 +21,12 @@ type BookDetail = {
     read_url: string;
     content_url?: string;
   }>;
+};
+
+type BookListItem = {
+  id: number;
+  title: string;
+  formats: string[];
 };
 
 const ROLE_CASES: RoleCase[] = [
@@ -59,6 +65,30 @@ async function contextFor(
   return { context, page };
 }
 
+async function discoverFixtureBooks(page: Page): Promise<{
+  readableBookId: number;
+  comicBookId: number;
+}> {
+  const response = await page.request.get('/api/v1/books?page=1&per_page=200&sort=new');
+  expect(response.ok(), `could not query the e2e book seed: ${await response.text()}`).toBe(true);
+  const payload = await response.json() as { items?: BookListItem[]; books?: BookListItem[] };
+  const books = payload.items || payload.books || [];
+  const readable = books.find((book) =>
+    (book.formats || []).some((format) => EPUB_FORMATS.has(String(format).toLowerCase())));
+  const comic = books.find((book) =>
+    (book.formats || []).some((format) => COMIC_FORMATS.has(String(format).toLowerCase())));
+
+  expect(
+    readable,
+    'the e2e library seed must contain a book with an EPUB or KEPUB format',
+  ).toBeTruthy();
+  expect(
+    comic,
+    'the e2e library seed must contain a book with a CBZ, CBR, or CBT format',
+  ).toBeTruthy();
+  return { readableBookId: readable!.id, comicBookId: comic!.id };
+}
+
 test('viewer and download roles independently govern every book affordance (F-ed109c)', async ({
   page: adminPage,
   browser,
@@ -67,6 +97,7 @@ test('viewer and download roles independently govern every book affordance (F-ed
   test.skip(testInfo.project.name !== 'desktop', 'the authorization matrix runs once on desktop');
 
   const adminCsrf = await csrf(adminPage);
+  const { readableBookId, comicBookId } = await discoverFixtureBooks(adminPage);
   const suffix = `${testInfo.workerIndex}-${Date.now()}`;
   const users: Array<RoleCase & { id: number; name: string }> = [];
 
@@ -98,16 +129,18 @@ test('viewer and download roles independently govern every book affordance (F-ed
         expect(me.role.viewer, `${user.label}: API viewer role`).toBe(user.viewer);
         expect(me.role.download, `${user.label}: API download role`).toBe(user.download);
 
-        const detailResponse = await page.request.get(`/api/v1/books/${BOOK_ID}`);
-        expect(detailResponse.ok(), `book ${BOOK_ID} is required by the role-matrix seed`).toBe(true);
+        const detailResponse = await page.request.get(`/api/v1/books/${readableBookId}`);
+        expect(detailResponse.ok(), `book ${readableBookId} disappeared from the role-matrix seed`).toBe(true);
         const book = await detailResponse.json() as BookDetail;
-        const readable = book.formats.find((format) => ['epub', 'kepub'].includes(format.format.toLowerCase()));
-        expect(readable, `book ${BOOK_ID} needs an EPUB-family format`).toBeTruthy();
+        const readable = book.formats.find((format) => EPUB_FORMATS.has(format.format.toLowerCase()));
+        expect(readable, `book ${readableBookId} needs an EPUB-family format`).toBeTruthy();
+        const contentUrl = readable!.content_url
+          || `/show/${readableBookId}/${readable!.format.toLowerCase()}`;
 
         // Pin the unchanged server contract before checking its presentation.
-        const inline = await page.request.get(`/show/${BOOK_ID}/${readable!.format.toLowerCase()}`);
+        const inline = await page.request.get(contentUrl);
         expect(inline.status(), `${user.label}: viewer-gated inline route`).toBe(user.viewer ? 200 : 403);
-        const classicReader = await page.request.get(`/read/${BOOK_ID}/${readable!.format.toLowerCase()}`);
+        const classicReader = await page.request.get(`/read/${readableBookId}/${readable!.format.toLowerCase()}`);
         expect(classicReader.status(), `${user.label}: viewer-gated classic reader route`).toBe(user.viewer ? 200 : 403);
         const download = await page.request.get(readable!.download_url);
         expect(download.status(), `${user.label}: download-gated file route`).toBe(user.download ? 200 : 403);
@@ -115,11 +148,16 @@ test('viewer and download roles independently govern every book affordance (F-ed
         // The SPA comic API serves real page bytes, so it must follow viewer
         // exactly like Classic's comic reader. In particular, download alone
         // must not grant access, while viewer alone must continue to work.
-        const classicComic = await page.request.get(`/read/${COMIC_BOOK_ID}/cbz`);
+        const comicDetailResponse = await page.request.get(`/api/v1/books/${comicBookId}`);
+        expect(comicDetailResponse.ok(), `book ${comicBookId} disappeared from the comic seed`).toBe(true);
+        const comicBook = await comicDetailResponse.json() as BookDetail;
+        const comicFormat = comicBook.formats.find((format) => COMIC_FORMATS.has(format.format.toLowerCase()));
+        expect(comicFormat, `book ${comicBookId} needs a comic format`).toBeTruthy();
+        const classicComic = await page.request.get(`/read/${comicBookId}/${comicFormat!.format.toLowerCase()}`);
         expect(classicComic.status(), `${user.label}: viewer-gated classic comic reader`).toBe(user.viewer ? 200 : 403);
-        const comicInfo = await page.request.get(`/api/v1/books/${COMIC_BOOK_ID}/comic`);
+        const comicInfo = await page.request.get(`/api/v1/books/${comicBookId}/comic`);
         expect(comicInfo.status(), `${user.label}: viewer-gated SPA comic metadata`).toBe(user.viewer ? 200 : 403);
-        const comicPage = await page.request.get(`/api/v1/books/${COMIC_BOOK_ID}/comic/0`);
+        const comicPage = await page.request.get(`/api/v1/books/${comicBookId}/comic/0`);
         expect(comicPage.status(), `${user.label}: viewer-gated SPA comic page bytes`).toBe(user.viewer ? 200 : 403);
         if (user.viewer) {
           expect((await comicPage.body()).byteLength, `${user.label}: comic page contains image bytes`).toBeGreaterThan(0);
@@ -127,43 +165,41 @@ test('viewer and download roles independently govern every book affordance (F-ed
         }
 
         // New UI detail: each affordance follows its own API role bit.
-        await page.goto(`/app/book/${BOOK_ID}`);
+        await page.goto(`/app/book/${readableBookId}`);
         await expect(page.getByRole('heading', { name: book.title })).toBeVisible();
         await expect(
-          page.locator(`a[href$="/read/${BOOK_ID}"], a[href*="/view/${BOOK_ID}/"]`),
+          page.locator(`a[href$="/read/${readableBookId}"], a[href*="/view/${readableBookId}/"]`),
           `${user.label}: New UI detail Read affordance must match API role.viewer`,
         ).toHaveCount(me.role.viewer ? 1 : 0);
         await expect(
-          page.locator('a[href*="/download/"]'),
+          page.locator(`a[href*="/download/${readableBookId}/"]`),
           `${user.label}: New UI detail download affordances must match API role.download`,
         ).toHaveCount(me.role.download ? book.formats.length : 0);
 
-        await page.goto(`/app/book/${BOOK_ID}/edit`);
+        await page.goto(`/app/book/${readableBookId}/edit`);
         await expect(page.getByRole('heading', { name: 'Files' })).toBeVisible();
         await expect(
-          page.locator('a[href*="/download/"]'),
+          page.locator(`a[href*="/download/${readableBookId}/"]`),
           `${user.label}: New UI edit-page download affordances must match API role.download`,
         ).toHaveCount(me.role.download ? book.formats.length : 0);
 
         // New UI catalog cards use the same viewer answer as detail.
         await page.goto(`/app/?q=${encodeURIComponent(book.title)}`);
-        const card = page.locator(`a[href$="/book/${BOOK_ID}"]`).first();
+        const card = page.locator(`a[href$="/book/${readableBookId}"]`).first();
         await expect(card).toBeVisible();
         const cardWrap = card.locator('..');
         await expect(
-          cardWrap.locator(`a[href$="/read/${BOOK_ID}"], a[href*="/view/${BOOK_ID}/"]`),
+          cardWrap.locator(`a[href$="/read/${readableBookId}"], a[href*="/view/${readableBookId}/"]`),
           `${user.label}: New UI card Read affordance must match API role.viewer`,
         ).toHaveCount(me.role.viewer ? 1 : 0);
 
         if (me.role.viewer) {
-          expect(
-            readable!.content_url,
-            `${user.label}: API must provide a viewer-gated EPUB content URL`,
-          ).toBe(`/show/${BOOK_ID}/${readable!.format.toLowerCase()}`);
+          expect(contentUrl, `${user.label}: reader must use the viewer-gated EPUB content URL`)
+            .toBe(`/show/${readableBookId}/${readable!.format.toLowerCase()}`);
           const contentResponse = page.waitForResponse((response) =>
-            new URL(response.url()).pathname === readable!.content_url,
+            new URL(response.url()).pathname === contentUrl,
           );
-          await page.goto(`/app/read/${BOOK_ID}`);
+          await page.goto(`/app/read/${readableBookId}`);
           // An attached epub.js iframe proves the viewer fetched and parsed the
           // actual book bytes; the pre-fix 403 path never creates one.
           await expect(page.locator('iframe').first()).toBeAttached({ timeout: 20_000 });
@@ -175,11 +211,15 @@ test('viewer and download roles independently govern every book affordance (F-ed
         await page.context().addCookies([{
           name: 'cwng_prefer_spa', value: '0', url: new URL(page.url()).origin,
         }]);
-        await page.goto(`/book/${BOOK_ID}`, { waitUntil: 'domcontentloaded' });
+        await page.goto(`/book/${readableBookId}`, { waitUntil: 'domcontentloaded' });
         await expect(page.locator('a.book-read-cta')).toHaveCount(me.role.viewer ? 1 : 0);
-        const classicDownloads = page.locator('a[href*="/download/"]');
+        const classicDownloads = page.locator(`a[href*="/download/${readableBookId}/"]`);
         if (me.role.download) await expect(classicDownloads.first()).toBeAttached();
-        else await expect(classicDownloads).toHaveCount(0);
+        else {
+          const hrefs = await classicDownloads.evaluateAll((links) =>
+            links.map((link) => link.getAttribute('href')));
+          expect(hrefs, `${user.label}: Classic must not expose download links`).toEqual([]);
+        }
       } finally {
         await context.close();
       }
