@@ -18,6 +18,11 @@ is for things you can see or feel when running the app.
 
 ### Fixed
 
+- **Deleting a book format can no longer leave an empty book behind.** The API
+  now rejects attempts to remove a book's final format, and the edit page keeps
+  the delete control visible but disabled with an explanation when only one
+  format remains.
+
 - **Cover thumbnails load faster, and the gap widens the bigger your library
   gets.** Every cover request searched the whole thumbnail table instead of
   going straight to the row it wanted, and the book grid asked for each cover
