@@ -999,7 +999,7 @@ export function Reader({ id }: { id: string }) {
       try {
         // Fetch the .epub ourselves (same-origin cookie auth) and hand epub.js
         // an ArrayBuffer — reliable archive open regardless of the URL extension.
-        const res = await fetch(resourceUrl(epubFormat.download_url), { credentials: 'include' });
+        const res = await fetch(resourceUrl(epubFormat.content_url), { credentials: 'include' });
         if (!res.ok) throw new Error(t('Could not load the book file ({status})', { status: res.status }));
         const buf = await res.arrayBuffer();
         if (cancelled) return;
@@ -1142,7 +1142,7 @@ export function Reader({ id }: { id: string }) {
     };
     // Re-render only when the source changes; theme/font are applied imperatively.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [epubFormat?.download_url, isBookmarkFetched, isSettingsFetched, settingsHydrated]);
+  }, [epubFormat?.content_url, isBookmarkFetched, isSettingsFetched, settingsHydrated]);
 
   // Apply theme / font changes to a live rendition without rebuilding it, and
   // remember the preference across sessions.
