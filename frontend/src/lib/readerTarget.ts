@@ -1,8 +1,9 @@
 const SPA_READABLE = new Set(['epub', 'kepub']);
-const SERVER_READABLE = new Set([
+export const SERVER_READABLE_FORMATS = [
   'pdf', 'txt', 'djvu', 'djv', 'cbz', 'cbr', 'cbt',
-  'mp3', 'mp4', 'm4a', 'm4b', 'flac', 'ogg', 'opus', 'wav', 'aac',
-]);
+  'mp3', 'mp4', 'm4a', 'm4b', 'flac', 'ogg', 'opus', 'wav',
+] as const;
+const SERVER_READABLE = new Set<string>(SERVER_READABLE_FORMATS);
 
 export function getPrimaryReadTarget(
   id: number | string,
