@@ -1814,28 +1814,27 @@ def add_missing_tables(engine, _session):
     # NameError on any app.db missing kosync_progress (a fresh install).
     from .progress_syncing.models import KOSyncProgress
 
-    if not engine.dialect.has_table(engine.connect(), "archived_book"):
-        ArchivedBook.__table__.create(bind=engine, checkfirst=True)
-    if not engine.dialect.has_table(engine.connect(), "thumbnail"):
-        Thumbnail.__table__.create(bind=engine, checkfirst=True)
-    if not engine.dialect.has_table(engine.connect(), "kosync_progress"):
-        KOSyncProgress.__table__.create(bind=engine, checkfirst=True)
-    if not engine.dialect.has_table(engine.connect(), "magic_shelf"):
-        MagicShelf.__table__.create(bind=engine, checkfirst=True)
-    if not engine.dialect.has_table(engine.connect(), "magic_shelf_cache"):
-        MagicShelfCache.__table__.create(bind=engine, checkfirst=True)
-    if not engine.dialect.has_table(engine.connect(), "opds_shelf_exposure"):
-        OpdsShelfExposure.__table__.create(bind=engine, checkfirst=True)
-    if not engine.dialect.has_table(engine.connect(), "book_original_filename"):
-        BookOriginalFilename.__table__.create(bind=engine, checkfirst=True)
-    if not engine.dialect.has_table(engine.connect(), "opds_magic_shelf_exposure"):
-        OpdsMagicShelfExposure.__table__.create(bind=engine, checkfirst=True)
-    if not engine.dialect.has_table(engine.connect(), "hidden_magic_shelf_templates"):
-        HiddenMagicShelfTemplate.__table__.create(bind=engine, checkfirst=True)
-    if not engine.dialect.has_table(engine.connect(), "kobo_annotation_backup"):
-        KoboAnnotationBackup.__table__.create(bind=engine, checkfirst=True)
-    if not engine.dialect.has_table(engine.connect(), "favorite_book"):
-        FavoriteBook.__table__.create(bind=engine, checkfirst=True)
+    tables = (
+        ("archived_book", ArchivedBook.__table__),
+        ("thumbnail", Thumbnail.__table__),
+        ("kosync_progress", KOSyncProgress.__table__),
+        ("magic_shelf", MagicShelf.__table__),
+        ("magic_shelf_cache", MagicShelfCache.__table__),
+        ("opds_shelf_exposure", OpdsShelfExposure.__table__),
+        ("book_original_filename", BookOriginalFilename.__table__),
+        ("opds_magic_shelf_exposure", OpdsMagicShelfExposure.__table__),
+        ("hidden_magic_shelf_templates", HiddenMagicShelfTemplate.__table__),
+        ("kobo_annotation_backup", KoboAnnotationBackup.__table__),
+        ("favorite_book", FavoriteBook.__table__),
+    )
+    for table_name, table in tables:
+        # Explicit transaction control means even schema inspection begins a
+        # real read transaction. Close it before opening the separate DDL
+        # transaction or the inspection connection can block its commit.
+        with engine.connect() as connection:
+            table_exists = engine.dialect.has_table(connection, table_name)
+        if not table_exists:
+            table.create(bind=engine, checkfirst=True)
 
 
 # migrate all settings missing in registration table
@@ -1844,11 +1843,13 @@ def migrate_registration_table(engine, _session):
         # Handle table exists, but no content
         cnt = _session.query(Registration).count()
         if not cnt:
-            with engine.connect() as conn:
-                trans = conn.begin()
-                conn.execute(text("insert into registration (domain, allow) values('%.%',1)"))
-                trans.commit()
+            _session.add(Registration(domain='%.%', allow=1))
+        # The inspection SELECT now opens a real transaction. Commit on the
+        # same session both to persist the seed row and to release its read
+        # lock before later migrations use independent engine connections.
+        _session.commit()
     except exc.OperationalError:  # Database is not writeable
+        _session.rollback()
         print('Settings database is not writeable. Exiting...')
         sys.exit(2)
 
@@ -4136,8 +4137,11 @@ def migrate_Database(_session):
                 created = magic_shelf.create_system_magic_shelves(user.id, templates_to_create)
                 total_created += created
         
+        # Even a no-op pass performed SELECTs and therefore owns a real read
+        # transaction under explicit BEGIN handling. End it before the trigger
+        # guard below opens a separate DDL transaction on the same database.
+        _session.commit()
         if total_deleted > 0 or total_created > 0:
-            _session.commit()
             log.info(f"System shelf migration complete: {total_deleted} old shelves removed, {total_created} new shelves created")
     except Exception as e:
         log.error(f"Error during system shelf migration: {e}")
@@ -4234,6 +4238,32 @@ def create_system_magic_shelves_for_user(user_id):
         return 0
 
 
+def _create_app_db_engine(app_db_path):
+    """Create an app.db engine with SQLAlchemy-owned transaction boundaries.
+
+    Python's sqlite3 legacy transaction mode emits BEGIN for DML only. A
+    SAVEPOINT reached after SELECTs therefore has no enclosing transaction,
+    and releasing it makes its writes durable before Session.commit(). Disable
+    the driver's BEGIN handling and let SQLAlchemy emit BEGIN for every outer
+    transaction so Session.begin_nested() is always a contained SAVEPOINT.
+    """
+    engine = create_engine(
+        'sqlite:///{0}'.format(app_db_path),
+        echo=False,
+        connect_args={'timeout': 30},
+    )
+
+    @event.listens_for(engine, 'connect')
+    def _disable_sqlite_legacy_transaction_mode(dbapi_connection, _connection_record):
+        dbapi_connection.isolation_level = None
+
+    @event.listens_for(engine, 'begin')
+    def _emit_begin(connection):
+        connection.exec_driver_sql('BEGIN')
+
+    return engine
+
+
 def init_db_thread():
     global app_DB_path
     if not app_DB_path:
@@ -4246,8 +4276,7 @@ def init_db_thread():
         raise RuntimeError(
             "ub.init_db_thread() called before ub.init_db(); app_DB_path "
             "is unset, refusing to create a stray 'None' SQLite file")
-    engine = create_engine('sqlite:///{0}'.format(app_DB_path), echo=False,
-                           connect_args={'timeout': 30})
+    engine = _create_app_db_engine(app_DB_path)
 
     Session = scoped_session(sessionmaker())
     Session.configure(bind=engine)
@@ -4260,8 +4289,7 @@ def init_db(app_db_path):
     global app_DB_path
 
     app_DB_path = app_db_path
-    engine = create_engine('sqlite:///{0}'.format(app_db_path), echo=False,
-                           connect_args={'timeout': 30})
+    engine = _create_app_db_engine(app_db_path)
 
     Session = scoped_session(sessionmaker())
     Session.configure(bind=engine)
@@ -4336,8 +4364,7 @@ def password_change(user_credentials=None):
 
 
 def get_new_session_instance():
-    new_engine = create_engine('sqlite:///{0}'.format(app_DB_path), echo=False,
-                               connect_args={'timeout': 30})
+    new_engine = _create_app_db_engine(app_DB_path)
     new_session = scoped_session(sessionmaker())
     new_session.configure(bind=new_engine)
 
