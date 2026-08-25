@@ -130,7 +130,7 @@ def test_existing_annotation_sync_savepoint_rolls_back_with_failed_commit(
 def test_every_app_db_session_uses_explicit_begin_and_factory_keeps_timeout(
     file_backed_app_db,
 ):
-    """The main, worker, and ad-hoc app.db constructors share the fix."""
+    """The main, worker, and ad-hoc app.db constructors share WAL + the fix."""
     _db_path, main_session = file_backed_app_db
     thread_session = ub.init_db_thread()
     ad_hoc_session = ub.get_new_session_instance()
@@ -145,6 +145,7 @@ def test_every_app_db_session_uses_explicit_begin_and_factory_keeps_timeout(
             connection = session.connection()
             driver_connection = connection.connection.driver_connection
             assert driver_connection.isolation_level is None, constructor
+            assert connection.exec_driver_sql("PRAGMA journal_mode").scalar_one() == "wal"
             session.rollback()
 
         # Startup migrations temporarily lower busy_timeout on the pooled main
@@ -164,3 +165,66 @@ def test_every_app_db_session_uses_explicit_begin_and_factory_keeps_timeout(
         ad_hoc_engine = ad_hoc_session.get_bind()
         ad_hoc_session.remove()
         ad_hoc_engine.dispose()
+
+
+@pytest.mark.unit
+def test_wal_unavailable_suppresses_explicit_begin_warns_and_does_not_block_writer(
+    tmp_path, monkeypatch,
+):
+    """A WAL-incapable engine degrades consistently and observably."""
+    db_path = tmp_path / "wal-unavailable.db"
+    with sqlite3.connect(db_path) as setup:
+        setup.execute("CREATE TABLE probe (value TEXT NOT NULL)")
+        setup.execute("INSERT INTO probe VALUES ('seed')")
+
+    wal_requests = []
+
+    def reject_wal(connection):
+        wal_requests.append(connection)
+        return "delete", None
+
+    monkeypatch.setattr(ub, "_request_app_db_wal", reject_wal)
+    warnings = []
+
+    def capture_warning(message, *args):
+        warnings.append(message % args)
+
+    monkeypatch.setattr(ub.log, "warning", capture_warning)
+    engine = ub._create_app_db_engine(db_path)
+
+    try:
+        with engine.connect() as reader:
+            assert reader.exec_driver_sql("SELECT value FROM probe").scalar_one() == "seed"
+            driver_connection = reader.connection.driver_connection
+            assert driver_connection.isolation_level is not None
+            assert driver_connection.in_transaction is False
+
+            # Keep the reader checked out so this must create another DBAPI
+            # connection. The WAL capability probe is engine-wide, not a
+            # per-connection choice that could produce mixed semantics.
+            with engine.connect() as sibling:
+                sibling_driver = sibling.connection.driver_connection
+                assert sibling_driver is not driver_connection
+                assert sibling_driver.isolation_level is not None
+                assert sibling.exec_driver_sql("SELECT count(*) FROM probe").scalar_one() == 1
+                assert sibling_driver.in_transaction is False
+
+            # In rollback-journal mode, a legacy SELECT releases its read lock
+            # with the statement. An independent writer must not wait for this
+            # SQLAlchemy Connection's bookkeeping transaction to be closed.
+            with sqlite3.connect(db_path, timeout=0.25) as writer:
+                writer.execute("INSERT INTO probe VALUES ('writer')")
+    finally:
+        engine.dispose()
+
+    assert len(wal_requests) == 1
+    assert len(warnings) == 1
+    assert "WAL is unavailable" in warnings[0]
+    assert "legacy sqlite3 transaction control" in warnings[0]
+    assert "begin_nested() SAVEPOINTs opened before DML are not contained" in warnings[0]
+
+    with sqlite3.connect(db_path) as observer:
+        assert observer.execute("SELECT value FROM probe ORDER BY rowid").fetchall() == [
+            ("seed",),
+            ("writer",),
+        ]

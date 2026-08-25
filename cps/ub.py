@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone, timedelta
 import itertools
@@ -4238,28 +4239,70 @@ def create_system_magic_shelves_for_user(user_id):
         return 0
 
 
+def _request_app_db_wal(dbapi_connection):
+    """Request WAL on a raw sqlite3 connection, before SQLAlchemy autobegins."""
+    cursor = dbapi_connection.cursor()
+    try:
+        row = cursor.execute("PRAGMA journal_mode=WAL").fetchone()
+        return (row[0] if row else None), None
+    except sqlite3.Error as error:
+        return None, error
+    finally:
+        cursor.close()
+
+
 def _create_app_db_engine(app_db_path):
-    """Create an app.db engine with SQLAlchemy-owned transaction boundaries.
+    """Create an app.db engine with the safest available transaction mode.
 
     Python's sqlite3 legacy transaction mode emits BEGIN for DML only. A
     SAVEPOINT reached after SELECTs therefore has no enclosing transaction,
     and releasing it makes its writes durable before Session.commit(). Disable
     the driver's BEGIN handling and let SQLAlchemy emit BEGIN for every outer
-    transaction so Session.begin_nested() is always a contained SAVEPOINT.
+    transaction when WAL is available, so Session.begin_nested() is a contained
+    SAVEPOINT without making rollback-journal readers block writers.
+
+    WAL support is decided once per engine. If the first raw connection cannot
+    enable it (for example, app.db is on a network share), every connection on
+    that engine retains sqlite3's legacy transaction control. Mixing explicit
+    and legacy transaction semantics between connections would be worse than a
+    single, observable degraded mode.
     """
     engine = create_engine(
         'sqlite:///{0}'.format(app_db_path),
         echo=False,
         connect_args={'timeout': 30},
     )
+    transaction_mode = {'explicit_begin': None}
+    transaction_mode_lock = threading.Lock()
 
     @event.listens_for(engine, 'connect')
-    def _disable_sqlite_legacy_transaction_mode(dbapi_connection, _connection_record):
-        dbapi_connection.isolation_level = None
+    def _configure_app_db_transaction_mode(dbapi_connection, _connection_record):
+        if transaction_mode['explicit_begin'] is None:
+            with transaction_mode_lock:
+                if transaction_mode['explicit_begin'] is None:
+                    journal_mode, wal_error = _request_app_db_wal(dbapi_connection)
+                    wal_enabled = str(journal_mode).lower() == 'wal'
+                    transaction_mode['explicit_begin'] = wal_enabled
+                    if not wal_enabled:
+                        reason = ("PRAGMA journal_mode=WAL failed: {}".format(wal_error)
+                                  if wal_error is not None
+                                  else "SQLite kept journal_mode={!r}".format(journal_mode))
+                        log.warning(
+                            "SQLite WAL is unavailable for app.db %s (%s). Leaving legacy "
+                            "sqlite3 transaction control active for this engine to avoid "
+                            "rollback-journal readers blocking writers; begin_nested() "
+                            "SAVEPOINTs opened before DML are not contained and may commit "
+                            "at RELEASE.",
+                            app_db_path, reason,
+                        )
+
+        if transaction_mode['explicit_begin']:
+            dbapi_connection.isolation_level = None
 
     @event.listens_for(engine, 'begin')
     def _emit_begin(connection):
-        connection.exec_driver_sql('BEGIN')
+        if transaction_mode['explicit_begin']:
+            connection.exec_driver_sql('BEGIN')
 
     return engine
 
