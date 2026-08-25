@@ -374,7 +374,13 @@ def _parse_kobo_datetime(value):
     try:
         parsed = datetime.fromisoformat(raw)
         if parsed.tzinfo is None:
-            return None
+            # Kobo writes DateCreated without an offset even though the paired
+            # DateModified uses ``Z``. On the measured device all 31 pairs
+            # described the same instant and agreed to the second, so interpret
+            # that naive device clock as UTC. This is strong evidence, not proof:
+            # it covers one device in one time zone and should be revisited if
+            # hardware from another zone demonstrates a different convention.
+            parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc).replace(tzinfo=None)
     except (ValueError, OverflowError):
         return None
@@ -569,6 +575,7 @@ def ingest_bookmarks(sqlite_path, user_id, session, book_lookup, commit,
             skipped_invalid_content_id += 1
             continue
 
+        device_created_at = _parse_kobo_datetime(bm.date_created)
         device_modified_at = _parse_kobo_datetime(bm.date_modified)
         if existing is not None:
             if not _device_edit_is_newer(device_modified_at, existing):
@@ -610,6 +617,9 @@ def ingest_bookmarks(sqlite_path, user_id, session, book_lookup, commit,
             source="kobo",
             origin_device_id=origin_device_id,
             hidden=False,
+            # Preserve the annotation's device creation time when usable;
+            # malformed/absent clocks retain the historical import-time fallback.
+            created_at=device_created_at or datetime.now(timezone.utc),
             client_modified_at=device_modified_at,
             server_modified_at=datetime.now(timezone.utc),
         )

@@ -156,6 +156,24 @@ class TestIngestCounts:
         assert row.source == "kobo"
         assert row.chapter_progress == 0.024
 
+    def test_inserted_row_keeps_device_date_created(self, memory_db, synthetic_db):
+        from cps import ub
+        from cps.annotations import ingest_bookmarks
+
+        session, _, _ = memory_db
+        ingest_bookmarks(
+            synthetic_db,
+            user_id=7,
+            session=session,
+            book_lookup=_make_book_lookup({
+                "b3d1b38b-74fd-43b7-a796-996e5a6a8b04": 348,
+            }),
+            commit=session.commit,
+        )
+
+        row = session.query(ub.Annotation).filter_by(annotation_id="bm-002").one()
+        assert row.created_at == datetime(2026, 1, 1, 10, 5, 0, 123000)
+
     def test_color_round_trips(self, memory_db, synthetic_db):
         """Device integer -> what lands in the column -> what the reader is told.
 
@@ -340,6 +358,16 @@ class TestPreviouslyInvisibleDeviceRows:
         assert result["skipped_hidden"] == 1, result
         assert row.hidden is False
         assert row.highlighted_text == "server copy stays visible"
+
+
+@pytest.mark.unit
+class TestKoboDeviceClockParsing:
+    def test_real_device_naive_date_created_is_utc(self):
+        from cps.annotations import _parse_kobo_datetime
+
+        assert _parse_kobo_datetime(
+            "2026-08-15T22:27:08.567"
+        ) == datetime(2026, 8, 15, 22, 27, 8, 567000)
 
 
 @pytest.mark.unit
