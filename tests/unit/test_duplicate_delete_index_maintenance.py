@@ -293,6 +293,10 @@ def _load_duplicates_module(delete_key_calls):
         {"migrate_user_book_data": lambda *a, **k: None,
          "purge_user_book_data": lambda *a, **k: None},
     )
+    _install_stub(
+        "cps.kobo_sync_status",
+        {"record_book_deletion": lambda book_id, uuid: calls.append(("tombstone", book_id))},
+    )
     _install_stub("cps.csrf", {"exempt": _decorator})
     _install_stub("cps.admin", {"admin_required": _decorator})
     _install_stub("cps.usermanagement", {"login_required_if_no_ano": _decorator})
