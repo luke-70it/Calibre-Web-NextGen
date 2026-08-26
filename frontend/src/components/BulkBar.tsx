@@ -151,7 +151,7 @@ export function BulkBar({ ids, onClear, onChanged }: BulkBarProps) {
   };
 
   return (
-    <>
+    <div className={styles.bulkStack}>
     {metaOpen && (
       <div className={styles.metaPanel} role="region" aria-label={t('Apply metadata')}>
         <fieldset className={styles.modeGroup}>
@@ -244,6 +244,6 @@ export function BulkBar({ ids, onClear, onChanged }: BulkBarProps) {
 
         {busy && <Spinner size={16} />}
     </BulkSelectionBar>
-    </>
+    </div>
   );
 }

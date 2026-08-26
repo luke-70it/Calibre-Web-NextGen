@@ -22,6 +22,41 @@
   to { opacity: 1; transform: translate(-50%, 0); }
 }
 
+/* Catalog bulk controls share one bottom-anchored flow container. The metadata
+   panel therefore sits above the bar's ACTUAL wrapped height instead of
+   guessing it; constrained viewports scroll the panel, never overlap it. */
+.bulkStack {
+  position: fixed;
+  left: 50%;
+  bottom: var(--sp-5);
+  transform: translateX(-50%);
+  z-index: var(--z-overlay);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  width: max-content;
+  max-width: calc(100vw - 2 * var(--sp-4));
+  max-height: calc(100vh - 2 * var(--sp-5));
+  max-height: calc(100dvh - 2 * var(--sp-5));
+}
+
+.bulkStack .bar {
+  position: relative;
+  left: auto;
+  bottom: auto;
+  transform: none;
+  z-index: auto;
+  flex: none;
+  max-width: 100%;
+  animation: riseInStack var(--dur-base) var(--ease-out) both;
+}
+
+@keyframes riseInStack {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 .count {
   font-size: var(--fs-sm);
   font-weight: var(--fw-semi);
@@ -103,11 +138,10 @@
 }
 
 .metaPanel {
-  position: fixed; left: 50%; transform: translateX(-50%);
-  bottom: calc(var(--sp-6) + 56px); z-index: 60;
   background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--r-lg);
   padding: var(--sp-4); box-shadow: var(--shadow-lg, 0 12px 40px rgba(0,0,0,.4));
-  width: min(680px, 92vw); display: flex; flex-direction: column; gap: var(--sp-3);
+  width: min(680px, 92vw); max-width: 100%; min-height: 0; overflow-y: auto;
+  display: flex; flex: 0 1 auto; flex-direction: column; gap: var(--sp-3);
 }
 .modeGroup { border: 0; padding: 0; margin: 0; min-width: 0; }
 .modeGroup legend {
