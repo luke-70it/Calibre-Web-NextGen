@@ -263,6 +263,7 @@ body.blur .cwa-settings-actions {
 }
 
 .cwa-settings-actions .cwa-settings-reset-action {
+    order: 1;
     color: var(--cwa-settings-reset-color);
     background-color: var(--cwa-settings-reset-bg);
     border: 1px solid var(--cwa-settings-reset-border);
@@ -277,6 +278,7 @@ body.blur .cwa-settings-actions {
 }
 
 .cwa-settings-actions .cwa-settings-save-action {
+    order: 2;
     color: var(--cwa-settings-save-color);
     background-color: var(--cwa-settings-save-bg);
     border: 1px solid var(--cwa-settings-save-border);

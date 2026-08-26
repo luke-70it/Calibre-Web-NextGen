@@ -5,16 +5,21 @@
 
 import inspect
 import re
+from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import flask
+import jinja2
 import pytest
+from lxml import html
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CWA_SETTINGS_TEMPLATE = REPO_ROOT / "cps" / "templates" / "cwa_settings.html"
 CWA_CSS = REPO_ROOT / "cps" / "static" / "css" / "cwa.css"
 LAYOUT_TEMPLATE = REPO_ROOT / "cps" / "templates" / "layout.html"
+TEMPLATE_DIR = REPO_ROOT / "cps" / "templates"
 
 
 class _SettingsDB:
@@ -152,12 +157,90 @@ def _rgb_chroma(color):
     return max(channels) - min(channels)
 
 
-def test_template_confirms_the_full_reset_and_keeps_save_rightmost():
-    source = CWA_SETTINGS_TEMPLATE.read_text(encoding="utf-8")
-    reset = source.index('name="settings_action" value="reset"')
-    save = source.index('name="settings_action" value="save"')
+def _render_cwa_settings_template():
+    def translate(message, **values):
+        return message % values if values else message
 
-    assert reset < save, "Reset must remain left of the rightmost Save action"
+    environment = jinja2.Environment(
+        loader=jinja2.ChoiceLoader([
+            jinja2.DictLoader({
+                "layout.html": (
+                    "{% block flash %}{% endblock %}"
+                    "{% block header %}{% endblock %}"
+                    "{% block body %}{% endblock %}"
+                ),
+            }),
+            jinja2.FileSystemLoader(str(TEMPLATE_DIR)),
+        ]),
+        autoescape=True,
+    )
+    return environment.get_template("cwa_settings.html").render(
+        _=translate,
+        autoingest_options=(),
+        config=SimpleNamespace(
+            config_timezone="UTC",
+            hardcover_sync_enabled=lambda: False,
+        ),
+        cwa_settings=defaultdict(lambda: False),
+        hardcover_token_available=False,
+        ignorable_formats=(),
+        next_duplicate_scan_run=None,
+        target_formats=(),
+        title="CWA Settings",
+        url_for=lambda endpoint: f"/{endpoint}",
+    )
+
+
+def _inline_declarations(element):
+    return {
+        name.strip(): value.strip()
+        for declaration in element.get("style", "").split(";")
+        if ":" in declaration
+        for name, value in [declaration.split(":", 1)]
+    }
+
+
+def test_rendered_template_makes_save_default_and_keeps_it_rightmost():
+    source = CWA_SETTINGS_TEMPLATE.read_text(encoding="utf-8")
+    document = html.fromstring(_render_cwa_settings_template())
+    form = document.xpath("//form")[0]
+    action_row = form.xpath(
+        './/div[contains(concat(" ", normalize-space(@class), " "), '
+        '" cwa-settings-actions ")]'
+    )[0]
+    action_buttons = action_row.xpath('./button[@type="submit"]')
+    dom_actions = [button.get("value") for button in action_buttons]
+
+    assert dom_actions == ["save", "reset"], (
+        "Save must be the first submit control in DOM order so implicit "
+        "form submission cannot target Reset"
+    )
+
+    all_submit_controls = form.xpath(
+        './/button[not(@type) or @type="submit"] | .//input[@type="submit"]'
+    )
+    assert all_submit_controls[0].get("value") == "save"
+
+    row_style = _inline_declarations(action_row)
+    assert row_style["display"] == "flex"
+    css = CWA_CSS.read_text(encoding="utf-8")
+
+    def flex_order(button):
+        action_class = next(
+            class_name
+            for class_name in button.get("class", "").split()
+            if class_name.startswith("cwa-settings-") and class_name.endswith("-action")
+        )
+        selector = f".cwa-settings-actions .{action_class}"
+        return int(_css_declarations(css, selector)["order"])
+
+    visual_actions = [
+        button.get("value") for button in sorted(action_buttons, key=flex_order)
+    ]
+    assert visual_actions == ["reset", "save"], (
+        "Reset must render left of the rightmost Save action"
+    )
+
     assert "Reset every CWA setting to its default?" in source
     assert "All of your current CWA settings will be permanently lost." in source
     assert 'onclick="return confirm(this.dataset.confirm);"' in source
