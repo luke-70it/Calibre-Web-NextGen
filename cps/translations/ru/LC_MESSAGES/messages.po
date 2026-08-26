@@ -4022,6 +4022,10 @@ msgstr "Добавить идентификатор"
 msgid "Add note"
 msgstr "Добавить заметку"
 
+#: cps/spa_strings.py
+msgid "Add to existing"
+msgstr ""
+
 #: cps/spa_strings.py cps/templates/detail.html
 msgid "Add to favorites"
 msgstr "Добавить в избранное"
@@ -4075,15 +4079,12 @@ msgid "Any tags"
 msgstr "Любые теги"
 
 #: cps/spa_strings.py
-msgid "Apply selected"
-msgstr "Применить выбранные"
+msgid "Apply metadata"
+msgstr ""
 
 #: cps/spa_strings.py
-msgid ""
-"Apply to all selected (only filled fields change; replaces existing values):"
-msgstr ""
-"Применить ко всем выбранным (изменятся только заполненные поля; текущие "
-"значения будут заменены):"
+msgid "Apply selected"
+msgstr "Применить выбранные"
 
 #: cps/spa_strings.py cps/templates/cover_picker.html
 msgid "Applying…"
@@ -4823,6 +4824,10 @@ msgstr ""
 "отдельные книги."
 
 #: cps/spa_strings.py
+msgid "Every filled field will replace each book's existing values."
+msgstr ""
+
+#: cps/spa_strings.py
 msgid "Excluded"
 msgstr "Исключено"
 
@@ -5043,6 +5048,10 @@ msgstr "Популярное"
 #: cps/spa_strings.py
 msgid "Hot — Most Downloaded"
 msgstr "Популярное — Самые скачиваемые"
+
+#: cps/spa_strings.py
+msgid "How should multi-value fields be applied?"
+msgstr ""
 
 #: cps/spa_strings.py
 msgid "Icon"
@@ -5351,6 +5360,12 @@ msgstr "Нужно сообщить о проблеме? Попробуйте н
 #: cps/spa_strings.py cps/templates/cover_picker.html
 msgid "New"
 msgstr "Новый"
+
+#: cps/spa_strings.py
+msgid ""
+"New authors, tags, publishers, and languages will be added after each book's "
+"existing values. Filled single-value fields will be replaced."
+msgstr ""
 
 #: cps/spa_strings.py
 msgid "New password"
@@ -5816,6 +5831,17 @@ msgstr "Заменить обложку этим вариантом?"
 #: cps/spa_strings.py
 msgid "Replace cover?"
 msgstr "Заменить обложку?"
+
+#: cps/spa_strings.py
+msgid "Replace existing"
+msgstr ""
+
+#: cps/spa_strings.py
+#, python-brace-format
+msgid ""
+"Replace metadata for {n} selected book(s)? Those books will lose their "
+"existing values in every filled field."
+msgstr ""
 
 #: cps/spa_strings.py
 msgid "Report Issue on Discord"
@@ -13421,6 +13447,13 @@ msgstr "Показывать выбранные полки в OPDS"
 #: cps/templates/user_table.html
 msgid "Show Read/Unread Section"
 msgstr "Показать раздел прочитанного/непрочитанного"
+
+#~ msgid ""
+#~ "Apply to all selected (only filled fields change; replaces existing "
+#~ "values):"
+#~ msgstr ""
+#~ "Применить ко всем выбранным (изменятся только заполненные поля; текущие "
+#~ "значения будут заменены):"
 
 #, python-brace-format
 #~ msgid ""

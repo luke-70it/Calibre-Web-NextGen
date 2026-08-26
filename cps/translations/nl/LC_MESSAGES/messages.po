@@ -6732,6 +6732,10 @@ msgid "…or paste an image URL"
 msgstr "…of plak een afbeelding-URL"
 
 #: cps/spa_strings.py
+msgid "← Back"
+msgstr "← Terug"
+
+#: cps/spa_strings.py
 msgid "← Back to book"
 msgstr "← Terug naar boek"
 
@@ -13044,9 +13048,6 @@ msgstr "Toon gelezen/niet gelezen selectie"
 #~ msgstr ""
 #~ "Toepassen op alle geselecteerde (alleen ingevulde velden veranderen; "
 #~ "bestaande waarden worden vervangen):"
-
-#~ msgid "← Back"
-#~ msgstr "← Terug"
 
 #~ msgid ""
 #~ "We repaired this book for your Kobo. Sync your device — and if "

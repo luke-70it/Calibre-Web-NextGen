@@ -292,7 +292,7 @@ export function BookDetail() {
     return (
       <main className={styles.container}>
         <Link href={bookBackTarget.href} className={styles.back}>
-          {t(bookBackTarget.isOrigin ? '← Back' : '← Library')}
+          {bookBackTarget.isOrigin ? t('← Back') : t('← Library')}
         </Link>
         <EmptyState message={error instanceof Error ? error.message : t('Book not found.')} />
       </main>
@@ -310,7 +310,7 @@ export function BookDetail() {
   return (
     <main className={styles.container}>
       <Link href={bookBackTarget.href} className={styles.back}>
-        {t(bookBackTarget.isOrigin ? '← Back' : '← Library')}
+        {bookBackTarget.isOrigin ? t('← Back') : t('← Library')}
       </Link>
 
       <BookUserNotices bookId={book.id} />
