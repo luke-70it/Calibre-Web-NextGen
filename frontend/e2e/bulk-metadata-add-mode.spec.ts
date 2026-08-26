@@ -53,6 +53,31 @@ test.beforeEach(async ({ page }) => {
   await mockCatalog(page);
 });
 
+test('mobile metadata keeps global navigation reachable and stays above the wrapped bulk bar', async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 667 });
+  await selectBothAndOpenMetadata(page);
+
+  const panel = page.getByRole('region', { name: 'Apply metadata' });
+  const bulkBar = page.getByRole('region', { name: '2 selected' });
+  const openNavigation = page.getByRole('button', { name: 'Open navigation' });
+  await expect(openNavigation).toBeVisible();
+
+  const navigationOwnsItsCenter = await openNavigation.evaluate((button) => {
+    const box = button.getBoundingClientRect();
+    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return hit === button || (hit !== null && button.contains(hit));
+  });
+  expect(navigationOwnsItsCenter, 'metadata panel covers the Open navigation hit target').toBe(true);
+
+  const [panelBox, bulkBarBox] = await Promise.all([panel.boundingBox(), bulkBar.boundingBox()]);
+  expect(panelBox).not.toBeNull();
+  expect(bulkBarBox).not.toBeNull();
+  expect(
+    panelBox!.y + panelBox!.height,
+    'metadata panel overlaps the bulk bar instead of flowing above its actual wrapped height',
+  ).toBeLessThanOrEqual(bulkBarBox!.y);
+});
+
 test('Add is the default, explains the merge, and sends list_mode=add', async ({ page }) => {
   const payloads: MetadataUpdate[] = [];
   await page.route('**/api/v1/books/*/metadata', async (route) => {

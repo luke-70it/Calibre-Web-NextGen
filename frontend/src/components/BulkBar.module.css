@@ -24,7 +24,9 @@
 
 /* Catalog bulk controls share one bottom-anchored flow container. The metadata
    panel therefore sits above the bar's ACTUAL wrapped height instead of
-   guessing it; constrained viewports scroll the panel, never overlap it. */
+   guessing it; constrained viewports scroll the panel, never overlap it.
+   Reserve the persistent top bar's strip because this region is non-modal and
+   must not block global navigation. */
 .bulkStack {
   position: fixed;
   left: 50%;
@@ -37,8 +39,8 @@
   gap: var(--sp-2);
   width: max-content;
   max-width: calc(100vw - 2 * var(--sp-4));
-  max-height: calc(100vh - 2 * var(--sp-5));
-  max-height: calc(100dvh - 2 * var(--sp-5));
+  max-height: calc(100vh - var(--topbar-h) - 2 * var(--sp-5));
+  max-height: calc(100dvh - var(--topbar-h) - 2 * var(--sp-5));
 }
 
 .bulkStack .bar {
