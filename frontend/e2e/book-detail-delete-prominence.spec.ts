@@ -40,6 +40,7 @@ test('book-detail deletion remains visible and accessible with delete permission
   const region = page.getByTestId('book-destructive-actions');
   await expect(region).toBeVisible();
   await expect(region).toHaveAccessibleName('Delete book');
+  await expect(region.getByRole('heading', { name: 'Delete book' })).toBeVisible();
   await expect(region.getByRole('button', { name: 'Delete book' })).toBeVisible();
 });
 
@@ -104,6 +105,8 @@ test('book-detail deletion is a quiet region in light and dark themes (#1862)', 
         borderLeftStyle: style.borderLeftStyle,
         borderRightStyle: style.borderRightStyle,
         borderBottomStyle: style.borderBottomStyle,
+        outlineStyle: style.outlineStyle,
+        boxShadow: style.boxShadow,
       };
     });
 
@@ -112,6 +115,8 @@ test('book-detail deletion is a quiet region in light and dark themes (#1862)', 
       borderLeftStyle: 'none',
       borderRightStyle: 'none',
       borderBottomStyle: 'none',
+      outlineStyle: 'none',
+      boxShadow: 'none',
     });
   }
 });

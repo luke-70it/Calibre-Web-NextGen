@@ -574,10 +574,10 @@ export function BookDetail() {
               this gate and grouping are the discoverability/UX layer. */}
           {me?.role?.delete_books && (
             <section className={styles.dangerZone} data-testid="book-destructive-actions"
-              aria-label={t('Delete book')}>
-              <span className={styles.dangerZoneTitle}>
+              aria-labelledby={`delete-book-heading-${book.id}`}>
+              <h2 id={`delete-book-heading-${book.id}`} className={styles.dangerZoneTitle}>
                 {t('Delete book')}
-              </span>
+              </h2>
               <button
                 type="button"
                 className={styles.actionDanger}

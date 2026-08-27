@@ -113,7 +113,7 @@ test('book-detail deletion is grouped outside the ordinary action chips (#1046)'
   const destructiveActions = page.getByTestId('book-destructive-actions');
   await expect(ordinaryActions).toBeVisible();
   await expect(destructiveActions).toBeVisible();
-  await expect(destructiveActions).toHaveAccessibleName('Delete book');
+  await expect(destructiveActions.getByRole('heading', { name: 'Delete book' })).toBeVisible();
   await expect(destructiveActions.getByRole('button', { name: 'Delete book' })).toBeVisible();
   await expect(ordinaryActions.getByRole('button', { name: 'Delete book' })).toHaveCount(0);
 });
