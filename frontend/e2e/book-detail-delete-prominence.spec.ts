@@ -25,33 +25,33 @@ async function setDeletePermission(page: Page, allowed: boolean) {
   });
 }
 
-test('the edit page exposes whole-book deletion to users with delete permission (#1046)', async ({ page }) => {
+test('book-detail deletion remains visible and accessible with delete permission (#1862)', async ({ page }) => {
   await page.goto('/app');
   const book = await firstBook(page);
   test.skip(book == null, 'seed has no books');
 
   await setDeletePermission(page, true);
-  await page.goto(`/app/book/${book.id}/edit`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`/app/book/${book.id}`, { waitUntil: 'domcontentloaded' });
 
-  await expect(page.getByRole('heading', { name: 'Edit metadata' })).toBeVisible();
-  await expect(page.getByTestId('edit-book-delete')).toBeVisible();
-  await expect(page.getByTestId('edit-book-delete')).toHaveAccessibleName('Delete book');
+  const region = page.getByTestId('book-destructive-actions');
+  await expect(region).toBeVisible();
+  await expect(region).toHaveAccessibleName('Delete book');
+  await expect(region.getByRole('button', { name: 'Delete book' })).toBeVisible();
 });
 
-test('the edit page hides whole-book deletion without delete permission (#1046)', async ({ page }) => {
+test('book-detail deletion remains absent without delete permission (#1862)', async ({ page }) => {
   await page.goto('/app');
   const book = await firstBook(page);
   test.skip(book == null, 'seed has no books');
 
   await setDeletePermission(page, false);
-  await page.goto(`/app/book/${book.id}/edit`, { waitUntil: 'domcontentloaded' });
+  await page.goto(`/app/book/${book.id}`, { waitUntil: 'domcontentloaded' });
 
-  await expect(page.getByRole('heading', { name: 'Edit metadata' })).toBeVisible();
-  await expect(page.getByTestId('edit-book-delete')).toHaveCount(0);
+  await expect(page.getByTestId('book-destructive-actions')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Delete book' })).toHaveCount(0);
 });
 
-test('edit-page deletion confirms before mutation and a declined confirm does nothing (#1046)', async ({ page }) => {
+test('dismissing book-detail deletion confirmation never calls the endpoint (#1862)', async ({ page }) => {
   await page.goto('/app');
   const book = await firstBook(page);
   test.skip(book == null, 'seed has no books');
@@ -63,8 +63,9 @@ test('edit-page deletion confirms before mutation and a declined confirm does no
     await route.fulfill({ status: 204, contentType: 'application/json', body: '' });
   });
 
-  await page.goto(`/app/book/${book.id}/edit`, { waitUntil: 'domcontentloaded' });
-  const deleteButton = page.getByTestId('edit-book-delete');
+  await page.goto(`/app/book/${book.id}`, { waitUntil: 'domcontentloaded' });
+  const deleteButton = page.getByTestId('book-destructive-actions')
+    .getByRole('button', { name: 'Delete book' });
   await expect(deleteButton).toBeVisible();
 
   let declinedPrompt = '';
@@ -78,26 +79,10 @@ test('edit-page deletion confirms before mutation and a declined confirm does no
   expect(declinedPrompt).toContain(`"${book.title}"`);
   expect(declinedPrompt).toContain('cannot be undone');
   expect(deleteCalls, 'declining confirmation must not call the delete endpoint').toBe(0);
-  await expect(page).toHaveURL(new RegExp(`/book/${book.id}/edit\\b`));
-
-  let acceptedPrompt = '';
-  page.once('dialog', (dialog) => {
-    acceptedPrompt = dialog.message();
-    void dialog.accept();
-  });
-  const [request] = await Promise.all([
-    page.waitForRequest(`**/api/v1/books/${book.id}/delete`),
-    deleteButton.click(),
-  ]);
-
-  expect(acceptedPrompt).toContain(`"${book.title}"`);
-  expect(acceptedPrompt).toContain('cannot be undone');
-  expect(request.method()).toBe('POST');
-  await expect.poll(() => deleteCalls).toBe(1);
-  await expect(page).not.toHaveURL(new RegExp(`/book/${book.id}(?:/edit)?\\b`));
+  await expect(page).toHaveURL(new RegExp(`/book/${book.id}\\b`));
 });
 
-test('book-detail deletion is grouped outside the ordinary action chips (#1046)', async ({ page }) => {
+test('book-detail deletion is a quiet region in light and dark themes (#1862)', async ({ page }) => {
   await page.goto('/app');
   const book = await firstBook(page);
   test.skip(book == null, 'seed has no books');
@@ -105,11 +90,24 @@ test('book-detail deletion is grouped outside the ordinary action chips (#1046)'
   await setDeletePermission(page, true);
   await page.goto(`/app/book/${book.id}`, { waitUntil: 'domcontentloaded' });
 
-  const ordinaryActions = page.getByTestId('book-actions');
-  const destructiveActions = page.getByTestId('book-destructive-actions');
-  await expect(ordinaryActions).toBeVisible();
-  await expect(destructiveActions).toBeVisible();
-  await expect(destructiveActions).toHaveAccessibleName('Delete book');
-  await expect(destructiveActions.getByRole('button', { name: 'Delete book' })).toBeVisible();
-  await expect(ordinaryActions.getByRole('button', { name: 'Delete book' })).toHaveCount(0);
+  const region = page.getByTestId('book-destructive-actions');
+  for (const theme of ['light', 'dark']) {
+    await page.locator('html').evaluate((html, value) => html.setAttribute('data-theme', value), theme);
+    const appearance = await region.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        backgroundColor: style.backgroundColor,
+        borderLeftStyle: style.borderLeftStyle,
+        borderRightStyle: style.borderRightStyle,
+        borderBottomStyle: style.borderBottomStyle,
+      };
+    });
+
+    expect(appearance, `${theme} theme must not render a filled, boxed danger banner`).toEqual({
+      backgroundColor: 'rgba(0, 0, 0, 0)',
+      borderLeftStyle: 'none',
+      borderRightStyle: 'none',
+      borderBottomStyle: 'none',
+    });
+  }
 });
