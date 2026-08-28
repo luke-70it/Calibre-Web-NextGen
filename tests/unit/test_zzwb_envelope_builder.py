@@ -287,3 +287,164 @@ def test_builder_cli_server_highlight_mode_writes_exactly_one_row(tmp_path):
         "annotations": [_server_highlight()],
         "nextPageOffsetToken": None,
     }
+
+
+RECOVERY_CONTENT_ID = "c65e568b-f5c7-481b-baf7-85ccb79c0305"
+
+
+def _recovery_row(annotation_id, annotation_type):
+    is_dogear = annotation_type == "dogear"
+    return {
+        "annotation_id": annotation_id,
+        "annotation_type": annotation_type,
+        "book_id": 404,
+        "chapter_progress": 0.625 if is_dogear else 0.25,
+        "chapter_title": "Chapter IV" if is_dogear else None,
+        "client_modified_at": "2026-08-28 05:12:13.456789",
+        "content_id": f"{RECOVERY_CONTENT_ID}!!OEBPS/chapter-01.xhtml",
+        "context_string": "" if is_dogear else "words around the passage",
+        "end_container_path": "span#kobo.4.2",
+        "end_offset": 7 if not is_dogear else 0,
+        "hidden": 0,
+        "highlight_color": None if is_dogear else "blue",
+        "highlighted_text": "" if is_dogear else "original device text",
+        "note_text": None,
+        "source": "kobo",
+        "start_container_path": "span#kobo.4.1",
+        "start_offset": 0,
+    }
+
+
+def _write_recovery_export(tmp_path, rows):
+    export = tmp_path / "annotation-export.json"
+    export.write_text(json.dumps(rows), encoding="utf-8")
+    return export
+
+
+def test_recovery_builder_maps_highlight_and_observed_dogear_shapes(tmp_path):
+    dogear_id = "054fceb2-60a7-4658-bda4-25ace97e7688"
+    highlight_id = "854fceb2-60a7-4658-bda4-25ace97e7688"
+    export = _write_recovery_export(tmp_path, [
+        _recovery_row(highlight_id, "highlight"),
+        _recovery_row(dogear_id, "dogear"),
+    ])
+
+    result = builder.build_recovery_envelope(
+        export, content_id=RECOVERY_CONTENT_ID, book_id=404, expected_count=2,
+    )
+
+    assert result.annotation_count == 2
+    assert result.book_id == 404
+    annotations = json.loads(result.payload)["annotations"]
+    assert [annotation["id"] for annotation in annotations] == [dogear_id, highlight_id]
+    dogear, highlight = annotations
+    assert set(dogear) == {
+        "clientLastModifiedUtc", "context", "highlightedText", "id", "location", "type",
+    }
+    assert dogear["type"] == "dogear"
+    assert dogear["highlightedText"] == ""
+    assert "highlightColor" not in dogear
+    assert "attachments" not in dogear
+    assert dogear["location"]["span"]["chapterTitle"] == "Chapter IV"
+    assert set(highlight) == builder.SERVER_HIGHLIGHT_KEYS
+    assert highlight["highlightColor"] == "#B2E1E8"
+    assert highlight["id"] == highlight_id
+    assert highlight["clientLastModifiedUtc"] == "2026-08-28T05:12:13.456Z"
+    assert highlight["location"]["span"] == {
+        "chapterFilename": "OEBPS/chapter-01.xhtml",
+        "chapterProgress": 0.25,
+        "endChar": 7,
+        "endPath": "span#kobo.4.2",
+        "startChar": 0,
+        "startPath": "span#kobo.4.1",
+    }
+
+
+@pytest.mark.parametrize("missing", sorted(builder.RECOVERY_REQUIRED_COLUMNS))
+def test_recovery_builder_refuses_any_unmappable_missing_column(tmp_path, missing):
+    row = _recovery_row("154fceb2-60a7-4658-bda4-25ace97e7688", "highlight")
+    row.pop(missing)
+    export = _write_recovery_export(tmp_path, [row])
+
+    with pytest.raises(builder.BuildError, match="missing columns"):
+        builder.build_recovery_envelope(
+            export, content_id=RECOVERY_CONTENT_ID, book_id=404, expected_count=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda row: row.update({"book_id": 405}), "does not belong to book 404"),
+        (lambda row: row.update({"hidden": 1}), "hidden or has an invalid hidden flag"),
+        (lambda row: row.update({"source": "webreader"}), "source must be exactly 'kobo'"),
+        (lambda row: row.update({"annotation_type": "note"}), "not a proven Kobo"),
+        (lambda row: row.update({"note_text": "private note"}), "without a proven serializer"),
+        (lambda row: row.update({"highlight_color": "#FF0000"}), "outside Kobo's wire palette"),
+        (lambda row: row.update({"content_id": "different!!chapter.xhtml"}),
+         "does not belong to the target book"),
+        (lambda row: row.update({"context_string": None}), "context_string must be a string"),
+        (lambda row: row.update({"client_modified_at": None}),
+         "client_modified_at must be a stored UTC timestamp"),
+    ],
+)
+def test_recovery_builder_refuses_semantically_incomplete_rows(
+    tmp_path, mutation, message,
+):
+    row = _recovery_row("254fceb2-60a7-4658-bda4-25ace97e7688", "highlight")
+    mutation(row)
+    export = _write_recovery_export(tmp_path, [row])
+
+    with pytest.raises(builder.BuildError, match=message):
+        builder.build_recovery_envelope(
+            export, content_id=RECOVERY_CONTENT_ID, book_id=404, expected_count=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("highlighted_text", "not empty", "dogear highlighted_text must be empty"),
+        ("highlight_color", "#A0A0A0", "dogear must be colorless"),
+        ("chapter_title", None, "chapter_title must be a non-empty string"),
+    ],
+)
+def test_recovery_builder_refuses_dogear_shape_drift(tmp_path, field, value, message):
+    row = _recovery_row("354fceb2-60a7-4658-bda4-25ace97e7688", "dogear")
+    row[field] = value
+    export = _write_recovery_export(tmp_path, [row])
+
+    with pytest.raises(builder.BuildError, match=message):
+        builder.build_recovery_envelope(
+            export, content_id=RECOVERY_CONTENT_ID, book_id=404, expected_count=1,
+        )
+
+
+def test_recovery_builder_refuses_wrong_count_and_duplicate_original_ids(tmp_path):
+    row = _recovery_row("454fceb2-60a7-4658-bda4-25ace97e7688", "dogear")
+    export = _write_recovery_export(tmp_path, [row, dict(row)])
+
+    with pytest.raises(builder.BuildError, match="has 2 rows, expected 8"):
+        builder.build_recovery_envelope(
+            export, content_id=RECOVERY_CONTENT_ID, book_id=404, expected_count=8,
+        )
+    with pytest.raises(builder.BuildError, match="duplicate annotation_id"):
+        builder.build_recovery_envelope(
+            export, content_id=RECOVERY_CONTENT_ID, book_id=404, expected_count=2,
+        )
+
+
+def test_builder_cli_recovery_mode_writes_exact_requested_set(tmp_path):
+    row = _recovery_row("554fceb2-60a7-4658-bda4-25ace97e7688", "dogear")
+    export = _write_recovery_export(tmp_path, [row])
+    output = tmp_path / "payload.json"
+
+    assert builder.main([
+        "--annotation-export", str(export),
+        "--content-id", RECOVERY_CONTENT_ID,
+        "--book-id", "404",
+        "--expected-count", "1",
+        "--output", str(output),
+    ]) == 0
+
+    assert json.loads(output.read_bytes())["annotations"][0]["id"] == row["annotation_id"]

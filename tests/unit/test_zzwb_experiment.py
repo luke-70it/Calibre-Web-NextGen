@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -13,12 +14,55 @@ from flask import Flask, jsonify, make_response
 import cps.readingservices as rs
 
 
-PROBE = rs.ZZWB_EXPERIMENT_UUID
+PROBE = rs.ZZWB_PINNED_UUID
+RECOVERY = "c65e568b-f5c7-481b-baf7-85ccb79c0305"
 FOREIGN = "kobo-store-content"
 
 
 def test_rig_is_pinned_to_the_live_probe_uuid():
     assert PROBE == "053742ff-9094-43b2-8511-c0763c90ffab"
+    assert rs.ZZWB_EXPERIMENT_UUID == PROBE
+
+
+def test_missing_target_file_falls_back_to_the_pinned_probe(tmp_path):
+    assert rs._zzwb_target_at_startup(tmp_path / "missing-target.txt") == PROBE
+
+
+def test_mode_0600_target_file_selects_the_recovery_book(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text(RECOVERY + "\n", encoding="ascii")
+    target.chmod(0o600)
+
+    assert rs._zzwb_target_at_startup(target) == RECOVERY
+
+
+def test_invalid_present_target_fails_closed_instead_of_falling_back(tmp_path):
+    target = tmp_path / "target.txt"
+    target.write_text(PROBE + "\n", encoding="ascii")
+    target.chmod(0o644)
+
+    assert rs._zzwb_target_at_startup(target) is None
+
+
+def test_selected_recovery_target_still_short_circuits_every_other_id(
+    tmp_path, monkeypatch,
+):
+    _stage(tmp_path, monkeypatch)
+    monkeypatch.setattr(rs, "ZZWB_EXPERIMENT_UUID", RECOVERY)
+
+    assert rs._zzwb_stage_for_target(RECOVERY) is not None
+    monkeypatch.setattr(
+        rs,
+        "_zzwb_armed",
+        lambda: pytest.fail("non-target ContentId touched the arming directory"),
+    )
+    monkeypatch.setattr(
+        os,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail("request re-read target.txt"),
+    )
+    assert rs._zzwb_stage_for_target(PROBE) is None
+    assert rs._zzwb_stage_for_target(FOREIGN) is None
 
 
 @pytest.fixture

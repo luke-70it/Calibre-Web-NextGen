@@ -8,6 +8,8 @@ from pathlib import Path
 RUNBOOK = Path(__file__).parents[2] / "notes" / "ZZWB-ETAG-HARDWARE-EXPERIMENT-RUNBOOK.md"
 PROBE = "053742ff-9094-43b2-8511-c0763c90ffab"
 PROBE_TITLE = "The Heat Will Kill You First"
+RECOVERY = "c65e568b-f5c7-481b-baf7-85ccb79c0305"
+RECOVERY_TITLE = "The Age of Innocence"
 
 
 def test_runbook_contains_exact_arm_observe_disarm_and_hard_reset_commands():
@@ -33,7 +35,7 @@ def test_runbook_contains_exact_arm_observe_disarm_and_hard_reset_commands():
     assert disarm < stage_payload < stage_etag < arm
 
 
-def test_runbook_pins_only_the_live_probe_and_uses_mac_discovery_commands():
+def test_runbook_falls_back_to_live_probe_and_uses_mac_discovery_commands():
     text = RUNBOOK.read_text(encoding="utf-8")
 
     assert f"PROBE={PROBE}" in text
@@ -48,6 +50,22 @@ def test_runbook_pins_only_the_live_probe_and_uses_mac_discovery_commands():
     assert "d83c9bfd" not in text
     assert "91fc0f2b" not in text
     assert "ZZWB Writeback Probe" not in text
+
+
+def test_runbook_stages_one_startup_target_before_hot_copy_and_cleans_it_up():
+    text = RUNBOOK.read_text(encoding="utf-8")
+
+    target_copy = text.index(
+        'docker cp "$ZZWB_RUN_DIR/target.txt" '
+        '"$ZZWB_CONTAINER:/config/zzwb/target.txt.next"'
+    )
+    hot_copy = text.index("docker cp cps/readingservices.py")
+    assert target_copy < hot_copy
+    assert "chown abc:abc /config/zzwb/target.txt.next" in text
+    assert "chmod 600 /config/zzwb/target.txt.next" in text
+    assert "read once when the restarted process imports" in text
+    assert "before touching `/config/zzwb`" in text
+    assert "rm -f /config/zzwb/target.txt /config/zzwb/target.txt.next" in text
 
 
 def test_runbook_states_the_rigs_remaining_111_and_113_unknowns():
@@ -97,3 +115,33 @@ def test_runbook_builds_one_server_highlight_and_restores_empty_baseline():
     assert 'cp "$ZZWB_RUN_DIR/cycle-b-pre-etag.txt" "$ZZWB_RUN_DIR/etag.txt"' in text
     assert "cycle-b-pre-bookmark-count.txt" in text
     assert "do not substitute `W/\"0\"`" in text
+
+
+def test_runbook_recovery_cycle_restores_exact_eight_rows_and_keeps_cwng_tag():
+    text = RUNBOOK.read_text(encoding="utf-8")
+    recovery = text[text.index("## 7-R."):text.index("## 8.")]
+
+    assert f"PROBE={RECOVERY}" in recovery
+    assert "PROBE_BOOK_ID=404" in recovery
+    assert f"PROBE_TITLE='{RECOVERY_TITLE}'" in recovery
+    assert "ZZWB_TARGET=$PROBE" in recovery
+    assert "--annotation-export" in recovery
+    assert "--expected-count 8" in recovery
+    assert "a.annotation_id" in recovery
+    assert "a.annotation_type" in recovery
+    assert "m.raw_annotation_json" in recovery
+    assert 'captured.get("highlightedText")==""' in recovery
+    assert '"highlightColor" not in captured' in recovery
+    assert 'span.get("chapterTitle")' in recovery
+    assert 'row["chapter_title"]=span["chapterTitle"]' in recovery
+    assert "recovery-404:%s:%s" in recovery
+    assert '"$KOBO_PILOT" open-book "$PROBE_TITLE"' in recovery
+    assert "SELECT COUNT(*) FROM Bookmark" in recovery
+    assert "dogear|4" in recovery
+    assert "highlight|4" in recovery
+    assert "recovery-404-highlight-drawn.jpg" in recovery
+    assert 'cmp "$ZZWB_RUN_DIR/etag.txt"' in recovery
+    assert "Leave that CWNG token" in recovery
+    assert "do **not** serve or restore the former Kobo composite manifest" in recovery
+    assert "answered `304`" in recovery
+    assert "cycle-b-pre-etag.txt" not in recovery

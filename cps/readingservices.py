@@ -17,6 +17,7 @@ import json
 import hashlib
 import os
 import secrets
+import stat
 import zipfile
 import re
 from datetime import datetime, timezone
@@ -220,14 +221,69 @@ OWNERSHIP_UNKNOWN = object()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SCRATCH-BRANCH EXPERIMENT ONLY — server-authored annotation writeback.
-# NEVER MERGE. Hard-scoped to one disposable book; every other ContentId keeps
-# origin/main behaviour, and the whole block is inert unless the on-disk arming
-# file exists.
+# NEVER MERGE. Hard-scoped at process startup to one operator-selected book;
+# every other ContentId keeps origin/main behaviour, and the whole block is
+# inert unless the on-disk arming file exists.
 # ─────────────────────────────────────────────────────────────────────────────
 ZZWB_EXPERIMENT_DIR = os.environ.get("ZZWB_EXPERIMENT_DIR", "/config/zzwb")
-ZZWB_EXPERIMENT_UUID = "053742ff-9094-43b2-8511-c0763c90ffab"
+ZZWB_PINNED_UUID = "053742ff-9094-43b2-8511-c0763c90ffab"
+ZZWB_TARGET_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 ZZWB_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 ZZWB_ETAG_RE = re.compile(r'^(?:W/)?"[\x21\x23-\x7e]*"$')
+
+
+def _zzwb_stage_warning(reason):
+    """Best-effort warning which cannot turn an unready stage into a failure."""
+    try:
+        log.warning("ZZWB: stage is not ready reason=%s", reason)
+    except Exception:
+        pass
+
+
+def _zzwb_target_at_startup(path):
+    """Read one mode-0600, process-owned target once; invalid files fail closed."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        return ZZWB_PINNED_UUID
+    except OSError:
+        _zzwb_stage_warning("target_unreadable")
+        return None
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_uid != os.geteuid()
+        ):
+            _zzwb_stage_warning("target_permissions")
+            return None
+        raw_target = os.read(descriptor, 129)
+    except OSError:
+        _zzwb_stage_warning("target_unreadable")
+        return None
+    finally:
+        os.close(descriptor)
+    if len(raw_target) > 128:
+        _zzwb_stage_warning("target_too_large")
+        return None
+    try:
+        target = raw_target.decode("ascii").strip()
+    except UnicodeDecodeError:
+        _zzwb_stage_warning("target_syntax")
+        return None
+    if ZZWB_TARGET_RE.fullmatch(target) is None:
+        _zzwb_stage_warning("target_syntax")
+        return None
+    return target
+
+
+ZZWB_EXPERIMENT_UUID = _zzwb_target_at_startup(
+    os.path.join(ZZWB_EXPERIMENT_DIR, "target.txt")
+)
 
 
 def _zzwb_armed():
@@ -239,11 +295,11 @@ def _zzwb_armed():
 
 
 def _zzwb_is_target(content_id):
-    """Scope before filesystem access: foreign IDs never inspect the arm."""
+    """Scope before request-time filesystem access: foreign IDs never inspect the arm."""
     if not isinstance(content_id, str):
         return False
     normalized_id = content_id.strip().strip("{}").strip().casefold()
-    if normalized_id != ZZWB_EXPERIMENT_UUID:
+    if ZZWB_EXPERIMENT_UUID is None or normalized_id != ZZWB_EXPERIMENT_UUID:
         return False
     return _zzwb_armed()
 
@@ -264,14 +320,6 @@ def _zzwb_stage_shape_is_valid(parsed_payload):
 def _zzwb_etag_is_valid(etag):
     """Accept an ASCII HTTP entity-tag, including CWNG tags and W/"0"."""
     return isinstance(etag, str) and ZZWB_ETAG_RE.fullmatch(etag) is not None
-
-
-def _zzwb_stage_warning(reason):
-    """Best-effort warning which cannot turn an unready stage into a failure."""
-    try:
-        log.warning("ZZWB: stage is not ready reason=%s", reason)
-    except Exception:
-        pass
 
 
 def _zzwb_load_stage():
@@ -306,7 +354,7 @@ def _zzwb_load_stage():
 
 
 def _zzwb_stage_for_target(content_id):
-    """Return a ready stage only for the one disposable probe UUID."""
+    """Return a ready stage only for the one startup-selected target UUID."""
     if not _zzwb_is_target(content_id):
         return None
     return _zzwb_load_stage()

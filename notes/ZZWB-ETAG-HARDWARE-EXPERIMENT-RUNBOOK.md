@@ -1,8 +1,9 @@
 # ZZWB arbitrary-ETag hardware experiment — run, observe, and revert
 
-> **SCRATCH INSTRUMENT — NEVER MERGE.** This procedure is only for `The Heat Will Kill You First`,
-> Calibre book 540, ContentId `053742ff-9094-43b2-8511-c0763c90ffab`. It hot-copies one scratch
-> source file into one deployed container. It is not a production writeback design.
+> **SCRATCH INSTRUMENT — NEVER MERGE.** With no `target.txt`, this procedure is pinned to
+> `The Heat Will Kill You First`, Calibre book 540, ContentId
+> `053742ff-9094-43b2-8511-c0763c90ffab`. An operator may select exactly one recovery book at
+> hot-copy time with a validated `target.txt`. It is not a production writeback design.
 
 ## 1. Tonight's baseline and safety boundary
 
@@ -22,8 +23,10 @@
   `payload.json`, and `etag.txt` all exist and validate.
 - **[OBSERVED IN TESTS]** A ready probe GET ignores conditional request headers and returns 200 with
   the staged bytes and staged ETag. It does not contact Kobo upstream.
-- **[OBSERVED IN TESTS]** Both GET and `checkforchanges` reject every non-probe ContentId before
-  inspecting the arming directory. When unarmed, the probe GET returns the production proxy object
+- **[OBSERVED IN TESTS]** At process startup the rig reads at most one process-owned, mode-0600
+  `target.txt`; absence selects the pinned book and an invalid present file disables the rig. Both
+  GET and `checkforchanges` reject every non-target ContentId before request-time arming-directory
+  access. When unarmed, the target GET returns the production proxy object
   unchanged and `checkforchanges` returns the same status/body/header triplet as `origin/main`.
 - **[OBSERVED IN THE DEPLOYED CONTAINER]** private exchange capture is already enabled. The rig deliberately
   has no second `ZZWB checkforchanges` capture stream. The existing schema-version-2 records under
@@ -144,6 +147,23 @@ docker exec "$ZZWB_CONTAINER" sha256sum \
 rg -q '^be645af98cfdb180[0-9a-f]{48}  /app/calibre-web-automated/cps/readingservices\.py$' \
   "$ZZWB_RUN_DIR/image-readingservices.sha256"
 
+docker exec "$ZZWB_CONTAINER" sh -eu -c '
+  install -d -m 700 -o abc -g abc /config/zzwb
+  rm -f /config/zzwb/ARMED
+'
+if test -n "${ZZWB_TARGET:-}"; then
+  printf '%s\n' "$ZZWB_TARGET" >"$ZZWB_RUN_DIR/target.txt"
+  chmod 600 "$ZZWB_RUN_DIR/target.txt"
+  docker cp "$ZZWB_RUN_DIR/target.txt" "$ZZWB_CONTAINER:/config/zzwb/target.txt.next"
+  docker exec "$ZZWB_CONTAINER" sh -eu -c '
+    chown abc:abc /config/zzwb/target.txt.next
+    chmod 600 /config/zzwb/target.txt.next
+    mv /config/zzwb/target.txt.next /config/zzwb/target.txt
+  '
+else
+  docker exec "$ZZWB_CONTAINER" sh -eu -c 'rm -f /config/zzwb/target.txt'
+fi
+
 docker cp cps/readingservices.py \
   "$ZZWB_CONTAINER:/app/calibre-web-automated/cps/readingservices.py"
 docker exec "$ZZWB_CONTAINER" \
@@ -151,16 +171,17 @@ docker exec "$ZZWB_CONTAINER" \
 docker restart "$ZZWB_CONTAINER"
 ```
 
-The prefix assertion is a deployment sanity check, while the complete hash file is the baseline
-and final restore oracle. The `:dev` tag can move and must not replace either check. Wait for the
+`target.txt` is read once when the restarted process imports `readingservices.py`; changing it
+without another restart has no effect. This one-time read is what lets non-target requests compare
+against memory and return before touching `/config/zzwb`. The prefix assertion is a deployment
+sanity check, while the complete hash file is the baseline and final restore oracle. The `:dev` tag
+can move and must not replace either check. Wait for the
 ordinary health check to report healthy. Exchange capture is already on in this container; do not
 add or change its environment gate. Then create the private stage directory and prove it is
 disarmed:
 
 ```bash
 docker exec "$ZZWB_CONTAINER" sh -eu -c '
-  install -d -m 700 -o abc -g abc /config/zzwb
-  rm -f /config/zzwb/ARMED
   test ! -e /config/zzwb/ARMED
 '
 docker inspect --format '{{.State.Health.Status}}' "$ZZWB_CONTAINER"
@@ -361,6 +382,162 @@ the highlight**; a database row alone does not establish rendering.
 This is **[ASSUMED SAFE ONLY FOR THIS DISPOSABLE PROBE]** and is not authority evidence for any
 other book, firmware, or device.
 
+## 7-R. Recovery cycle — restore the eight Age of Innocence rows
+
+This is an operator-authorized recovery of `The Age of Innocence`, Calibre book 404, ContentId
+`c65e568b-f5c7-481b-baf7-85ccb79c0305`. **[OBSERVED 2026-08-28]** its eight device rows were wiped
+after the re-download annotations GET received Kobo's `304`; the server still has four visible
+highlights and four visible dogears. Keep the reader offline until the stage is armed.
+
+Select the recovery target **before section 3 hot-copies and restarts the process**:
+
+```bash
+PROBE=c65e568b-f5c7-481b-baf7-85ccb79c0305
+PROBE_BOOK_ID=404
+PROBE_TITLE='The Age of Innocence'
+ZZWB_TARGET=$PROBE
+CYCLE_LABEL=cycle-recovery-404
+```
+
+Run section 3 now. It atomically installs `/config/zzwb/target.txt` as `abc:abc` mode `0600`, then
+restarts with this worktree's `readingservices.py`. Verify the selected target without arming:
+
+```bash
+docker exec "$ZZWB_CONTAINER" sh -eu -c '
+  test "$(cat /config/zzwb/target.txt)" = "c65e568b-f5c7-481b-baf7-85ccb79c0305"
+  test "$(stat -c %a /config/zzwb/target.txt)" = 600
+  test "$(stat -c %U:%G /config/zzwb/target.txt)" = abc:abc
+  test ! -e /config/zzwb/ARMED
+'
+```
+
+Export only the eight live generic rows from `app.db`. The exporter opens SQLite read-only, refuses
+multiple users or any count other than eight, and uses the exact captured PATCH only to recover the
+top-level `context` that the current parser does not project into `context_string`. It also proves
+the observed dogear shape: `highlightedText` is present and empty and `highlightColor` is absent.
+No annotation text is printed to the terminal:
+
+```bash
+docker exec -i "$ZZWB_CONTAINER" python3 - "$PROBE_BOOK_ID" \
+  >"$ZZWB_RUN_DIR/recovery-404-rows.json" <<'PY'
+import json,sqlite3,sys
+book_id=int(sys.argv[1])
+uri="file:/config/app.db?mode=ro"
+with sqlite3.connect(uri,uri=True) as db:
+    db.row_factory=sqlite3.Row
+    db.execute("PRAGMA query_only=ON")
+    rows=[dict(row) for row in db.execute("""
+      SELECT a.annotation_id,a.annotation_type,a.book_id,a.chapter_progress,
+             a.client_modified_at,a.content_id,a.context_string,
+             a.end_container_path,a.end_offset,a.hidden,a.highlight_color,
+             a.highlighted_text,a.note_text,a.source,a.start_container_path,
+             a.start_offset,a.user_id,m.raw_annotation_json
+        FROM annotation AS a
+        LEFT JOIN kobo_annotation_materialization AS m ON m.annotation_id=a.id
+       WHERE a.book_id=? AND COALESCE(a.hidden,0)=0
+       ORDER BY a.annotation_id COLLATE BINARY
+    """,(book_id,))]
+assert len(rows)==8, len(rows)
+assert len({row["user_id"] for row in rows})==1
+for row in rows:
+    raw=row.pop("raw_annotation_json")
+    captured=json.loads(bytes(raw)) if raw is not None else None
+    if row["context_string"] is None:
+        assert isinstance(captured,dict) and isinstance(captured.get("context"),str)
+        row["context_string"]=captured["context"]
+    if row["annotation_type"]=="dogear":
+        assert captured.get("id")==row["annotation_id"]
+        assert captured.get("type")=="dogear"
+        assert captured.get("highlightedText")==""
+        assert "highlightColor" not in captured
+        span=(captured.get("location") or {}).get("span") or {}
+        assert isinstance(span.get("chapterTitle"),str) and span["chapterTitle"]
+        row["chapter_title"]=span["chapterTitle"]
+    row.pop("user_id")
+json.dump(rows,sys.stdout,separators=(",",":"),ensure_ascii=False)
+PY
+chmod 600 "$ZZWB_RUN_DIR/recovery-404-rows.json"
+```
+
+Build the complete eight-row response. Every row must map completely; the builder refuses an
+unknown type, note-bearing row, missing context/timestamp/location, dogear chapter title, non-Kobo source, hidden row,
+wrong book/ContentId, duplicate original `annotation_id`, incomplete count, or color outside the
+measured Kobo wire palette:
+
+```bash
+./scripts/zzwb_build_annotation_envelope.py \
+  --annotation-export "$ZZWB_RUN_DIR/recovery-404-rows.json" \
+  --content-id "$PROBE" --book-id "$PROBE_BOOK_ID" --expected-count 8 \
+  --output "$ZZWB_RUN_DIR/payload.json" --force
+python3 -c '
+import json,pathlib
+o=json.loads(pathlib.Path("zzwb-run/payload.json").read_bytes())
+assert len(o["annotations"])==8
+assert sum(a["type"]=="highlight" for a in o["annotations"])==4
+assert sum(a["type"]=="dogear" for a in o["annotations"])==4
+assert all("highlightColor" not in a for a in o["annotations"] if a["type"]=="dogear")
+print({"annotations":8,"highlights":4,"dogears":4})
+'
+RECOVERY_REVISION=$(date -u +%Y%m%d%H%M%S)
+DIGEST_PREFIX=$(shasum -a 256 "$ZZWB_RUN_DIR/payload.json" | awk '{print substr($1,1,16)}')
+printf 'W/"CWNG:recovery-404:%s:%s"\n' "$RECOVERY_REVISION" "$DIGEST_PREFIX" \
+  >"$ZZWB_RUN_DIR/etag.txt"
+chmod 600 "$ZZWB_RUN_DIR/payload.json" "$ZZWB_RUN_DIR/etag.txt"
+```
+
+Run section 4 to stage and arm. Start the section 5 capture ledger, restore connectivity, and use
+the book-open trigger—do not substitute repeated manual library syncs:
+
+```bash
+CYCLE_START=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+"$KOBO_PILOT" open-book "$PROBE_TITLE" --expect-book-title "$PROBE_TITLE"
+```
+
+Require the capture to show a staged `200` GET with the exact payload digest and CWNG ETag and no
+upstream request. Then pull the device database and compare the complete ID set and type counts:
+
+```bash
+"$KOBO_PILOT" pull-db --output "$ZZWB_RUN_DIR/device-after-recovery-404"
+RECOVERED_DB="$ZZWB_RUN_DIR/device-after-recovery-404/KoboReader.sqlite"
+test "$(sqlite3 -readonly "$RECOVERED_DB" \
+  "SELECT COUNT(*) FROM Bookmark WHERE VolumeID LIKE '$PROBE%';")" = 8
+sqlite3 -readonly "$RECOVERED_DB" \
+  "SELECT Type,COUNT(*) FROM Bookmark WHERE VolumeID LIKE '$PROBE%' GROUP BY Type ORDER BY Type;" \
+  | tee "$ZZWB_RUN_DIR/recovery-404-type-counts.txt"
+test "$(sed -n '1p' "$ZZWB_RUN_DIR/recovery-404-type-counts.txt")" = 'dogear|4'
+test "$(sed -n '2p' "$ZZWB_RUN_DIR/recovery-404-type-counts.txt")" = 'highlight|4'
+sqlite3 -readonly "$RECOVERED_DB" \
+  "SELECT BookmarkID FROM Bookmark WHERE VolumeID LIKE '$PROBE%' ORDER BY BookmarkID;" \
+  >"$ZZWB_RUN_DIR/recovery-404-device-ids.txt"
+python3 -c '
+import json,pathlib
+rows=json.loads(pathlib.Path("zzwb-run/recovery-404-rows.json").read_text())
+pathlib.Path("zzwb-run/recovery-404-server-ids.txt").write_text(
+    "".join(sorted(row["annotation_id"]+"\n" for row in rows)))
+'
+cmp "$ZZWB_RUN_DIR/recovery-404-server-ids.txt" \
+  "$ZZWB_RUN_DIR/recovery-404-device-ids.txt"
+sqlite3 -readonly "$RECOVERED_DB" \
+  "SELECT AnnotationsSyncToken FROM content WHERE ContentID='$PROBE';" \
+  >"$ZZWB_RUN_DIR/recovery-404-device-etag.txt"
+cmp "$ZZWB_RUN_DIR/etag.txt" "$ZZWB_RUN_DIR/recovery-404-device-etag.txt"
+```
+
+From the device's Annotations panel, open one recovered highlight, confirm ink is drawn on its page,
+and preserve the page evidence:
+
+```bash
+"$KOBO_PILOT" screenshot \
+  --output "$ZZWB_RUN_DIR/recovery-404-highlight-drawn.jpg" --quality 85
+```
+
+**Recovery cleanup differs from Cycle B.** Confirm the device's `AnnotationsSyncToken` equals the
+staged CWNG ETag, then disarm and perform section 9's image-byte restoration. Leave that CWNG token
+on the device; do **not** serve or restore the former Kobo composite manifest. The Kobo copy just
+answered `304` on the re-download GET that made Nickel replace these eight rows with empty, so it is
+not a safe rollback authority. Do not reopen or re-download the recovered book through the ordinary
+proxy path until the owned-book GET defect is fixed.
+
 ## 8. Cycle B cleanup — return the probe to its empty baseline set
 
 Put the reader offline. Stage the empty body and the exact live composite token recorded by
@@ -398,6 +575,7 @@ docker cp "$ZZWB_CONTAINER:/config/zzwb" "$ZZWB_RUN_DIR/stage-final"
 docker exec "$ZZWB_CONTAINER" sh -eu -c '
   rm -f /config/zzwb/payload.json /config/zzwb/etag.txt
   rm -f /config/zzwb/payload.json.next /config/zzwb/etag.txt.next
+  rm -f /config/zzwb/target.txt /config/zzwb/target.txt.next
   rmdir /config/zzwb 2>/dev/null || true
 '
 docker compose up -d --force-recreate --no-deps "$ZZWB_SERVICE"
@@ -433,6 +611,8 @@ same full-file `cmp` before putting the reader online. Do not identify the basel
   CWNG revision, and—under the same empty payload—whether it rejects `W/"0"` specifically.
 - **Can answer with Cycle B:** whether Nickel adopts and visibly renders one exact-Kobo-shape,
   server-authored highlight under a new CWNG revision, and whether cleanup restores the empty set.
+- **Can perform with Cycle 7-R:** one explicitly authorized, exact-count recovery from complete
+  server rows to the same book under a new CWNG revision; it is not a general authority algorithm.
 - **Can observe:** natural `checkforchanges` arrays through production exchange capture.
 - It does not force Nickel to emit a multi-book batch.
 - The mixed authoritative/unseeded/non-owned production algorithm remains untested.
