@@ -4,11 +4,15 @@
 
 from __future__ import annotations
 
+import ast
 import sqlite3
 import threading
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import event
 
 from cps import ub
 from cps.services.annotation_sync import (
@@ -31,6 +35,26 @@ class _StubHandler(AnnotationSyncTargetHandler):
 
     def delete(self, sync_target, user):
         return SyncResult(status="tombstone")
+
+
+class _BeginNestedCallVisitor(ast.NodeVisitor):
+    """Collect the function containing each direct ``begin_nested`` call."""
+
+    def __init__(self):
+        self.function_names = []
+        self._function_stack = []
+
+    def visit_FunctionDef(self, node):
+        self._function_stack.append(node.name)
+        self.generic_visit(node)
+        self._function_stack.pop()
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Call(self, node):
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "begin_nested":
+            self.function_names.append(self._function_stack[-1] if self._function_stack else None)
+        self.generic_visit(node)
 
 
 @pytest.fixture(autouse=True)
@@ -128,10 +152,26 @@ def test_existing_annotation_sync_savepoint_rolls_back_with_failed_commit(
 
 
 @pytest.mark.unit
-def test_every_app_db_session_uses_immediate_begin_and_factory_keeps_timeout(
+def test_every_production_begin_nested_call_routes_through_containment_helper():
+    """A new direct SAVEPOINT caller must not silently lose containment."""
+    cps_root = Path(ub.__file__).resolve().parent
+    calls = []
+    for source_path in cps_root.rglob("*.py"):
+        visitor = _BeginNestedCallVisitor()
+        visitor.visit(ast.parse(source_path.read_text(encoding="utf-8")))
+        calls.extend(
+            (source_path.relative_to(cps_root).as_posix(), function_name)
+            for function_name in visitor.function_names
+        )
+
+    assert calls == [("ub.py", "begin_contained_nested")]
+
+
+@pytest.mark.unit
+def test_every_app_db_session_uses_legacy_transactions_and_factory_keeps_timeout(
     file_backed_app_db,
 ):
-    """The main, worker, and ad-hoc constructors share WAL + BEGIN IMMEDIATE."""
+    """All app.db constructors share WAL without changing driver transactions."""
     _db_path, main_session = file_backed_app_db
     thread_session = ub.init_db_thread()
     ad_hoc_session = ub.get_new_session_instance()
@@ -145,8 +185,9 @@ def test_every_app_db_session_uses_immediate_begin_and_factory_keeps_timeout(
         for constructor, session in sessions.items():
             connection = session.connection()
             driver_connection = connection.connection.driver_connection
-            assert driver_connection.isolation_level is None, constructor
+            assert driver_connection.isolation_level is not None, constructor
             assert connection.exec_driver_sql("PRAGMA journal_mode").scalar_one() == "wal"
+            assert driver_connection.in_transaction is False, constructor
             session.rollback()
 
         # Startup migrations temporarily lower busy_timeout on the pooled main
@@ -169,17 +210,48 @@ def test_every_app_db_session_uses_immediate_begin_and_factory_keeps_timeout(
 
 
 @pytest.mark.unit
-def test_read_then_write_waits_before_snapshot_instead_of_failing_busy_snapshot(
+def test_startup_read_session_does_not_block_backfill_on_second_pool_connection(
+    file_backed_app_db,
+):
+    """Match create_app's config SELECT followed by engine-based backfill."""
+    _db_path, session = file_backed_app_db
+    engine = session.get_bind()
+    session.rollback()
+    checkout_ids = []
+
+    def record_checkout(dbapi_connection, _record, _proxy):
+        checkout_ids.append(id(dbapi_connection))
+
+    event.listen(engine, "checkout", record_checkout)
+    try:
+        assert session.query(ub.User).first() is not None
+        driver_connection = session.connection().connection.driver_connection
+        assert driver_connection.in_transaction is False
+
+        started = time.monotonic()
+        ub.backfill_annotation_content_ids(engine, lambda _book_id: None)
+        elapsed = time.monotonic() - started
+    finally:
+        event.remove(engine, "checkout", record_checkout)
+
+    assert elapsed < 5
+    assert len(set(checkout_ids)) == 2, (
+        "the test did not force backfill onto a second pooled DBAPI connection"
+    )
+
+
+@pytest.mark.unit
+def test_read_then_write_starts_fresh_after_a_concurrent_commit(
     tmp_path,
 ):
-    """A concurrent commit cannot invalidate a future app.db write.
+    """A legacy-mode SELECT cannot leave a stale snapshot to upgrade.
 
     Under #1888's deferred ``BEGIN``, connection A takes a read snapshot, B
     commits, and A's INSERT fails immediately with ``database is locked``:
     SQLite cannot upgrade the stale snapshot and does not apply busy_timeout to
-    SQLITE_BUSY_SNAPSHOT. BEGIN IMMEDIATE instead reserves the writer slot when
-    A starts. B waits in its ordinary SQLITE_BUSY retry loop, A writes and
-    commits, then B completes.
+    SQLITE_BUSY_SNAPSHOT. Under sqlite3's legacy transaction control, A's
+    SELECT owns no driver transaction. B commits first, then A starts a fresh
+    write transaction and succeeds.
     """
     db_path = tmp_path / "busy-snapshot.db"
     with sqlite3.connect(db_path) as setup:
@@ -208,14 +280,16 @@ def test_read_then_write_waits_before_snapshot_instead_of_failing_busy_snapshot(
         assert connection_a.exec_driver_sql(
             "SELECT value FROM probe ORDER BY rowid"
         ).all() == [("seed",)]
+        driver_connection = connection_a.connection.driver_connection
+        assert driver_connection.in_transaction is False
 
         connection_b_thread = threading.Thread(target=concurrent_writer)
         connection_b_thread.start()
         assert writer_started.wait(timeout=1), "connection B never attempted its write"
 
-        # Deferred BEGIN lets B commit here and makes A's following INSERT hit
-        # SQLITE_BUSY_SNAPSHOT. BEGIN IMMEDIATE keeps B waiting instead.
-        b_committed_before_a_write = writer_committed.wait(timeout=0.2)
+        assert writer_committed.wait(timeout=1), (
+            "connection A's read-only bookkeeping transaction blocked connection B"
+        )
         connection_a.exec_driver_sql("INSERT INTO probe VALUES ('connection-a')")
         connection_a.commit()
     finally:
@@ -224,33 +298,31 @@ def test_read_then_write_waits_before_snapshot_instead_of_failing_busy_snapshot(
             connection_b_thread.join(timeout=3)
         engine.dispose()
 
-    assert b_committed_before_a_write is False
     assert writer_errors == []
-    assert writer_committed.is_set(), "connection B did not resume after A committed"
     with sqlite3.connect(db_path) as observer:
         assert observer.execute(
             "SELECT value FROM probe ORDER BY rowid"
         ).fetchall() == [
             ("seed",),
-            ("connection-a",),
             ("connection-b",),
+            ("connection-a",),
         ]
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("journal_mode", "explicit_begin"),
+    ("journal_mode", "contained_outer"),
     (
         pytest.param("delete", False, id="delete-legacy"),
-        pytest.param("delete", True, id="delete-immediate"),
+        pytest.param("delete", True, id="delete-local-immediate"),
         pytest.param("wal", False, id="wal-legacy"),
-        pytest.param("wal", True, id="wal-immediate"),
+        pytest.param("wal", True, id="wal-local-immediate"),
     ),
 )
 def test_sqlite_transaction_mode_four_arm_probe(
-    tmp_path, journal_mode, explicit_begin,
+    tmp_path, journal_mode, contained_outer,
 ):
-    """Pin containment, reader access, and writer cost in all four modes."""
+    """Pin legacy behavior and the local containment cost in all four arms."""
     db_path = tmp_path / "transaction-mode-probe.db"
     with sqlite3.connect(db_path) as setup:
         assert setup.execute(
@@ -260,12 +332,12 @@ def test_sqlite_transaction_mode_four_arm_probe(
         setup.execute("INSERT INTO probe VALUES ('seed')")
 
     connection_a = sqlite3.connect(db_path, timeout=0.1)
-    if explicit_begin:
+    if contained_outer:
         connection_a.isolation_level = None
         connection_a.execute("BEGIN IMMEDIATE")
     try:
         assert connection_a.execute("SELECT value FROM probe").fetchall() == [("seed",)]
-        assert connection_a.in_transaction is explicit_begin
+        assert connection_a.in_transaction is contained_outer
 
         # A reserved writer never blocks an independent reader. In WAL this is
         # the production arm; DELETE + immediate is retained as an off-policy
@@ -282,7 +354,7 @@ def test_sqlite_transaction_mode_four_arm_probe(
         except sqlite3.OperationalError as error:
             assert "database is locked" in str(error).lower()
             writer_blocked = True
-        assert writer_blocked is explicit_begin
+        assert writer_blocked is contained_outer
 
         connection_a.execute("SAVEPOINT contained")
         connection_a.execute("INSERT INTO probe VALUES ('savepoint')")
@@ -295,11 +367,11 @@ def test_sqlite_transaction_mode_four_arm_probe(
         savepoint_rows = observer.execute(
             "SELECT value FROM probe WHERE value = 'savepoint'"
         ).fetchall()
-    assert savepoint_rows == ([] if explicit_begin else [("savepoint",)])
+    assert savepoint_rows == ([] if contained_outer else [("savepoint",)])
 
 
 @pytest.mark.unit
-def test_wal_unavailable_suppresses_explicit_begin_warns_and_does_not_block_writer(
+def test_wal_unavailable_keeps_legacy_transactions_warns_and_does_not_block_writer(
     tmp_path, monkeypatch,
 ):
     """A WAL-incapable engine degrades consistently and observably."""
@@ -352,7 +424,7 @@ def test_wal_unavailable_suppresses_explicit_begin_warns_and_does_not_block_writ
     assert len(warnings) == 1
     assert "WAL is unavailable" in warnings[0]
     assert "legacy sqlite3 transaction control" in warnings[0]
-    assert "begin_nested() SAVEPOINTs opened before DML are not contained" in warnings[0]
+    assert "contained SAVEPOINTs acquire a local write transaction" in warnings[0]
 
     with sqlite3.connect(db_path) as observer:
         assert observer.execute("SELECT value FROM probe ORDER BY rowid").fetchall() == [
@@ -405,4 +477,4 @@ def test_network_share_mode_skips_wal_uses_legacy_transactions_and_warns(
     assert len(warnings) == 1
     assert "NETWORK_SHARE_MODE=true" in warnings[0]
     assert "even when /config is on local disk" in warnings[0]
-    assert "#1873 SAVEPOINT containment fix is unavailable" in warnings[0]
+    assert "contained SAVEPOINTs acquire a local write transaction" in warnings[0]
