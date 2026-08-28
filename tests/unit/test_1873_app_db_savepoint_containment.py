@@ -228,3 +228,50 @@ def test_wal_unavailable_suppresses_explicit_begin_warns_and_does_not_block_writ
             ("seed",),
             ("writer",),
         ]
+
+
+@pytest.mark.unit
+def test_network_share_mode_skips_wal_uses_legacy_transactions_and_warns(
+    tmp_path, monkeypatch,
+):
+    """NETWORK_SHARE_MODE applies to app.db even when its own path is local."""
+    db_path = tmp_path / "network-share-mode.db"
+    with sqlite3.connect(db_path) as setup:
+        setup.execute("CREATE TABLE probe (value TEXT NOT NULL)")
+        setup.execute("INSERT INTO probe VALUES ('seed')")
+
+    monkeypatch.setenv("NETWORK_SHARE_MODE", "true")
+
+    def unexpected_wal_request(_connection):
+        raise AssertionError("NETWORK_SHARE_MODE must skip PRAGMA journal_mode=WAL")
+
+    monkeypatch.setattr(ub, "_request_app_db_wal", unexpected_wal_request)
+    warnings = []
+    monkeypatch.setattr(
+        ub.log,
+        "warning",
+        lambda message, *args: warnings.append(message % args),
+    )
+    engine = ub._create_app_db_engine(db_path)
+
+    try:
+        with engine.connect() as reader:
+            driver_connection = reader.connection.driver_connection
+            assert reader.exec_driver_sql("PRAGMA journal_mode").scalar_one() == "delete"
+            assert driver_connection.isolation_level is not None
+            assert reader.exec_driver_sql("SELECT value FROM probe").scalar_one() == "seed"
+            assert driver_connection.in_transaction is False
+
+            # A second DBAPI connection must inherit the engine-wide decision
+            # without another warning or a deferred WAL negotiation.
+            with engine.connect() as sibling:
+                sibling_driver = sibling.connection.driver_connection
+                assert sibling_driver is not driver_connection
+                assert sibling_driver.isolation_level is not None
+    finally:
+        engine.dispose()
+
+    assert len(warnings) == 1
+    assert "NETWORK_SHARE_MODE=true" in warnings[0]
+    assert "even when /config is on local disk" in warnings[0]
+    assert "#1873 SAVEPOINT containment fix is unavailable" in warnings[0]

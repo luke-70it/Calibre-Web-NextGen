@@ -46,6 +46,7 @@ from sqlalchemy.orm import backref, relationship, sessionmaker, Session, scoped_
 from werkzeug.security import generate_password_hash
 
 from . import constants, logger
+from .sqlite_utils import network_share_mode_enabled
 from .string_helper import strip_whitespaces
 
 log = logger.create()
@@ -4274,16 +4275,29 @@ def _create_app_db_engine(app_db_path):
     )
     transaction_mode = {'explicit_begin': None}
     transaction_mode_lock = threading.Lock()
+    network_share_mode = network_share_mode_enabled()
 
     @event.listens_for(engine, 'connect')
     def _configure_app_db_transaction_mode(dbapi_connection, _connection_record):
         if transaction_mode['explicit_begin'] is None:
             with transaction_mode_lock:
                 if transaction_mode['explicit_begin'] is None:
-                    journal_mode, wal_error = _request_app_db_wal(dbapi_connection)
-                    wal_enabled = str(journal_mode).lower() == 'wal'
-                    transaction_mode['explicit_begin'] = wal_enabled
-                    if not wal_enabled:
+                    if network_share_mode:
+                        transaction_mode['explicit_begin'] = False
+                        log.warning(
+                            "NETWORK_SHARE_MODE=true disables SQLite WAL for every database, "
+                            "including app.db %s even when /config is on local disk, because "
+                            "WAL is unsafe on network filesystems. app.db is using legacy "
+                            "sqlite3 transaction control, so the #1873 SAVEPOINT containment "
+                            "fix is unavailable: begin_nested() SAVEPOINTs opened before DML "
+                            "may commit at RELEASE.",
+                            app_db_path,
+                        )
+                    else:
+                        journal_mode, wal_error = _request_app_db_wal(dbapi_connection)
+                        wal_enabled = str(journal_mode).lower() == 'wal'
+                        transaction_mode['explicit_begin'] = wal_enabled
+                    if not network_share_mode and not transaction_mode['explicit_begin']:
                         reason = ("PRAGMA journal_mode=WAL failed: {}".format(wal_error)
                                   if wal_error is not None
                                   else "SQLite kept journal_mode={!r}".format(journal_mode))
@@ -4365,8 +4379,7 @@ def _healthcheck_app_db(app_db_path: str) -> None:
             return
         if not os.access(app_db_path, os.W_OK):
             log.error("app.db is not writable: %s", app_db_path)
-        network_share_mode = os.environ.get("NETWORK_SHARE_MODE", "false").lower() in ("1", "true", "yes")
-        if network_share_mode:
+        if network_share_mode_enabled():
             log.info("Skipping PRAGMA quick_check for app.db due to NETWORK_SHARE_MODE=true")
             return
         try:
