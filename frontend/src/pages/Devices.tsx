@@ -18,10 +18,37 @@ interface Device {
   first_seen: string | null;
   last_seen: string | null;
   annotation_count: number;
+  inventory_count: number;
+  inventory_observed: string | null;
   active: boolean;
 }
 
 interface Counts { origin_count: number; assigned_count: number }
+interface InventoryBook { book_id: number | null; lpath: string; checksum: string; size: number; mtime: number }
+interface InventoryPayload { observed_at: string | null; books: InventoryBook[] }
+
+function DeviceInventory({ device }: { device: Device }) {
+  const t = useT();
+  const { data, isLoading, error } = useQuery<InventoryPayload>({
+    queryKey: ['device-inventory', device.public_id],
+    queryFn: () => apiGet(`/api/annotations/devices/${device.public_id}/inventory`),
+  });
+  if (isLoading) return <p role="status">{t('Loading device library…')}</p>;
+  if (error) return <p role="alert">{t('Could not load this device library.')}</p>;
+  const books = data?.books ?? [];
+  if (books.length === 0) return <p>{t('No books were reported in the latest device inventory.')}</p>;
+  return (
+    <ul className={styles.inventoryList} role="list">
+      {books.map((book) => (
+        <li key={`${book.lpath}:${book.checksum}`}>
+          {book.book_id ? <Link href={`/book/${book.book_id}`}>{book.lpath}</Link> : <span>{book.lpath}</span>}
+          <span className={styles.onDevice}>{t('On this device')}</span>
+          {!book.book_id && <span className={styles.unmatched}>{t('Not matched to this library')}</span>}
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 function relativeWhen(value: string | null): string {
   if (!value) return '—';
@@ -79,6 +106,7 @@ export function Devices() {
   const [editing, setEditing] = useState<string | null>(null);
   const [label, setLabel] = useState('');
   const [menu, setMenu] = useState<string | null>(null);
+  const [expandedInventory, setExpandedInventory] = useState<string | null>(null);
   const [removing, setRemoving] = useState<{ device: Device; counts: Counts } | null>(null);
   const [undoDevice, setUndoDevice] = useState<Device | null>(null);
   const invokerRef = useRef<HTMLButtonElement | null>(null);
@@ -122,7 +150,7 @@ export function Devices() {
           <a href={apiUrl('/me')}>{t('Set up Kobo sync')}</a>
         </section>
       ) : (
-        <ul className={styles.list}>
+        <ul className={styles.list} role="list">
           {devices.map((device) => (
             <li key={device.public_id} className={styles.card}>
               <div className={styles.cardMain}>
@@ -138,6 +166,19 @@ export function Devices() {
                 <p>{[device.model, device.firmware && `FW ${device.firmware}`].filter(Boolean).join(' · ')}</p>
                 <p>{t('{n} highlights and notes', { n: device.annotation_count })} · {t('Last seen {when}', { when: relativeWhen(device.last_seen) })}
                   {device.last_seen && Date.now() - new Date(device.last_seen).getTime() > 30 * 86400000 && <> · {t('Not seen lately')}</>}</p>
+                <p>{t('{n} books in latest inventory', { n: device.inventory_count })}</p>
+                <button type="button" className={styles.inventoryToggle}
+                  aria-expanded={expandedInventory === device.public_id}
+                  aria-controls={`device-inventory-${device.public_id}`}
+                  onClick={() => setExpandedInventory(
+                    expandedInventory === device.public_id ? null : device.public_id)}>
+                  {expandedInventory === device.public_id ? t('Hide device library') : t('View device library')}
+                </button>
+                {expandedInventory === device.public_id && (
+                  <div id={`device-inventory-${device.public_id}`} className={styles.inventory}>
+                    <DeviceInventory device={device} />
+                  </div>
+                )}
               </div>
               <div className={styles.cardActions}>
                 <button type="button" aria-label={t('Rename {name}', { name: device.label })}

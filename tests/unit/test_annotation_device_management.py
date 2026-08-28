@@ -231,6 +231,8 @@ def test_bulk_reports_commit_wrapper_failure_instead_of_false_success(session):
          "/api/annotations/devices/device-1/restore", None),
     ],
 )
+
+
 def test_device_routes_return_json_500_when_database_work_fails(
         session, monkeypatch, route_name, dependency_name, method, path, payload):
     from cps import annotations, ub
@@ -297,3 +299,38 @@ def test_device_management_migration_twice_and_downgrade_are_reversible():
         assert "annotation_device_state" not in tables
         assert "device_retired_assignment" not in tables
         assert connection.execute(text("SELECT content_id FROM annotation WHERE id=1")).scalar() == "opaque-history"
+
+
+def test_device_list_uses_latest_inventory_report_without_deleting_history(session):
+    from datetime import datetime, timedelta, timezone
+    from cps import ub
+    from cps.annotations import list_annotation_devices
+
+    device = _device(session)
+    earlier = ub.DeviceInventoryReport(
+        device_id=device.id, item_count=2, matched_count=1,
+        observed_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    latest = ub.DeviceInventoryReport(
+        device_id=device.id, item_count=1, matched_count=1,
+        observed_at=datetime.now(timezone.utc),
+    )
+    session.add_all([earlier, latest])
+    session.flush()
+    session.add_all([
+        ub.DeviceInventoryItem(
+            device_id=device.id, lpath="Books/Still here.epub", checksum="1" * 32,
+            book_id=1, size=10, mtime=10, last_report_id=latest.id,
+        ),
+        ub.DeviceInventoryItem(
+            device_id=device.id, lpath="Books/Omitted.epub", checksum="2" * 32,
+            book_id=2, size=20, mtime=20, last_report_id=earlier.id,
+        ),
+    ])
+    session.commit()
+
+    listed = list_annotation_devices(user_id=7, session=session)[0]
+
+    assert listed["inventory_count"] == 1
+    assert listed["inventory_observed"] == latest.observed_at.isoformat()
+    assert session.query(ub.DeviceInventoryItem).count() == 2

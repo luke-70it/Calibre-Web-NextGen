@@ -98,7 +98,7 @@ def _owned_device(public_id, user_id, session):
     ).first()
 
 
-def _device_json(device, annotation_count=0):
+def _device_json(device, annotation_count=0, inventory_report=None):
     return {
         "public_id": device.public_id,
         "label": device.display_name,
@@ -109,6 +109,11 @@ def _device_json(device, annotation_count=0):
         "first_seen": device.first_seen_at.isoformat() if device.first_seen_at else None,
         "last_seen": device.last_seen_at.isoformat() if device.last_seen_at else None,
         "annotation_count": int(annotation_count),
+        "inventory_count": int(inventory_report.item_count) if inventory_report else 0,
+        "inventory_observed": (
+            inventory_report.observed_at.isoformat()
+            if inventory_report and inventory_report.observed_at else None
+        ),
         "active": bool(device.active),
     }
 
@@ -126,7 +131,24 @@ def list_annotation_devices(*, user_id, session, active_only=False):
     if active_only:
         query = query.filter(ub.Device.active.is_(True))
     rows = query.group_by(ub.Device.id).order_by(ub.Device.display_name, ub.Device.id).all()
-    return [_device_json(device, count) for device, count in rows]
+    device_ids = [device.id for device, _count in rows]
+    reports = {}
+    if device_ids:
+        latest_ids = (
+            session.query(func.max(ub.DeviceInventoryReport.id))
+            .filter(ub.DeviceInventoryReport.device_id.in_(device_ids))
+            .group_by(ub.DeviceInventoryReport.device_id)
+        )
+        reports = {
+            report.device_id: report
+            for report in session.query(ub.DeviceInventoryReport).filter(
+                ub.DeviceInventoryReport.id.in_(latest_ids)
+            ).all()
+        }
+    return [
+        _device_json(device, count, reports.get(device.id))
+        for device, count in rows
+    ]
 
 
 def rename_annotation_device(public_id, *, user_id, label, session, commit):
@@ -218,6 +240,43 @@ def annotation_devices_list():
     except (RuntimeError, SQLAlchemyError):
         return _database_error_response("device list")
     return jsonify({"devices": devices})
+
+
+@annotations_bp.route("/api/annotations/devices/<public_id>/inventory", methods=["GET"])
+@user_login_required
+def annotation_device_inventory(public_id):
+    """Return only the latest observation for one device owned by this user."""
+    try:
+        device = _owned_device(public_id, current_user.id, ub.session)
+        if device is None:
+            abort(404)
+        report = (
+            ub.session.query(ub.DeviceInventoryReport)
+            .filter_by(device_id=device.id)
+            .order_by(ub.DeviceInventoryReport.id.desc())
+            .first()
+        )
+        if report is None:
+            return jsonify({"device": _device_json(device), "observed_at": None, "books": []})
+        items = (
+            ub.session.query(ub.DeviceInventoryItem)
+            .filter_by(device_id=device.id, last_report_id=report.id)
+            .order_by(ub.DeviceInventoryItem.lpath, ub.DeviceInventoryItem.id)
+            .all()
+        )
+        return jsonify({
+            "device": _device_json(device, inventory_report=report),
+            "observed_at": report.observed_at.isoformat() if report.observed_at else None,
+            "books": [{
+                "book_id": item.book_id,
+                "lpath": item.lpath,
+                "checksum": item.checksum,
+                "size": item.size,
+                "mtime": item.mtime,
+            } for item in items],
+        })
+    except SQLAlchemyError:
+        return _database_error_response("device inventory")
 
 
 @annotations_bp.route("/api/annotations/devices/<public_id>", methods=["PATCH"])
