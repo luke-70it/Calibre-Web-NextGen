@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -127,10 +128,10 @@ def test_existing_annotation_sync_savepoint_rolls_back_with_failed_commit(
 
 
 @pytest.mark.unit
-def test_every_app_db_session_uses_explicit_begin_and_factory_keeps_timeout(
+def test_every_app_db_session_uses_immediate_begin_and_factory_keeps_timeout(
     file_backed_app_db,
 ):
-    """The main, worker, and ad-hoc app.db constructors share WAL + the fix."""
+    """The main, worker, and ad-hoc constructors share WAL + BEGIN IMMEDIATE."""
     _db_path, main_session = file_backed_app_db
     thread_session = ub.init_db_thread()
     ad_hoc_session = ub.get_new_session_instance()
@@ -165,6 +166,136 @@ def test_every_app_db_session_uses_explicit_begin_and_factory_keeps_timeout(
         ad_hoc_engine = ad_hoc_session.get_bind()
         ad_hoc_session.remove()
         ad_hoc_engine.dispose()
+
+
+@pytest.mark.unit
+def test_read_then_write_waits_before_snapshot_instead_of_failing_busy_snapshot(
+    tmp_path,
+):
+    """A concurrent commit cannot invalidate a future app.db write.
+
+    Under #1888's deferred ``BEGIN``, connection A takes a read snapshot, B
+    commits, and A's INSERT fails immediately with ``database is locked``:
+    SQLite cannot upgrade the stale snapshot and does not apply busy_timeout to
+    SQLITE_BUSY_SNAPSHOT. BEGIN IMMEDIATE instead reserves the writer slot when
+    A starts. B waits in its ordinary SQLITE_BUSY retry loop, A writes and
+    commits, then B completes.
+    """
+    db_path = tmp_path / "busy-snapshot.db"
+    with sqlite3.connect(db_path) as setup:
+        assert setup.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        setup.execute("CREATE TABLE probe (value TEXT NOT NULL)")
+        setup.execute("INSERT INTO probe VALUES ('seed')")
+
+    engine = ub._create_app_db_engine(db_path)
+    writer_started = threading.Event()
+    writer_committed = threading.Event()
+    writer_errors = []
+
+    def concurrent_writer():
+        try:
+            with sqlite3.connect(db_path, timeout=2) as connection_b:
+                writer_started.set()
+                connection_b.execute("INSERT INTO probe VALUES ('connection-b')")
+                connection_b.commit()
+                writer_committed.set()
+        except BaseException as error:  # surfaced in the test thread below
+            writer_errors.append(error)
+
+    connection_b_thread = None
+    connection_a = engine.connect()
+    try:
+        assert connection_a.exec_driver_sql(
+            "SELECT value FROM probe ORDER BY rowid"
+        ).all() == [("seed",)]
+
+        connection_b_thread = threading.Thread(target=concurrent_writer)
+        connection_b_thread.start()
+        assert writer_started.wait(timeout=1), "connection B never attempted its write"
+
+        # Deferred BEGIN lets B commit here and makes A's following INSERT hit
+        # SQLITE_BUSY_SNAPSHOT. BEGIN IMMEDIATE keeps B waiting instead.
+        b_committed_before_a_write = writer_committed.wait(timeout=0.2)
+        connection_a.exec_driver_sql("INSERT INTO probe VALUES ('connection-a')")
+        connection_a.commit()
+    finally:
+        connection_a.close()
+        if connection_b_thread is not None:
+            connection_b_thread.join(timeout=3)
+        engine.dispose()
+
+    assert b_committed_before_a_write is False
+    assert writer_errors == []
+    assert writer_committed.is_set(), "connection B did not resume after A committed"
+    with sqlite3.connect(db_path) as observer:
+        assert observer.execute(
+            "SELECT value FROM probe ORDER BY rowid"
+        ).fetchall() == [
+            ("seed",),
+            ("connection-a",),
+            ("connection-b",),
+        ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("journal_mode", "explicit_begin"),
+    (
+        pytest.param("delete", False, id="delete-legacy"),
+        pytest.param("delete", True, id="delete-immediate"),
+        pytest.param("wal", False, id="wal-legacy"),
+        pytest.param("wal", True, id="wal-immediate"),
+    ),
+)
+def test_sqlite_transaction_mode_four_arm_probe(
+    tmp_path, journal_mode, explicit_begin,
+):
+    """Pin containment, reader access, and writer cost in all four modes."""
+    db_path = tmp_path / "transaction-mode-probe.db"
+    with sqlite3.connect(db_path) as setup:
+        assert setup.execute(
+            "PRAGMA journal_mode={}".format(journal_mode)
+        ).fetchone() == (journal_mode,)
+        setup.execute("CREATE TABLE probe (value TEXT NOT NULL)")
+        setup.execute("INSERT INTO probe VALUES ('seed')")
+
+    connection_a = sqlite3.connect(db_path, timeout=0.1)
+    if explicit_begin:
+        connection_a.isolation_level = None
+        connection_a.execute("BEGIN IMMEDIATE")
+    try:
+        assert connection_a.execute("SELECT value FROM probe").fetchall() == [("seed",)]
+        assert connection_a.in_transaction is explicit_begin
+
+        # A reserved writer never blocks an independent reader. In WAL this is
+        # the production arm; DELETE + immediate is retained as an off-policy
+        # diagnostic arm so a journal-mode behavior change is visible.
+        with sqlite3.connect(db_path, timeout=0.1) as independent_reader:
+            assert independent_reader.execute("SELECT value FROM probe").fetchall() == [
+                ("seed",),
+            ]
+
+        writer_blocked = False
+        try:
+            with sqlite3.connect(db_path, timeout=0.05) as connection_b:
+                connection_b.execute("INSERT INTO probe VALUES ('connection-b')")
+        except sqlite3.OperationalError as error:
+            assert "database is locked" in str(error).lower()
+            writer_blocked = True
+        assert writer_blocked is explicit_begin
+
+        connection_a.execute("SAVEPOINT contained")
+        connection_a.execute("INSERT INTO probe VALUES ('savepoint')")
+        connection_a.execute("RELEASE SAVEPOINT contained")
+        connection_a.rollback()
+    finally:
+        connection_a.close()
+
+    with sqlite3.connect(db_path) as observer:
+        savepoint_rows = observer.execute(
+            "SELECT value FROM probe WHERE value = 'savepoint'"
+        ).fetchall()
+    assert savepoint_rows == ([] if explicit_begin else [("savepoint",)])
 
 
 @pytest.mark.unit

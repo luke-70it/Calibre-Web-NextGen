@@ -4258,9 +4258,17 @@ def _create_app_db_engine(app_db_path):
     Python's sqlite3 legacy transaction mode emits BEGIN for DML only. A
     SAVEPOINT reached after SELECTs therefore has no enclosing transaction,
     and releasing it makes its writes durable before Session.commit(). Disable
-    the driver's BEGIN handling and let SQLAlchemy emit BEGIN for every outer
-    transaction when WAL is available, so Session.begin_nested() is a contained
-    SAVEPOINT without making rollback-journal readers block writers.
+    the driver's BEGIN handling and let SQLAlchemy emit BEGIN IMMEDIATE for
+    every outer transaction when WAL is available. This both contains
+    Session.begin_nested() and reserves the WAL writer slot before a transaction
+    can take a read snapshot that another writer would invalidate. Concurrent
+    writers therefore wait under busy_timeout instead of failing immediately
+    with SQLITE_BUSY_SNAPSHOT when a read transaction upgrades to a write.
+
+    BEGIN IMMEDIATE serializes all app.db sessions, including sessions that turn
+    out to be read-only. A separate read-only path would require callers to make
+    that promise before their first query; the shared session cannot safely infer
+    it after a snapshot has already been taken.
 
     WAL support is decided once per engine. If the first raw connection cannot
     enable it (for example, app.db is on a network share), every connection on
@@ -4316,7 +4324,7 @@ def _create_app_db_engine(app_db_path):
     @event.listens_for(engine, 'begin')
     def _emit_begin(connection):
         if transaction_mode['explicit_begin']:
-            connection.exec_driver_sql('BEGIN')
+            connection.exec_driver_sql('BEGIN IMMEDIATE')
 
     return engine
 
