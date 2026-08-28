@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import NamedTuple
 
 
-PROBE_CONTENT_ID = "d83c9bfd-91e1-4bed-a1a6-9c50d15ae46c"
+PROBE_CONTENT_ID = "053742ff-9094-43b2-8511-c0763c90ffab"
+PROBE_BOOK_ID = 540
 MAX_SERVER_HIGHLIGHT_SPEC_BYTES = 64 * 1024
 KOBO_HIGHLIGHT_COLORS = {
     "#F6F3B3", "#E8AFCF", "#B2E1E8", "#C6E09E", "#A0A0A0",
@@ -92,7 +93,12 @@ def _probe_identity(connection, user_id):
         raise BuildError("offline snapshot has no probe book state")
     if len(rows) != 1:
         raise BuildError("probe book state is ambiguous; pass --user-id")
-    return rows[0]["user_id"], rows[0]["book_id"]
+    book_id = rows[0]["book_id"]
+    if book_id != PROBE_BOOK_ID:
+        raise BuildError(
+            f"probe UUID resolves to book {book_id}, expected {PROBE_BOOK_ID}"
+        )
+    return rows[0]["user_id"], book_id
 
 
 def _materialization_rows(connection, user_id, book_id):

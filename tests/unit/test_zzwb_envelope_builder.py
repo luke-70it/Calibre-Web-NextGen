@@ -55,7 +55,7 @@ def stage0_db(tmp_path):
     """)
     connection.execute(
         "INSERT INTO kobo_annotation_book_state VALUES (?, ?, ?)",
-        (7, 543, builder.PROBE_CONTENT_ID),
+        (7, builder.PROBE_BOOK_ID, builder.PROBE_CONTENT_ID),
     )
     location_b = b'{ "span" : {"chapterFilename":"b.xhtml","startPath":"p\\/b"} }'
     location_a = b'{"span":{"chapterFilename":"a.xhtml","startPath":"p\\/a"}}'
@@ -69,7 +69,7 @@ def stage0_db(tmp_path):
     ):
         connection.execute(
             "INSERT INTO annotation VALUES (?, ?, ?, ?, ?)",
-            (row_id, 7, 543, annotation_id, hidden),
+            (row_id, 7, builder.PROBE_BOOK_ID, annotation_id, hidden),
         )
         connection.execute(
             "INSERT INTO kobo_annotation_materialization VALUES (?, ?, ?, ?, ?)",
@@ -93,7 +93,7 @@ def test_builder_emits_measured_envelope_with_exact_objects_and_locations(stage0
     assert result.payload == expected
     assert result.annotation_count == 2
     assert result.user_id == 7
-    assert result.book_id == 543
+    assert result.book_id == 540
     assert result.sha256 == hashlib.sha256(expected).hexdigest()
     assert location_a in result.payload
     assert location_b in result.payload
@@ -159,7 +159,7 @@ def test_builder_refuses_empty_probe_by_default_and_requires_explicit_override(t
         );
     """)
     connection.execute(
-        "INSERT INTO kobo_annotation_book_state VALUES (7, 543, ?)",
+        "INSERT INTO kobo_annotation_book_state VALUES (7, 540, ?)",
         (builder.PROBE_CONTENT_ID,),
     )
     connection.commit()
@@ -182,6 +182,21 @@ def test_builder_cannot_select_a_different_content_id(stage0_db):
 
     with pytest.raises(
         builder.BuildError, match="^offline snapshot has no probe book state$",
+    ):
+        builder.build_envelope(path)
+
+
+def test_builder_refuses_probe_uuid_mapped_to_any_other_calibre_book(stage0_db):
+    path, _raw_a, _raw_b, _location_a, _location_b = stage0_db
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "UPDATE kobo_annotation_book_state SET book_id=541"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(
+        builder.BuildError, match="^probe UUID resolves to book 541, expected 540$",
     ):
         builder.build_envelope(path)
 

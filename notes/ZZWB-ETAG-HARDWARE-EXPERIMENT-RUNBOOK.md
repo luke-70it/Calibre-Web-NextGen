@@ -1,17 +1,22 @@
 # ZZWB arbitrary-ETag hardware experiment — run, observe, and revert
 
-> **SCRATCH INSTRUMENT — NEVER MERGE.** This procedure is only for `ZZWB Writeback Probe`,
-> ContentId `d83c9bfd-91e1-4bed-a1a6-9c50d15ae46c`. It hot-copies one scratch source file into one
-> deployed container. It is not a production writeback design.
+> **SCRATCH INSTRUMENT — NEVER MERGE.** This procedure is only for `The Heat Will Kill You First`,
+> Calibre book 540, ContentId `053742ff-9094-43b2-8511-c0763c90ffab`. It hot-copies one scratch
+> source file into one deployed container. It is not a production writeback design.
 
 ## 1. Tonight's baseline and safety boundary
 
-- **[OBSERVED 2026-08-28]** The deployed image is `dev-1176`, which is the current `origin/main`
-  baseline used by this rig. `cps/readingservices.py` in this worktree contains that production
-  implementation plus the arming-file-gated probe hook; do not copy the August 23 version.
-- **[OBSERVED 2026-08-28]** The probe's stored `AnnotationsSyncToken` is currently a fourteen-entry
-  Kobo composite manifest, **not** `W/"0"`. Record the complete token from the pre-run device
-  snapshot. Never reconstruct it from another book or from memory.
+- **[OBSERVED 2026-08-28]** The deployed container is `calibre-web`, configured from the mutable
+  tag `ghcr.io/new-usemame/calibre-web-nextgen:dev`. The tag is not a baseline identifier. The
+  exact SHA-256 of its image-shipped `readingservices.py` is recorded before the hot-copy; the
+  currently deployed hash begins `be645af98cfdb180`.
+- **[OBSERVED 2026-08-28]** `cps/readingservices.py` in this scratch worktree contains the image's
+  production path plus the arming-file-gated hook. The unarmed identity tests must pass before it
+  is copied; do not use a source file from another checkout.
+- **[OBSERVED 2026-08-28]** The live probe's stored `AnnotationsSyncToken` is a Kobo composite
+  manifest that changes after every Kobo annotations GET. Pull the device database while offline
+  immediately before **each** Cycle R leg and Cycle B, and save that cycle's complete token. Never
+  reuse a previous cycle's token or reconstruct one from another book or from memory.
 - **[OBSERVED]** A named annotations GET returning 304, 503, or hanging caused Nickel to replace
   that book's local set with empty. The rig names the probe only when `/config/zzwb/ARMED`,
   `payload.json`, and `etag.txt` all exist and validate.
@@ -20,7 +25,7 @@
 - **[OBSERVED IN TESTS]** Both GET and `checkforchanges` reject every non-probe ContentId before
   inspecting the arming directory. When unarmed, the probe GET returns the production proxy object
   unchanged and `checkforchanges` returns the same status/body/header triplet as `origin/main`.
-- **[OBSERVED IN `dev-1176`]** private exchange capture is already enabled. The rig deliberately
+- **[OBSERVED IN THE DEPLOYED CONTAINER]** private exchange capture is already enabled. The rig deliberately
   has no second `ZZWB checkforchanges` capture stream. The existing schema-version-2 records under
   `/config/.cwng-private-observability/kobo-reading-services/` capture the device request, filtered
   upstream leg, decisions, and exact final response. The staged GET also attaches this observer.
@@ -34,7 +39,7 @@ W/"CWNG:<generation-id>:<authority-revision>:<digest-prefix>"
 Every cycle follows the same order: reader offline, disarm, atomically replace both stage files,
 arm last, then restore connectivity. Never edit a stage while the reader can sync.
 
-## 2. Prepare the worktree and record the device baseline
+## 2. Prepare the worktree and define the per-cycle device snapshot
 
 Run from **this worktree**, not another checkout:
 
@@ -46,39 +51,56 @@ python -m pytest \
   tests/unit/test_kobo_reading_services*.py -q
 
 install -d -m 700 ./zzwb-run
-ZZWB_CONTAINER=calibre-web-nextgen
+ZZWB_CONTAINER=calibre-web
+ZZWB_SERVICE=$(docker inspect --format \
+  '{{ index .Config.Labels "com.docker.compose.service" }}' "$ZZWB_CONTAINER")
+test -n "$ZZWB_SERVICE"
 ZZWB_RUN_DIR=$PWD/zzwb-run
-KOBO_PILOT=/path/to/project-root/tools/kobo-pilot/kobo-pilot
-PROBE=d83c9bfd-91e1-4bed-a1a6-9c50d15ae46c
+KOBO_PILOT=./kobo-pilot
+PROBE=053742ff-9094-43b2-8511-c0763c90ffab
+PROBE_BOOK_ID=540
+PROBE_TITLE='The Heat Will Kill You First'
+test -x "$KOBO_PILOT"
 ```
 
-Pull the baseline while the reader is offline. The wrapper copies the database, WAL, and SHM and
-integrity-checks the local copy:
+`./kobo-pilot` discovers the device by its MAC address. Do not pass a remembered IP address or a
+`--host` option.
+
+Define this snapshot helper once in the same shell. The wrapper copies the database, WAL, and SHM
+and integrity-checks the local copy. The cycle label makes the rollback token and Bookmark count
+unambiguous:
 
 ```bash
-"$KOBO_PILOT" pull-db --host 10.0.20.250 \
-  --output "$ZZWB_RUN_DIR/device-before"
-sqlite3 -readonly "$ZZWB_RUN_DIR/device-before/KoboReader.sqlite" \
-  "SELECT ContentID,AnnotationsSyncToken,IsDownloaded FROM content WHERE ContentID='$PROBE';" \
-  | tee "$ZZWB_RUN_DIR/device-before-content.txt"
-sqlite3 -readonly "$ZZWB_RUN_DIR/device-before/KoboReader.sqlite" \
-  "SELECT AnnotationsSyncToken FROM content WHERE ContentID='$PROBE';" \
-  >"$ZZWB_RUN_DIR/baseline-etag.txt"
-sqlite3 -readonly "$ZZWB_RUN_DIR/device-before/KoboReader.sqlite" \
-  "SELECT COUNT(*) FROM Bookmark WHERE VolumeID LIKE '$PROBE%';" \
-  | tee "$ZZWB_RUN_DIR/device-before-bookmark-count.txt"
-python3 -c '
+snapshot_probe() {
+  test -n "$CYCLE_LABEL"
+  DEVICE_BEFORE_DIR="$ZZWB_RUN_DIR/device-before-$CYCLE_LABEL"
+  PRE_ETAG="$ZZWB_RUN_DIR/$CYCLE_LABEL-pre-etag.txt"
+  "$KOBO_PILOT" pull-db --output "$DEVICE_BEFORE_DIR"
+  sqlite3 -readonly "$DEVICE_BEFORE_DIR/KoboReader.sqlite" \
+    "SELECT ContentID,Title,AnnotationsSyncToken,IsDownloaded FROM content WHERE ContentID='$PROBE';" \
+    | tee "$ZZWB_RUN_DIR/$CYCLE_LABEL-pre-content.txt"
+  sqlite3 -readonly "$DEVICE_BEFORE_DIR/KoboReader.sqlite" \
+    "SELECT AnnotationsSyncToken FROM content WHERE ContentID='$PROBE';" \
+    >"$PRE_ETAG"
+  sqlite3 -readonly "$DEVICE_BEFORE_DIR/KoboReader.sqlite" \
+    "SELECT COUNT(*) FROM Bookmark WHERE VolumeID LIKE '$PROBE%';" \
+    | tee "$ZZWB_RUN_DIR/$CYCLE_LABEL-pre-bookmark-count.txt"
+  python3 -c '
 from pathlib import Path
-p=Path("zzwb-run/baseline-etag.txt")
+import sys
+p=Path(sys.argv[1])
 lines=p.read_text().splitlines()
-assert len(lines)==1 and lines[0].startswith("W/\"") and lines[0] != "W/\"0\"", lines
-print({"baseline_etag_bytes":len(lines[0].encode("ascii"))})
-'
-chmod 600 "$ZZWB_RUN_DIR/baseline-etag.txt"
+assert len(lines)==1 and lines[0].startswith("W/\""), lines
+print({"cycle":sys.argv[2], "pre_etag_bytes":len(lines[0].encode("ascii"))})
+' "$PRE_ETAG" "$CYCLE_LABEL"
+  chmod 600 "$PRE_ETAG"
+}
 ```
 
-The exact-token assertion is deliberately probe-specific. A fourteen-entry manifest observed on a
-different book is not acceptable baseline evidence.
+With the reader offline, set `CYCLE_LABEL` and call `snapshot_probe` immediately before preparing
+that cycle's stage files. Do this separately for `cycle-r-cwng`, `cycle-r-zero`, and `cycle-b`.
+Do not allow a Kobo GET or another sync between `snapshot_probe` and the cycle: the live composite
+token can change on that GET. Each `*-pre-etag.txt` is valid only for the cycle named in its file.
 
 Create the measured empty envelope used by both Cycle R legs and final cleanup:
 
@@ -98,7 +120,8 @@ ZZWB_DB_SNAPSHOT=/path/to/offline/app.db
   --force
 ```
 
-It opens SQLite with `mode=ro` and `PRAGMA query_only=ON`, selects only the fixed probe, verifies
+It opens SQLite with `mode=ro` and `PRAGMA query_only=ON`, selects only ContentId
+`053742ff-9094-43b2-8511-c0763c90ffab`, requires that it resolve to Calibre book 540, verifies
 captured-object and raw-location digests, rejects non-captured provenance, and refuses an empty set
 unless `--allow-empty` is explicit.
 
@@ -111,10 +134,15 @@ overwriting it:
 ```bash
 docker inspect --format '{{.Config.Image}}' "$ZZWB_CONTAINER" \
   | tee "$ZZWB_RUN_DIR/container-image.txt"
-rg -q 'dev-1176' "$ZZWB_RUN_DIR/container-image.txt"
+test "$(cat "$ZZWB_RUN_DIR/container-image.txt")" = \
+  'ghcr.io/new-usemame/calibre-web-nextgen:dev'
+docker inspect --format '{{.Image}}' "$ZZWB_CONTAINER" \
+  >"$ZZWB_RUN_DIR/container-image-id.txt"
 docker exec "$ZZWB_CONTAINER" sha256sum \
   /app/calibre-web-automated/cps/readingservices.py \
-  >"$ZZWB_RUN_DIR/image-readingservices.sha256"
+>"$ZZWB_RUN_DIR/image-readingservices.sha256"
+rg -q '^be645af98cfdb180[0-9a-f]{48}  /app/calibre-web-automated/cps/readingservices\.py$' \
+  "$ZZWB_RUN_DIR/image-readingservices.sha256"
 
 docker cp cps/readingservices.py \
   "$ZZWB_CONTAINER:/app/calibre-web-automated/cps/readingservices.py"
@@ -123,9 +151,11 @@ docker exec "$ZZWB_CONTAINER" \
 docker restart "$ZZWB_CONTAINER"
 ```
 
-Wait for the ordinary health check to report healthy. Exchange capture is already on in
-`dev-1176`; do not add or change its environment gate. Then create the private stage directory and
-prove it is disarmed:
+The prefix assertion is a deployment sanity check, while the complete hash file is the baseline
+and final restore oracle. The `:dev` tag can move and must not replace either check. Wait for the
+ordinary health check to report healthy. Exchange capture is already on in this container; do not
+add or change its environment gate. Then create the private stage directory and prove it is
+disarmed:
 
 ```bash
 docker exec "$ZZWB_CONTAINER" sh -eu -c '
@@ -181,7 +211,7 @@ print({"bytes":len(p),"sha256":hashlib.sha256(p).hexdigest(),"etag":e,
 
 ## 5. Observe a cycle through the existing exchange capture
 
-Set a unique label for the leg (`cycle-r-cwng`, `cycle-r-zero`, `cycle-b`, or
+Use the unique label already assigned for the leg (`cycle-r-cwng`, `cycle-r-zero`, `cycle-b`, or
 `cycle-b-cleanup`). Immediately before restoring Wi-Fi, record a UTC start time and current capture
 filenames:
 
@@ -196,15 +226,14 @@ docker exec "$ZZWB_CONTAINER" sh -c \
 For each leg:
 
 1. Restore Wi-Fi and tap **Sync now** once.
-2. Open `ZZWB Writeback Probe`, close it fully, and reopen it.
+2. Open `The Heat Will Kill You First`, close it fully, and reopen it.
 3. Tap **Sync now** again without altering the stage.
 4. Close/reopen once more and tap **Sync now** a third time.
 
 The pilot can open the exact title when Nickel is at Home:
 
 ```bash
-"$KOBO_PILOT" open-book "ZZWB Writeback Probe" \
-  --host 10.0.20.250 --expect-book-title "ZZWB Writeback Probe"
+"$KOBO_PILOT" open-book "$PROBE_TITLE" --expect-book-title "$PROBE_TITLE"
 ```
 
 Collect structural telemetry and preserve private capture artifacts only in `zzwb-run`:
@@ -244,6 +273,8 @@ from annotation-set replacement.
 Stage an unmistakably new revision, different from every CWNG token adopted in earlier runs:
 
 ```bash
+CYCLE_LABEL=cycle-r-cwng
+snapshot_probe
 cp "$ZZWB_RUN_DIR/empty-payload.json" "$ZZWB_RUN_DIR/payload.json"
 DIGEST_PREFIX=$(shasum -a 256 "$ZZWB_RUN_DIR/payload.json" | awk '{print substr($1,1,16)}')
 printf 'W/"CWNG:night-r-20260828:91:%s"\n' "$DIGEST_PREFIX" \
@@ -251,7 +282,6 @@ printf 'W/"CWNG:night-r-20260828:91:%s"\n' "$DIGEST_PREFIX" \
 cp "$ZZWB_RUN_DIR/etag.txt" "$ZZWB_RUN_DIR/cycle-r-cwng-etag.txt"
 chmod 600 "$ZZWB_RUN_DIR/payload.json" "$ZZWB_RUN_DIR/etag.txt" \
   "$ZZWB_RUN_DIR/cycle-r-cwng-etag.txt"
-CYCLE_LABEL=cycle-r-cwng
 ```
 
 Repeat sections 4 and 5. Pull `device-after-r-cwng`, require zero probe Bookmark rows, and require a
@@ -264,10 +294,11 @@ also shows the staged GET completed.
 Keep the identical empty body and change only the tag:
 
 ```bash
+CYCLE_LABEL=cycle-r-zero
+snapshot_probe
 cp "$ZZWB_RUN_DIR/empty-payload.json" "$ZZWB_RUN_DIR/payload.json"
 printf 'W/"0"\n' >"$ZZWB_RUN_DIR/etag.txt"
 chmod 600 "$ZZWB_RUN_DIR/payload.json" "$ZZWB_RUN_DIR/etag.txt"
-CYCLE_LABEL=cycle-r-zero
 ```
 
 Repeat sections 4 and 5 as a new capture batch. Pull `device-after-r-zero` and require zero probe
@@ -283,19 +314,27 @@ Any run without a captured staged GET is inconclusive, not evidence for either b
 
 ## 7. Cycle B — one server-authored highlight under a new revision
 
-Create `server-highlight.json` from position values measured for this exact probe KEPUB. The object
-must use the successful Kobo GET highlight shape: exactly `attachments`,
+Create `server-highlight.json` from **this probe's own captured create PATCH** in
+`/config/.cwng-private-observability/kobo-reading-services/`. Select a PATCH capture whose exact
+ContentId is `053742ff-9094-43b2-8511-c0763c90ffab`, then copy its `chapterFilename`, `startPath`,
+`endPath`, `startChar`, and `endChar` position values. Do not use positions from a retired ZZ book,
+another title, or a reconstructed KEPUB. Preserve the capture with the run evidence.
+
+The object must use the successful Kobo GET highlight shape: exactly `attachments`,
 `clientLastModifiedUtc`, top-level `context`, `highlightColor`, `highlightedText`, `id`, `location`,
 and `type`; `location` contains exactly one `span` with `chapterFilename`, `chapterProgress`,
 `startPath`, `endPath`, `startChar`, and `endChar`. `attachments` is `{}`, `type` is `highlight`,
 `id` is a new canonical lower-case UUID, `clientLastModifiedUtc` is UTC RFC 3339 ending in `Z`, and
 `highlightColor` is one of the five measured Kobo wire hex values. Do not use placeholder
-chapter/path/text values: review the spec against a probe capture before staging it.
+chapter/path/text values: review the spec against that same probe create PATCH and a captured Kobo
+GET before staging it.
 
 The builder validates the exact field set, span shape, range, empty attachments, and measured color
 palette, and emits exactly one annotation:
 
 ```bash
+CYCLE_LABEL=cycle-b
+snapshot_probe
 ./scripts/zzwb_build_annotation_envelope.py \
   --server-highlight "$ZZWB_RUN_DIR/server-highlight.json" \
   --output "$ZZWB_RUN_DIR/payload.json" \
@@ -311,7 +350,6 @@ DIGEST_PREFIX=$(shasum -a 256 "$ZZWB_RUN_DIR/payload.json" | awk '{print substr(
 printf 'W/"CWNG:night-b-20260828:101:%s"\n' "$DIGEST_PREFIX" \
   >"$ZZWB_RUN_DIR/etag.txt"
 chmod 600 "$ZZWB_RUN_DIR/payload.json" "$ZZWB_RUN_DIR/etag.txt"
-CYCLE_LABEL=cycle-b
 ```
 
 Repeat sections 4 and 5. The first request should declare the token left by Cycle R, the GET must
@@ -325,12 +363,13 @@ other book, firmware, or device.
 
 ## 8. Cycle B cleanup — return the probe to its empty baseline set
 
-Put the reader offline. Stage the empty body and the exact pre-run composite token recorded in
-`baseline-etag.txt`; do not substitute `W/"0"` regardless of Cycle R's outcome:
+Put the reader offline. Stage the empty body and the exact live composite token recorded by
+`snapshot_probe` immediately before Cycle B in `cycle-b-pre-etag.txt`; do not reuse either Cycle R
+token and do not substitute `W/"0"` regardless of Cycle R's outcome:
 
 ```bash
 cp "$ZZWB_RUN_DIR/empty-payload.json" "$ZZWB_RUN_DIR/payload.json"
-cp "$ZZWB_RUN_DIR/baseline-etag.txt" "$ZZWB_RUN_DIR/etag.txt"
+cp "$ZZWB_RUN_DIR/cycle-b-pre-etag.txt" "$ZZWB_RUN_DIR/etag.txt"
 chmod 600 "$ZZWB_RUN_DIR/payload.json" "$ZZWB_RUN_DIR/etag.txt"
 CYCLE_LABEL=cycle-b-cleanup
 ```
@@ -339,13 +378,15 @@ Repeat sections 4 and 5, then sync/close/open twice. Do not remove the rig until
 snapshot proves:
 
 ```text
-Bookmark count for the probe = the pre-run count (expected zero; use the recorded artifact)
-AnnotationsSyncToken for the exact probe = the exact baseline-etag.txt bytes
-later checkforchanges request for the exact probe = the exact baseline-etag.txt bytes
+Bookmark count for the probe = cycle-b-pre-bookmark-count.txt
+AnnotationsSyncToken for the exact probe = the exact cycle-b-pre-etag.txt bytes
+later checkforchanges request for the exact probe = the exact cycle-b-pre-etag.txt bytes
 ```
 
 The changed-set cleanup requirement is Bookmark-set equality. Exact token restoration is an
-additional byte-for-byte baseline check and must use this book's own saved token.
+additional byte-for-byte check and must use this book's own token captured immediately before
+Cycle B. Complete and preserve that comparison before allowing a genuine Kobo annotations GET,
+because such a GET advances the live composite manifest again.
 
 ## 9. Disarm, preserve evidence, and restore image bytes
 
@@ -359,11 +400,11 @@ docker exec "$ZZWB_CONTAINER" sh -eu -c '
   rm -f /config/zzwb/payload.json.next /config/zzwb/etag.txt.next
   rmdir /config/zzwb 2>/dev/null || true
 '
-docker compose up -d --force-recreate --no-deps calibre-web-automated
+docker compose up -d --force-recreate --no-deps "$ZZWB_SERVICE"
 ```
 
-Verify the replacement has no scratch marker or arm, is healthy, uses `dev-1176`, and contains the
-exact bytes recorded before the hot-copy:
+Verify the replacement has no scratch marker or arm, is healthy, is configured from the expected
+mutable tag, and contains the exact bytes recorded before the hot-copy:
 
 ```bash
 docker exec "$ZZWB_CONTAINER" sh -eu -c '
@@ -372,7 +413,8 @@ docker exec "$ZZWB_CONTAINER" sh -eu -c '
 '
 docker inspect --format '{{.Config.Image}} {{.State.Health.Status}}' "$ZZWB_CONTAINER" \
   | tee "$ZZWB_RUN_DIR/restored-container.txt"
-rg -q 'dev-1176 .*healthy' "$ZZWB_RUN_DIR/restored-container.txt"
+test "$(cat "$ZZWB_RUN_DIR/restored-container.txt")" = \
+  'ghcr.io/new-usemame/calibre-web-nextgen:dev healthy'
 docker exec "$ZZWB_CONTAINER" sha256sum \
   /app/calibre-web-automated/cps/readingservices.py \
   >"$ZZWB_RUN_DIR/restored-readingservices.sha256"
@@ -381,7 +423,9 @@ cmp "$ZZWB_RUN_DIR/image-readingservices.sha256" \
 ```
 
 If `/app/calibre-web-automated` is bind-mounted, recreation cannot discard the hot-copy. Restore the
-bind from image `dev-1176`, restart, and require the same `cmp` before putting the reader online.
+bind from the exact local image ID recorded in `container-image-id.txt`, restart, and require the
+same full-file `cmp` before putting the reader online. Do not identify the baseline by the mutable
+`:dev` tag alone.
 
 ## 10. What the rig does and does not establish
 

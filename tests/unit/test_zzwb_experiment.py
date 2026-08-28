@@ -17,6 +17,10 @@ PROBE = rs.ZZWB_EXPERIMENT_UUID
 FOREIGN = "kobo-store-content"
 
 
+def test_rig_is_pinned_to_the_live_probe_uuid():
+    assert PROBE == "053742ff-9094-43b2-8511-c0763c90ffab"
+
+
 @pytest.fixture
 def app():
     return Flask(__name__)
@@ -62,7 +66,7 @@ def test_checkforchanges_reuses_production_exchange_capture(
     monkeypatch.setattr(
         rs,
         "resolve_entitlement_ownership",
-        lambda content_id: SimpleNamespace(id=543) if content_id == PROBE else None,
+        lambda content_id: SimpleNamespace(id=540) if content_id == PROBE else None,
     )
 
     capture_session = SimpleNamespace(
@@ -131,7 +135,7 @@ def test_disabled_production_capture_does_not_change_armed_probe_answer(
     monkeypatch.setattr(
         rs,
         "resolve_entitlement_ownership",
-        lambda _content_id: SimpleNamespace(id=543),
+        lambda _content_id: SimpleNamespace(id=540),
     )
     monkeypatch.setattr(
         rs,
@@ -253,7 +257,7 @@ def test_probe_is_not_named_until_arm_payload_and_etag_are_all_valid(
     monkeypatch.setattr(
         rs,
         "resolve_entitlement_ownership",
-        lambda _content_id: SimpleNamespace(id=543),
+        lambda _content_id: SimpleNamespace(id=540),
     )
     monkeypatch.setattr(
         rs,

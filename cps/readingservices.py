@@ -225,7 +225,7 @@ OWNERSHIP_UNKNOWN = object()
 # file exists.
 # ─────────────────────────────────────────────────────────────────────────────
 ZZWB_EXPERIMENT_DIR = os.environ.get("ZZWB_EXPERIMENT_DIR", "/config/zzwb")
-ZZWB_EXPERIMENT_UUID = "d83c9bfd-91e1-4bed-a1a6-9c50d15ae46c"
+ZZWB_EXPERIMENT_UUID = "053742ff-9094-43b2-8511-c0763c90ffab"
 ZZWB_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 ZZWB_ETAG_RE = re.compile(r'^(?:W/)?"[\x21\x23-\x7e]*"$')
 
