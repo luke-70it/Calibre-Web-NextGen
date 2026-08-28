@@ -218,6 +218,100 @@ def requires_reading_services_auth_and_config(f):
 OWNERSHIP_UNKNOWN = object()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SCRATCH-BRANCH EXPERIMENT ONLY — server-authored annotation writeback.
+# NEVER MERGE. Hard-scoped to one disposable book; every other ContentId keeps
+# origin/main behaviour, and the whole block is inert unless the on-disk arming
+# file exists.
+# ─────────────────────────────────────────────────────────────────────────────
+ZZWB_EXPERIMENT_DIR = os.environ.get("ZZWB_EXPERIMENT_DIR", "/config/zzwb")
+ZZWB_EXPERIMENT_UUID = "d83c9bfd-91e1-4bed-a1a6-9c50d15ae46c"
+ZZWB_MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
+ZZWB_ETAG_RE = re.compile(r'^(?:W/)?"[\x21\x23-\x7e]*"$')
+
+
+def _zzwb_armed():
+    """The experiment is inert unless <dir>/ARMED exists."""
+    try:
+        return os.path.isfile(os.path.join(ZZWB_EXPERIMENT_DIR, "ARMED"))
+    except Exception:
+        return False
+
+
+def _zzwb_is_target(content_id):
+    """Scope before filesystem access: foreign IDs never inspect the arm."""
+    if not isinstance(content_id, str):
+        return False
+    normalized_id = content_id.strip().strip("{}").strip().casefold()
+    if normalized_id != ZZWB_EXPERIMENT_UUID:
+        return False
+    return _zzwb_armed()
+
+
+def _zzwb_stage_shape_is_valid(parsed_payload):
+    """Recognize the complete annotations envelope required by this rig."""
+    return (
+        isinstance(parsed_payload, dict)
+        and isinstance(parsed_payload.get("annotations"), list)
+        and "nextPageOffsetToken" in parsed_payload
+        and (
+            parsed_payload["nextPageOffsetToken"] is None
+            or isinstance(parsed_payload["nextPageOffsetToken"], str)
+        )
+    )
+
+
+def _zzwb_etag_is_valid(etag):
+    """Accept an ASCII HTTP entity-tag, including CWNG tags and W/"0"."""
+    return isinstance(etag, str) and ZZWB_ETAG_RE.fullmatch(etag) is not None
+
+
+def _zzwb_stage_warning(reason):
+    """Best-effort warning which cannot turn an unready stage into a failure."""
+    try:
+        log.warning("ZZWB: stage is not ready reason=%s", reason)
+    except Exception:
+        pass
+
+
+def _zzwb_load_stage():
+    """Read and validate one body/ETag pair from the arming directory."""
+    try:
+        if not _zzwb_armed():
+            return None
+        payload_path = os.path.join(ZZWB_EXPERIMENT_DIR, "payload.json")
+        etag_path = os.path.join(ZZWB_EXPERIMENT_DIR, "etag.txt")
+        with open(payload_path, "rb") as handle:
+            payload = handle.read(ZZWB_MAX_PAYLOAD_BYTES + 1)
+        if len(payload) > ZZWB_MAX_PAYLOAD_BYTES:
+            _zzwb_stage_warning("payload_too_large")
+            return None
+        parsed_payload = json.loads(payload)
+        if not _zzwb_stage_shape_is_valid(parsed_payload):
+            _zzwb_stage_warning("payload_shape")
+            return None
+        with open(etag_path, "rb") as handle:
+            raw_etag = handle.read(1025)
+        if len(raw_etag) > 1024:
+            _zzwb_stage_warning("etag_too_large")
+            return None
+        etag = raw_etag.decode("ascii").rstrip("\r\n")
+        if not _zzwb_etag_is_valid(etag):
+            _zzwb_stage_warning("etag_syntax")
+            return None
+        return payload, etag
+    except (OSError, UnicodeDecodeError, ValueError, TypeError):
+        _zzwb_stage_warning("missing_or_unreadable")
+        return None
+
+
+def _zzwb_stage_for_target(content_id):
+    """Return a ready stage only for the one disposable probe UUID."""
+    if not _zzwb_is_target(content_id):
+        return None
+    return _zzwb_load_stage()
+
+
 def get_book_by_entitlement_id(entitlement_id):
     """Get book from database by UUID (entitlement_id).
 
@@ -685,6 +779,27 @@ def handle_annotations(entitlement_id):
         authentication="authenticated",
         user_id=getattr(current_user, "id", None),
     )
+    stage = (
+        _zzwb_stage_for_target(entitlement_id)
+        if request.method == "GET"
+        else None
+    )
+    if stage is not None:
+        # The production exchange observer already attached above records this
+        # device response. There is deliberately no second experiment capture.
+        # Always answer 200: 304, 503, and hangs emptied Nickel's local set.
+        payload, etag = stage
+        try:
+            log.warning(
+                "ZZWB: serving staged annotations bytes=%d sha256=%s etag=%s",
+                len(payload), hashlib.sha256(payload).hexdigest(), etag,
+            )
+        except Exception:
+            pass
+        response = make_response(payload, 200)
+        response.headers["Content-Type"] = "application/json"
+        response.headers["ETag"] = etag
+        return response
     if request.method == "PATCH":
         patch_spool_ticket = _stage_patch_for_recovery(raw_body, entitlement_id)
         # The conservative default is replayable. Every post-stage exit crosses
@@ -841,7 +956,16 @@ def _handle_check_for_changes():
         log.warning("Not proxying an unrecognized Kobo checkforchanges request")
         return jsonify([])
 
-    filtered_ids = set()
+    # SCRATCH EXPERIMENT: only a complete staged probe is named. The target
+    # check rejects every foreign ContentId before it can inspect /config/zzwb.
+    zzwb_ids = [
+        entry["ContentId"] for entry in entries
+        if _zzwb_stage_for_target(entry["ContentId"]) is not None
+    ]
+    if zzwb_ids:
+        log.warning("ZZWB: naming %s in checkforchanges to trigger the GET", zzwb_ids)
+
+    filtered_ids = set(zzwb_ids)
     for index, entry in enumerate(entries):
         content_id = entry["ContentId"]
         ownership = resolve_entitlement_ownership(content_id)
@@ -859,7 +983,7 @@ def _handle_check_for_changes():
             )
     outbound_entries = _filter_check_for_changes_entries(entries, filtered_ids)
     if not outbound_entries:
-        return jsonify([])
+        return jsonify(zzwb_ids)
 
     outbound_body = json.dumps(
         outbound_entries, separators=(",", ":")
@@ -879,7 +1003,7 @@ def _handle_check_for_changes():
     response_ids = _check_for_changes_response_content_ids(upstream_entries)
     if response_ids is None:
         log.warning("Discarding an unrecognized Kobo checkforchanges response")
-        return jsonify([])
+        return jsonify(zzwb_ids)
 
     for index, content_id in enumerate(response_ids):
         ownership = resolve_entitlement_ownership(content_id)
@@ -895,7 +1019,9 @@ def _handle_check_for_changes():
                 authority_status=_capture_authority_status(ownership),
                 action="suppressed" if is_filtered else "returned",
             )
-    return jsonify(_filter_check_for_changes_entries(upstream_entries, filtered_ids))
+    return jsonify(
+        _filter_check_for_changes_entries(upstream_entries, filtered_ids) + zzwb_ids
+    )
 
 
 @csrf.exempt
