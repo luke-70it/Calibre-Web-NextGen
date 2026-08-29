@@ -23,6 +23,8 @@ range (1.x–3.x).
 """
 import pathlib
 import inspect
+import html as html_lib
+import re
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import MagicMock, patch
 
@@ -44,7 +46,8 @@ def _seed_bundle(tmp_path):
     """A minimal built index.html so the shell serves 200 (the Fast CI job never
     runs the Vite build). Mirrors the test_spa_shell.py / test_571 fixture."""
     (tmp_path / "index.html").write_text(
-        "<!doctype html><title>Calibre-Web NextGen</title><div id=root></div>")
+        "<!doctype html><html><head><title>Calibre-Web NextGen</title>"
+        "</head><body><div id=root></div></body></html>")
     monkey = pytest.MonkeyPatch()
     monkey.setattr(spa_mod, "_SPA_DIR", str(tmp_path))
     monkey.setenv("CWNG_SPA", "1")
@@ -130,6 +133,67 @@ def _unauthorized_login_app(tmp_path):
         return "PRIVATE"
 
     return app, web_mod, monkey
+
+
+def _no_js_bridge_app(tmp_path, authenticated):
+    """Real SPA/web blueprints and LoginManager for the no-JS state machine."""
+    from cps.cw_login import LoginManager
+
+    app, web_mod, monkey = _login_app(tmp_path)
+    app.config["SESSION_PROTECTION"] = None
+    login_manager = LoginManager(app)
+    login_manager.login_view = "web.login"
+    user = MagicMock()
+    user.is_authenticated = True
+    user.is_active = True
+    user.is_anonymous = False
+    user.get_id.return_value = "7"
+    user.role_admin.return_value = False
+
+    @login_manager.user_loader
+    def _load_user(user_id, _random, _session_key):
+        return user if authenticated and user_id == "7" else None
+
+    return app, web_mod, monkey
+
+
+_META_REFRESH_URL = re.compile(
+    r'<meta[^>]+http-equiv="refresh"[^>]+content="0;url=([^\"]+)"',
+    re.IGNORECASE,
+)
+
+
+def _walk_no_js_bridge(client, start="/app/", max_steps=12):
+    """Follow HTTP redirects and the shell's no-JS meta refresh.
+
+    Return the first Classic response. Re-entering a URL proves a redirect
+    cycle instead of relying on Playwright's eventual navigation timeout.
+    """
+    current = start
+    visited = []
+    for _step in range(max_steps):
+        assert current not in visited, (
+            "no-JS bridge entered a redirect loop: "
+            + " -> ".join([*visited, current])
+        )
+        visited.append(current)
+        response = client.get(current, headers=_HTML_ACCEPT)
+        body = response.get_data(as_text=True)
+        if "CLASSIC HOME" in body or "CLASSIC LOGIN" in body:
+            return response, visited
+        if response.status_code in (301, 302, 303, 307, 308):
+            current = response.headers["Location"]
+            continue
+        refresh = _META_REFRESH_URL.search(body)
+        assert refresh is not None, (
+            f"no-JS bridge stopped on non-Classic response {response.status_code} "
+            f"at {current}"
+        )
+        current = html_lib.unescape(refresh.group(1))
+    pytest.fail(
+        "no-JS bridge did not reach Classic within "
+        f"{max_steps} requests: {' -> '.join(visited)}"
+    )
 
 
 def _index_app(tmp_path):
@@ -670,6 +734,31 @@ def test_preferred_spa_login_next_cannot_change_app_owned_destination(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("prefix", "next_url", "expected"),
+    [
+        ("", "/?cwng_feedback=newui", True),
+        ("/cwa", "/cwa/?cwng_feedback=newui", True),
+        ("", "//evil.example/?cwng_feedback=newui", False),
+        ("", "https://evil.example/?cwng_feedback=newui", False),
+        ("", "/\\evil?cwng_feedback=newui", False),
+        ("/cwa", "/?cwng_feedback=newui", False),
+        ("/cwa", "/other/?cwng_feedback=newui", False),
+        ("/cwa", "/cwa/?cwng_feedback=other", False),
+        ("/cwa", "/cwa/?cwng_feedback=newui&extra=1", False),
+        ("/cwa", "/cwa/?cwng_feedback=newui#fragment", False),
+    ],
+)
+def test_classic_fallback_next_marker_is_fixed_and_prefix_scoped(
+        prefix, next_url, expected):
+    """Only the server-emitted, app-owned no-JS marker selects Classic login."""
+    app = flask.Flask(__name__)
+    with app.test_request_context("/login", environ_overrides={
+            "SCRIPT_NAME": prefix}):
+        assert spa_mod.classic_fallback_requested_from_next(next_url) is expected
+
+
+@pytest.mark.unit
 def test_real_unauthorized_login_redirect_drains_classic_flash(tmp_path):
     """#1959: the SPA login cannot display Flask-Login's login message.
 
@@ -708,6 +797,78 @@ def test_real_unauthorized_login_redirect_drains_classic_flash(tmp_path):
                 "next": ["/private-book"]}
             with client.session_transaction() as sess:
                 assert sess.get("_flashes", []) == []
+    finally:
+        monkey.undo()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("anonymous_browsing", "authenticated", "terminal_body"),
+    [
+        (1, False, "CLASSIC HOME"),
+        (0, False, "CLASSIC LOGIN"),
+        (1, True, "CLASSIC HOME"),
+        (0, True, "CLASSIC HOME"),
+    ],
+)
+def test_no_js_bridge_reaches_sticky_classic_for_every_auth_combination(
+        tmp_path, anonymous_browsing, authenticated, terminal_body):
+    """A no-JS shell must terminate on a usable Classic surface.
+
+    This walks the production route chain that CI exposed: shell meta refresh
+    -> feedback index -> login-required redirect -> login preference routing.
+    In particular, an unauthenticated visitor with anonymous browsing disabled
+    must not be sent back to the SPA with the fallback marker nested in ``next``.
+    The other three combinations pin the already-correct direct Classic path.
+    """
+    app, web_mod, monkey = _no_js_bridge_app(tmp_path, authenticated)
+    displayed_flashes = []
+
+    def _classic_login():
+        displayed_flashes.extend(flask.get_flashed_messages(with_categories=True))
+        return "CLASSIC LOGIN"
+
+    try:
+        with patch.object(web_mod.config, "config_anonbrowse",
+                          anonymous_browsing, create=True), \
+             patch.object(web_mod.config, "config_login_type", 0,
+                          create=True), \
+             patch.object(web_mod.config,
+                          "config_allow_reverse_proxy_header_login", False,
+                          create=True), \
+             patch.object(web_mod.config, "config_disable_standard_login",
+                          False, create=True), \
+             patch.object(web_mod.config,
+                          "config_enable_oauth_auto_forward", False,
+                          create=True), \
+             patch.object(web_mod, "render_books_list",
+                          return_value="CLASSIC HOME"), \
+             patch.object(web_mod, "render_login",
+                          side_effect=_classic_login):
+            client = app.test_client()
+            if authenticated:
+                with client.session_transaction() as sess:
+                    sess["_user_id"] = "7"
+                    sess["_fresh"] = True
+                    sess["_id"] = "test-session"
+                    sess["_random"] = "test-random"
+
+            response, visited = _walk_no_js_bridge(client)
+
+            assert response.get_data(as_text=True) == terminal_body
+            assert "/?cwng_feedback=newui" in visited
+            cookies = _set_cookie(response)
+            assert "cwng_prefer_classic=1" in cookies
+            assert "cwng_prefer_spa=" in cookies
+
+            # A fresh navigation with only the cookie jar retained must stay on
+            # Classic; authenticated /login redirects through the real index.
+            fresh, _ = _walk_no_js_bridge(client, start="/login")
+            assert fresh.get_data(as_text=True).startswith("CLASSIC ")
+
+            if not anonymous_browsing and not authenticated:
+                assert displayed_flashes == [
+                    ("message", "Please log in to access this page.")]
     finally:
         monkey.undo()
 

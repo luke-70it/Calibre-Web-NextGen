@@ -5,6 +5,7 @@ import json
 import os
 import re
 from html import escape as html_escape
+from urllib.parse import parse_qsl, urlsplit
 from flask import Blueprint, request, Response, abort, current_app
 from werkzeug.datastructures import MIMEAccept
 from werkzeug.http import parse_accept_header
@@ -185,6 +186,28 @@ def spa_login_default_supported():
         and not bool(getattr(
             config, "config_allow_reverse_proxy_header_login", False))
     )
+
+
+def classic_fallback_requested_from_next(next_url):
+    """Whether ``next`` is the exact no-JS Classic fallback emitted by us.
+
+    On login-required instances, the feedback index is intercepted by the auth
+    decorator before it can stamp the Classic cookie. Flask-Login then nests
+    that fixed feedback URL in ``/login?next=...``. Recognize only the local,
+    prefix-scoped marker so the login route can finish the no-JS handoff instead
+    of routing back to the SPA and forming a cycle. This never redirects to
+    ``next``; it only selects the Classic login response.
+    """
+    if not next_url:
+        return False
+    candidate = urlsplit(next_url)
+    if candidate.scheme or candidate.netloc or candidate.fragment:
+        return False
+    expected_path = _mount_prefix() + "/"
+    if candidate.path != expected_path:
+        return False
+    return parse_qsl(candidate.query, keep_blank_values=True) == [
+        ("cwng_feedback", "newui")]
 
 
 def _browser_document_html_request():

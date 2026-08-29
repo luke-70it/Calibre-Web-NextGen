@@ -2952,6 +2952,18 @@ def login():
     if config.config_login_type != constants.LOGIN_OAUTH:
         oauth_auto_redirect.clear_auto_redirect_state(flask_session)
 
+    # A no-JS browser reaches the fixed Classic feedback URL from the SPA
+    # shell. On login-required instances the index decorator redirects here
+    # before index() can stamp the opt-out, with that URL nested in ``next``.
+    # Finish the handoff on the Classic login surface; sending it back to the
+    # SPA would repeat shell -> feedback index -> login forever. The predicate
+    # accepts only our prefix-scoped marker and never redirects to ``next``.
+    if spa.classic_fallback_requested_from_next(request.args.get("next")):
+        response = make_response(render_login())
+        spa.stamp_prefer_classic_cookie(response)
+        spa.clear_prefer_spa_cookie(response)
+        return response
+
     # #908: the UI preference is per-browser, not per-user, so it remains readable
     # after logout. Route an anonymous browser into the SPA's logged-out tree by
     # default only when that tree can authenticate the configured login mode; an
