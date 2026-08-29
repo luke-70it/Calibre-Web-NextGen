@@ -4357,6 +4357,10 @@ msgid "Add identifier"
 msgstr "Identificatiecode toevoegen"
 
 #: cps/spa_strings.py
+msgid "Add link"
+msgstr "Link toevoegen"
+
+#: cps/spa_strings.py
 msgid "Add note"
 msgstr "Notitie toevoegen"
 
@@ -4419,6 +4423,10 @@ msgstr "Elk label"
 #: cps/spa_strings.py
 msgid "Apply metadata"
 msgstr "Metadata toepassen"
+
+#: cps/spa_strings.py cps/templates/book_edit.html
+msgid "Apply"
+msgstr "Toepassen"
 
 #: cps/spa_strings.py
 msgid "Apply selected"
@@ -4487,6 +4495,10 @@ msgid "Auto-create users on first login"
 msgstr "Gebruikers automatisch aanmaken bij eerste aanmelding"
 
 #: cps/spa_strings.py
+msgid "Back to formatting"
+msgstr "Terug naar opmaak"
+
+#: cps/spa_strings.py
 msgid "Back to library"
 msgstr "Terug naar bibliotheek"
 
@@ -4509,6 +4521,10 @@ msgstr "Bèta"
 #: cps/spa_strings.py cps/templates/read.html
 msgid "Black"
 msgstr "Zwart"
+
+#: cps/spa_strings.py
+msgid "Bold"
+msgstr "Vet"
 
 #: cps/spa_strings.py
 msgid "Book default"
@@ -4552,6 +4568,10 @@ msgstr ""
 #: cps/spa_strings.py
 msgid "Built-in providers (leave blank to disable):"
 msgstr "Ingebouwde providers (laat leeg om uit te schakelen):"
+
+#: cps/spa_strings.py
+msgid "Bulleted list"
+msgstr "Lijst met opsommingstekens"
 
 #: cps/spa_strings.py
 msgid "CA certificate path"
@@ -4633,6 +4653,10 @@ msgid "Clear default"
 msgstr "Standaard wissen"
 
 #: cps/spa_strings.py
+msgid "Clear formatting"
+msgstr "Opmaak wissen"
+
+#: cps/spa_strings.py
 msgid "Clear selection"
 msgstr "Selectie wissen"
 
@@ -4651,6 +4675,10 @@ msgstr "Client geheim (laat leeg om te behouden)"
 #: cps/spa_strings.py
 msgid "Close reader"
 msgstr "Lezer sluiten"
+
+#: cps/spa_strings.py
+msgid "Code"
+msgstr "Code"
 
 #: cps/spa_strings.py
 msgid "Columns"
@@ -4993,6 +5021,10 @@ msgid "Description"
 msgstr "Omschrijving"
 
 #: cps/spa_strings.py
+msgid "Description formatting"
+msgstr "Opmaak van beschrijving"
+
+#: cps/spa_strings.py
 msgid "Device"
 msgstr "Apparaat"
 
@@ -5102,6 +5134,10 @@ msgstr "Randspiegeling — breid het artwork uit (aanbevolen)"
 #: cps/templates/user_table.html
 msgid "Edit"
 msgstr "Bewerken"
+
+#: cps/spa_strings.py
+msgid "Edit HTML"
+msgstr "HTML bewerken"
 
 #: cps/spa_strings.py
 msgid "Edit note"
@@ -5272,6 +5308,10 @@ msgid "Formats — include"
 msgstr "Formaten — opnemen"
 
 #: cps/spa_strings.py
+msgid "Formatting is kept where the book page supports it."
+msgstr "Opmaak blijft behouden waar de boekpagina dit ondersteunt."
+
+#: cps/spa_strings.py
 msgid "From address"
 msgstr "Van-adres"
 
@@ -5339,6 +5379,10 @@ msgstr "Heeft pen- of tekennotities"
 #: cps/spa_strings.py
 msgid "Header name"
 msgstr "Header naam"
+
+#: cps/spa_strings.py
+msgid "Heading"
+msgstr "Kop"
 
 #: cps/spa_strings.py
 msgid "Help & support"
@@ -5457,6 +5501,10 @@ msgstr ""
 "interface."
 
 #: cps/spa_strings.py
+msgid "Italic"
+msgstr "Cursief"
+
+#: cps/spa_strings.py
 msgid "KOReader"
 msgstr "KOReader"
 
@@ -5530,6 +5578,10 @@ msgstr "Bibliotheekinstellingen"
 #: cps/spa_strings.py cps/templates/read.html
 msgid "Line height"
 msgstr "Regelhoogte"
+
+#: cps/spa_strings.py
+msgid "Link address"
+msgstr "Linkadres"
 
 #: cps/spa_strings.py
 msgid "Load more"
@@ -5876,6 +5928,14 @@ msgstr ""
 "herstelbewijs — het verandert nog niets aan wat je Kobo ontvangt."
 
 #: cps/spa_strings.py
+msgid "Nothing to preview yet."
+msgstr "Nog niets om te tonen."
+
+#: cps/spa_strings.py
+msgid "Numbered list"
+msgstr "Genummerde lijst"
+
+#: cps/spa_strings.py
 msgid "Oldest"
 msgstr "Oudste"
 
@@ -6026,6 +6086,11 @@ msgstr "Poort"
 msgid "Preparing your magic link…"
 msgstr "Je magische link voorbereiden…"
 
+#: cps/spa_strings.py cps/templates/duplicates.html
+#: cps/templates/kobo_reconcile.html
+msgid "Preview"
+msgstr "Voorbeeld"
+
 #: cps/spa_strings.py
 msgid "Previous page"
 msgstr "Vorige pagina"
@@ -6045,6 +6110,10 @@ msgstr "Gepubliceerd na"
 #: cps/spa_strings.py
 msgid "Published before"
 msgstr "Gepubliceerd voor"
+
+#: cps/spa_strings.py
+msgid "Quote"
+msgstr "Citaat"
 
 #: cps/spa_strings.py
 msgid "Random books shown"
@@ -6137,6 +6206,10 @@ msgstr "Markering verwijderen"
 #: cps/spa_strings.py
 msgid "Remove identifier"
 msgstr "Identifier verwijderen"
+
+#: cps/spa_strings.py
+msgid "Remove link"
+msgstr "Link verwijderen"
 
 #: cps/spa_strings.py
 msgid "Remove note"
@@ -6588,6 +6661,10 @@ msgstr "Status"
 #: cps/templates/cover_picker.html
 msgid "Stretch to fill — no border, slight distortion"
 msgstr "Uitrekken om te vullen — geen rand, lichte vervorming"
+
+#: cps/spa_strings.py
+msgid "Subheading"
+msgstr "Subkop"
 
 #: cps/spa_strings.py
 msgid "Support on Ko-fi →"
@@ -7110,6 +7187,46 @@ msgid ""
 msgstr ""
 "{n} markeringen en notities zijn op dit apparaat gemaakt. Ze worden niet "
 "verwijderd. Hun herkomstgeschiedenis blijft bewaard."
+
+#: cps/spa_strings.py
+#, python-brace-format
+msgid "{n} books in latest inventory"
+msgstr "{n} boeken in de nieuwste inventaris"
+
+#: cps/spa_strings.py
+msgid "Could not load this device library."
+msgstr "Kan de bibliotheek van dit apparaat niet laden."
+
+#: cps/spa_strings.py
+msgid "Hide device library"
+msgstr "Apparaatbibliotheek verbergen"
+
+#: cps/spa_strings.py
+msgid "Loading device library…"
+msgstr "Apparaatbibliotheek laden…"
+
+#: cps/spa_strings.py
+msgid "No books were reported in the latest device inventory."
+msgstr "Er zijn geen boeken gemeld in de nieuwste apparaatinventaris."
+
+#: cps/spa_strings.py
+msgid "Not matched to this library"
+msgstr "Niet gekoppeld aan deze bibliotheek"
+
+#: cps/spa_strings.py
+msgid "On this device"
+msgstr "Op dit apparaat"
+
+#: cps/spa_strings.py
+#, python-brace-format
+msgid "Showing {shown} of {total} books from the latest device inventory."
+msgstr ""
+"{shown} van {total} boeken uit de nieuwste apparaatinventaris worden "
+"weergegeven."
+
+#: cps/spa_strings.py
+msgid "View device library"
+msgstr "Apparaatbibliotheek bekijken"
 
 #: cps/spa_strings.py
 #, python-brace-format
@@ -8534,10 +8651,6 @@ msgstr ""
 
 #: cps/templates/book_edit.html
 msgid "Cover size — smallest first"
-msgstr ""
-
-#: cps/templates/book_edit.html
-msgid "Apply"
 msgstr ""
 
 #: cps/templates/book_edit.html
@@ -11505,10 +11618,6 @@ msgstr ""
 #: cps/templates/duplicates.html
 msgid "Keep Largest File Size - Keep book with largest total file size"
 msgstr ""
-
-#: cps/templates/duplicates.html cps/templates/kobo_reconcile.html
-msgid "Preview"
-msgstr "Voorbeeld"
 
 #: cps/templates/duplicates.html
 msgid "Execute Resolution"

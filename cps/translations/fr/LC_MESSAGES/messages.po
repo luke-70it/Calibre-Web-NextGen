@@ -4482,6 +4482,10 @@ msgid "Add identifier"
 msgstr "Ajouter un identifiant"
 
 #: cps/spa_strings.py
+msgid "Add link"
+msgstr "Ajouter un lien"
+
+#: cps/spa_strings.py
 msgid "Add note"
 msgstr "Ajouter une note"
 
@@ -4544,6 +4548,10 @@ msgstr "Toutes les étiquettes"
 #: cps/spa_strings.py
 msgid "Apply metadata"
 msgstr "Appliquer les métadonnées"
+
+#: cps/spa_strings.py cps/templates/book_edit.html
+msgid "Apply"
+msgstr "Appliquer"
 
 #: cps/spa_strings.py
 msgid "Apply selected"
@@ -4612,6 +4620,10 @@ msgid "Auto-create users on first login"
 msgstr "Créer les utilisateurs automatiquement à la première connexion"
 
 #: cps/spa_strings.py
+msgid "Back to formatting"
+msgstr "Retour à la mise en forme"
+
+#: cps/spa_strings.py
 msgid "Back to library"
 msgstr "Retour à la bibliothèque"
 
@@ -4634,6 +4646,10 @@ msgstr "Bêta"
 #: cps/spa_strings.py cps/templates/read.html
 msgid "Black"
 msgstr "Noir"
+
+#: cps/spa_strings.py
+msgid "Bold"
+msgstr "Gras"
 
 #: cps/spa_strings.py
 msgid "Book default"
@@ -4677,6 +4693,10 @@ msgstr ""
 #: cps/spa_strings.py
 msgid "Built-in providers (leave blank to disable):"
 msgstr "Sources intégrées (laisser vide pour désactiver) :"
+
+#: cps/spa_strings.py
+msgid "Bulleted list"
+msgstr "Liste à puces"
 
 #: cps/spa_strings.py
 msgid "CA certificate path"
@@ -4758,6 +4778,10 @@ msgid "Clear default"
 msgstr "Effacer la valeur par défaut"
 
 #: cps/spa_strings.py
+msgid "Clear formatting"
+msgstr "Effacer la mise en forme"
+
+#: cps/spa_strings.py
 msgid "Clear selection"
 msgstr "Effacer la sélection"
 
@@ -4776,6 +4800,10 @@ msgstr "Secret client (laisser vide pour conserver)"
 #: cps/spa_strings.py
 msgid "Close reader"
 msgstr "Fermer le lecteur"
+
+#: cps/spa_strings.py
+msgid "Code"
+msgstr "Code"
 
 #: cps/spa_strings.py
 msgid "Columns"
@@ -5120,6 +5148,10 @@ msgid "Description"
 msgstr "Description"
 
 #: cps/spa_strings.py
+msgid "Description formatting"
+msgstr "Mise en forme de la description"
+
+#: cps/spa_strings.py
 msgid "Device"
 msgstr "Appareil"
 
@@ -5230,6 +5262,10 @@ msgstr "Miroir de bord — prolonge l’illustration (recommandé)"
 #: cps/templates/user_table.html
 msgid "Edit"
 msgstr "Éditer"
+
+#: cps/spa_strings.py
+msgid "Edit HTML"
+msgstr "Modifier le HTML"
 
 #: cps/spa_strings.py
 msgid "Edit note"
@@ -5400,6 +5436,11 @@ msgid "Formats — include"
 msgstr "Formats — inclure"
 
 #: cps/spa_strings.py
+msgid "Formatting is kept where the book page supports it."
+msgstr ""
+"La mise en forme est conservée là où la page du livre la prend en charge."
+
+#: cps/spa_strings.py
 msgid "From address"
 msgstr "Adresse de l’expéditeur"
 
@@ -5467,6 +5508,10 @@ msgstr "Contient des notes au stylet ou des dessins"
 #: cps/spa_strings.py
 msgid "Header name"
 msgstr "Nom de l’en-tête"
+
+#: cps/spa_strings.py
+msgid "Heading"
+msgstr "Titre"
 
 #: cps/spa_strings.py
 msgid "Help & support"
@@ -5585,6 +5630,10 @@ msgstr ""
 "classique."
 
 #: cps/spa_strings.py
+msgid "Italic"
+msgstr "Italique"
+
+#: cps/spa_strings.py
 msgid "KOReader"
 msgstr "KOReader"
 
@@ -5658,6 +5707,10 @@ msgstr "Paramètres de la bibliothèque"
 #: cps/spa_strings.py cps/templates/read.html
 msgid "Line height"
 msgstr "Interligne"
+
+#: cps/spa_strings.py
+msgid "Link address"
+msgstr "Adresse du lien"
 
 #: cps/spa_strings.py
 msgid "Load more"
@@ -6012,6 +6065,14 @@ msgstr ""
 "ce que votre Kobo reçoit."
 
 #: cps/spa_strings.py
+msgid "Nothing to preview yet."
+msgstr "Rien à prévisualiser pour l'instant."
+
+#: cps/spa_strings.py
+msgid "Numbered list"
+msgstr "Liste numérotée"
+
+#: cps/spa_strings.py
 msgid "Oldest"
 msgstr "Plus ancien"
 
@@ -6164,6 +6225,11 @@ msgstr "Port"
 msgid "Preparing your magic link…"
 msgstr "Préparation de votre lien magique…"
 
+#: cps/spa_strings.py cps/templates/duplicates.html
+#: cps/templates/kobo_reconcile.html
+msgid "Preview"
+msgstr "Aperçu"
+
 #: cps/spa_strings.py
 msgid "Previous page"
 msgstr "Page précédente"
@@ -6183,6 +6249,10 @@ msgstr "Publié après le"
 #: cps/spa_strings.py
 msgid "Published before"
 msgstr "Publié avant le"
+
+#: cps/spa_strings.py
+msgid "Quote"
+msgstr "Citation"
 
 #: cps/spa_strings.py
 msgid "Random books shown"
@@ -6275,6 +6345,10 @@ msgstr "Supprimer le surlignage"
 #: cps/spa_strings.py
 msgid "Remove identifier"
 msgstr "Supprimer l’identifiant"
+
+#: cps/spa_strings.py
+msgid "Remove link"
+msgstr "Supprimer le lien"
 
 #: cps/spa_strings.py
 msgid "Remove note"
@@ -6729,6 +6803,10 @@ msgstr "Statut"
 #: cps/templates/cover_picker.html
 msgid "Stretch to fill — no border, slight distortion"
 msgstr "Étirer pour remplir — sans bordure, légère distorsion"
+
+#: cps/spa_strings.py
+msgid "Subheading"
+msgstr "Sous-titre"
 
 #: cps/spa_strings.py
 msgid "Support on Ko-fi →"
@@ -7252,6 +7330,46 @@ msgid ""
 msgstr ""
 "{n} surlignages et notes ont été créés sur cet appareil. Ils ne sont pas "
 "supprimés. Leur historique d'origine est conservé."
+
+#: cps/spa_strings.py
+#, python-brace-format
+msgid "{n} books in latest inventory"
+msgstr "{n} livres dans le dernier inventaire"
+
+#: cps/spa_strings.py
+msgid "Could not load this device library."
+msgstr "Impossible de charger la bibliothèque de cet appareil."
+
+#: cps/spa_strings.py
+msgid "Hide device library"
+msgstr "Masquer la bibliothèque de l’appareil"
+
+#: cps/spa_strings.py
+msgid "Loading device library…"
+msgstr "Chargement de la bibliothèque de l’appareil…"
+
+#: cps/spa_strings.py
+msgid "No books were reported in the latest device inventory."
+msgstr "Aucun livre n’a été signalé dans le dernier inventaire de l’appareil."
+
+#: cps/spa_strings.py
+msgid "Not matched to this library"
+msgstr "Aucune correspondance dans cette bibliothèque"
+
+#: cps/spa_strings.py
+msgid "On this device"
+msgstr "Sur cet appareil"
+
+#: cps/spa_strings.py
+#, python-brace-format
+msgid "Showing {shown} of {total} books from the latest device inventory."
+msgstr ""
+"Affichage de {shown} livres sur {total} dans le dernier inventaire de "
+"l’appareil."
+
+#: cps/spa_strings.py
+msgid "View device library"
+msgstr "Afficher la bibliothèque de l’appareil"
 
 #: cps/spa_strings.py
 #, python-brace-format
@@ -8676,10 +8794,6 @@ msgstr ""
 
 #: cps/templates/book_edit.html
 msgid "Cover size — smallest first"
-msgstr ""
-
-#: cps/templates/book_edit.html
-msgid "Apply"
 msgstr ""
 
 #: cps/templates/book_edit.html
@@ -11820,10 +11934,6 @@ msgid "Keep Largest File Size - Keep book with largest total file size"
 msgstr ""
 "Conserver le fichier le plus volumineux - Conserver le livre dont la taille "
 "totale est la plus importante"
-
-#: cps/templates/duplicates.html cps/templates/kobo_reconcile.html
-msgid "Preview"
-msgstr "Aperçu"
 
 #: cps/templates/duplicates.html
 msgid "Execute Resolution"
