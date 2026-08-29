@@ -1467,6 +1467,94 @@ def test_unsuppressed_reading_state_count_and_cursor_remain_one_shot(
     assert sync_harness.session.query(ub.KoboDeviceBookEntitlement).count() == 0
 
 
+def test_rehydrate_emits_past_advanced_cursor_clears_atomically_and_ignores_exact_replay(
+    sync_harness, monkeypatch,
+):
+    """M3's device latch repairs a download without reopening #1925/#1953."""
+    from cps import kobo, ub
+
+    monkeypatch.setattr(
+        kobo.config,
+        "config_kobo_suppress_replayed_entitlements",
+        True,
+    )
+    first = sync_harness.sync()
+    assert len(_entitlements(first)) == 1
+    position = sync_harness.session.query(ub.DeviceReadingPosition).one()
+    assert position.device_id == sync_harness.device.id
+    assert position.rehydrate_needed is True
+
+    modified = datetime(2026, 8, 28, 12, 30, 0)
+    _add_reading_state(sync_harness, modified, progress=48.0)
+    cursor_ahead = modified + timedelta(days=1)
+    advanced = kobo.SyncToken.SyncToken.from_headers({
+        sync_harness.token_header: first.headers[sync_harness.token_header],
+    })
+    advanced.reading_state_last_modified = cursor_ahead
+
+    rehydrated = sync_harness.sync(advanced.build_sync_token())
+    states = _changed_reading_states(rehydrated)
+    assert len(states) == 1
+    assert states[0]["EntitlementId"] == sync_harness.book.uuid
+    assert states[0]["CurrentBookmark"]["ProgressPercent"] == 48
+    sync_harness.session.expire_all()
+    assert sync_harness.session.query(
+        ub.DeviceReadingPosition.rehydrate_needed,
+    ).scalar() is False
+
+    response_token = kobo.SyncToken.SyncToken.from_headers({
+        sync_harness.token_header:
+            rehydrated.headers[sync_harness.token_header],
+    })
+    assert response_token.reading_state_last_modified == cursor_ahead
+    assert _changed_reading_states(sync_harness.sync(
+        rehydrated.headers[sync_harness.token_header],
+    )) == []
+
+    # Select the book again with a stale but valid CWNG cursor. Layer 2
+    # suppresses the exact entitlement; that suppression must not re-arm every
+    # device position during a #1953-style renderer replay.
+    stale = kobo.SyncToken.SyncToken(
+        reading_state_last_modified=cursor_ahead,
+    ).build_sync_token()
+    replay = sync_harness.sync(stale)
+    assert _entitlements(replay) == []
+    sync_harness.session.expire_all()
+    assert sync_harness.session.query(
+        ub.DeviceReadingPosition.rehydrate_needed,
+    ).scalar() is False
+
+
+def test_rehydrate_latch_survives_checked_sync_commit_failure(
+    sync_harness, monkeypatch,
+):
+    """A response that cannot commit must leave the repair queued."""
+    from werkzeug.exceptions import ServiceUnavailable
+    from cps import kobo, ub
+
+    first = sync_harness.sync()
+    assert len(_entitlements(first)) == 1
+    modified = datetime(2026, 8, 28, 12, 30, 0)
+    _add_reading_state(sync_harness, modified, progress=52.0)
+    advanced = kobo.SyncToken.SyncToken.from_headers({
+        sync_harness.token_header: first.headers[sync_harness.token_header],
+    })
+    advanced.reading_state_last_modified = modified + timedelta(days=1)
+
+    def reject_commit(*_args, **_kwargs):
+        sync_harness.session.rollback()
+        return False
+
+    monkeypatch.setattr(ub, "session_commit", reject_commit)
+    with pytest.raises(ServiceUnavailable):
+        sync_harness.sync(advanced.build_sync_token())
+
+    sync_harness.session.expire_all()
+    assert sync_harness.session.query(
+        ub.DeviceReadingPosition.rehydrate_needed,
+    ).scalar() is True
+
+
 def test_payload_stabilization_replays_byte_identically_with_layer2_off(
     sync_harness,
 ):
