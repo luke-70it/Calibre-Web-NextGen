@@ -1627,28 +1627,23 @@ def _bookmark_matches_annotation(bm, content_id, row) -> bool:
 def _apply_imported_bookmark(row, bm, content_id, *, device_modified_at,
                              origin_device_id):
     """Apply the content half of an already-authorised newer device edit."""
-    imported_values = list(_bookmark_values(bm, content_id))
-    imported_values[5] = _imported_container_child_index(
-        row.start_container_child_index, imported_values[5],
+    row.highlighted_text = bm.text
+    row.note_text = bm.annotation
+    row.highlight_color = bm.color
+    row.content_id = content_id
+    row.start_container_path = bm.start_container_path
+    row.start_container_child_index = _imported_container_child_index(
+        row.start_container_child_index, bm.start_container_child_index,
     )
-    imported_values[8] = _imported_container_child_index(
-        row.end_container_child_index, imported_values[8],
+    row.start_offset = bm.start_offset
+    row.end_container_path = bm.end_container_path
+    row.end_container_child_index = _imported_container_child_index(
+        row.end_container_child_index, bm.end_container_child_index,
     )
-    (
-        row.highlighted_text,
-        row.note_text,
-        row.highlight_color,
-        row.content_id,
-        row.start_container_path,
-        row.start_container_child_index,
-        row.start_offset,
-        row.end_container_path,
-        row.end_container_child_index,
-        row.end_offset,
-        row.context_string,
-        row.chapter_progress,
-        row.annotation_type,
-    ) = imported_values
+    row.end_offset = bm.end_offset
+    row.context_string = bm.context_string
+    row.chapter_progress = bm.chapter_progress
+    row.annotation_type = to_storage_type(bm.annotation_type)
     row.client_modified_at = device_modified_at
     row.server_modified_at = datetime.now(timezone.utc)
     row.last_synced = datetime.now(timezone.utc)
