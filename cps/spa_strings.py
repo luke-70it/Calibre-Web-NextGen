@@ -181,6 +181,15 @@ _("Email Message Body")
 _("This Email has been sent via Calibre-Web NextGen.")
 _("Rated {rating} out of 5")
 _("More by {name}")
+_("Send to device")
+_("Device")
+_("Collects on the device's next sync.")
+_("Choose a device")
+_("Queueing…")
+_("Book queued for this device")
+_("This book is already queued for this device")
+_("This book is already on that device")
+_("Could not queue this book for the device.")
 
 # Bulk-selection toolbar (BulkBar.tsx) — previously unanchored AND written with
 # %(n)s, so they were dropped on re-extract and rendered the placeholder

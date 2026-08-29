@@ -38,6 +38,24 @@ msgstr ""
 "X-Generator: Poedit 3.8\n"
 
 #: cps/about.py cps/spa_strings.py
+msgid "Book queued for this device"
+msgstr "Livre mis en file d’attente pour cet appareil"
+
+msgid "Choose a device"
+msgstr "Choisir un appareil"
+
+msgid "Collects on the device's next sync."
+msgstr "L’appareil le récupérera lors de sa prochaine synchronisation."
+
+msgid "Could not queue this book for the device."
+msgstr "Impossible de mettre ce livre en file d’attente pour l’appareil."
+
+msgid "Queueing…"
+msgstr "Mise en file d’attente…"
+
+msgid "Send to device"
+msgstr "Envoyer vers l’appareil"
+
 msgid "Statistics"
 msgstr "Statistiques"
 
@@ -60,6 +78,12 @@ msgid "Success! Database Reconnected"
 msgstr "Bravo ! Base de données reconnectée"
 
 #: cps/admin.py
+msgid "This book is already on that device"
+msgstr "Ce livre se trouve déjà sur cet appareil"
+
+msgid "This book is already queued for this device"
+msgstr "Ce livre est déjà en file d’attente pour cet appareil"
+
 msgid "Unknown command"
 msgstr "Commande inconnue"
 

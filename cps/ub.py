@@ -1248,6 +1248,42 @@ class DeviceInventoryItem(Base):
     )
 
 
+class DeviceBookDelivery(Base):
+    """One idempotent wanted-book entry for a registered device.
+
+    ``book_id`` belongs to calibre's separate metadata database, so it is an
+    ordinary integer rather than a foreign key. Ownership is derived through
+    ``Device``; no duplicate user id is stored and the registry remains the
+    authority for binding an opaque client identity to an account.
+    """
+    __tablename__ = 'device_book_delivery'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(Integer, ForeignKey('device.id', ondelete='CASCADE'), nullable=False)
+    book_id = Column(Integer, nullable=False)
+    state = Column(String(24), nullable=False)
+    format = Column(String(16), nullable=True)
+    filename = Column(String(255), nullable=True)
+    expected_size = Column(Integer, nullable=True)
+    expected_checksum = Column(String(32), nullable=True)
+    queued_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    claimed_at = Column(DateTime, nullable=True)
+    claim_expires_at = Column(DateTime, nullable=True)
+    claim_token = Column(String(96), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    completed_at = Column(DateTime, nullable=True)
+    installed_lpath = Column(String(1024), nullable=True)
+    installed_checksum = Column(String(32), nullable=True)
+    installed_size = Column(Integer, nullable=True)
+    installed_mtime = Column(Integer, nullable=True)
+    failure_reason = Column(String(512), nullable=True)
+    device = relationship("Device")
+    __table_args__ = (
+        UniqueConstraint('device_id', 'book_id', name='uq_device_book_delivery_book'),
+        Index('ix_device_book_delivery_claim', 'device_id', 'state', 'claim_expires_at'),
+    )
+
+
 class AnnotationContentIdMigration(Base):
     """Exact undo journal for conservative content-id backfills."""
     __tablename__ = 'annotation_content_id_migration'
@@ -2015,6 +2051,7 @@ def add_missing_tables(engine, _session):
         ("user_library_book", UserLibraryBook.__table__),
         ("device_inventory_report", DeviceInventoryReport.__table__),
         ("device_inventory_item", DeviceInventoryItem.__table__),
+        ("device_book_delivery", DeviceBookDelivery.__table__),
     )
     kobo_entitlement_tables = (
         ("kobo_device_book_entitlement", KoboDeviceBookEntitlement.__table__),

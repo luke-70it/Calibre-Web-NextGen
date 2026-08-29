@@ -119,6 +119,7 @@ def test_the_parser_actually_finds_the_calls():
     calls = _client_calls()
     assert set(calls) == {
         "update_progress", "get_progress", "report_inventory",
+        "claim_delivery", "complete_delivery",
         "pull_annotations", "push_annotations",
     }
     assert "annotations" in calls["push_annotations"]
@@ -172,6 +173,21 @@ def test_inventory_declares_every_body_field_in_both_spore_contracts():
     assert set(spec["payload"]) == expected
     assert expected <= _expected_params(spec)
     assert _client_calls()["report_inventory"] == expected
+
+
+def test_delivery_calls_declare_every_body_field_in_both_spore_contracts():
+    expected = {
+        "claim_delivery": {"device", "device_id"},
+        "complete_delivery": {
+            "device", "device_id", "delivery_id", "claim_token",
+            "lpath", "checksum", "size", "mtime",
+        },
+    }
+    for method, fields in expected.items():
+        spec = _spec()[method]
+        assert set(spec["payload"]) == fields
+        assert fields <= _expected_params(spec)
+        assert _client_calls()[method] == fields
 
 
 @pytest.mark.parametrize("method", sorted(_spec()))

@@ -1,5 +1,6 @@
 local BookList = require("ui/widget/booklist")
 local ConfirmBox = require("ui/widget/confirmbox")
+local Delivery = require("delivery")
 local Device = require("device")
 local Dispatcher = require("dispatcher")
 local Event = require("ui/event")
@@ -49,6 +50,8 @@ local SYNC_STRATEGY = {
     SILENT  = 2,
     DISABLE = 3,
 }
+
+local DELIVERY_RECEIPTS_KEY = "cwngsync_delivery_receipts"
 
 
 -- Debounce push/pull attempts
@@ -220,7 +223,7 @@ function CWNGSync:onReaderReady()
     if self.settings.auto_sync then
         UIManager:nextTick(function()
             self:getProgress(true, false)
-            self:reportInventory(false, false)
+            self:collectDeliveries(false, false)
         end)
     end
     -- NOTE: Keep in mind that, on Android, turning on WiFi requires a focus switch, which will trip a Suspend/Resume pair.
@@ -428,6 +431,16 @@ If set to 0, updating progress based on page turns will be disabled.]]),
                 end,
                 callback = function()
                     self:reportInventory(true, true)
+                end,
+                separator = true,
+            },
+            {
+                text = _("Collect books queued for this device now"),
+                enabled_func = function()
+                    return self.settings.password ~= nil
+                end,
+                callback = function()
+                    self:collectDeliveries(true, true)
                 end,
                 separator = true,
             },
@@ -915,7 +928,7 @@ function CWNGSync:buildInventory(paths, root_path)
     return inventory
 end
 
-function CWNGSync:reportInventory(interactive, ensure_networking)
+function CWNGSync:reportInventory(interactive, ensure_networking, on_complete)
     if not self.settings.password then
         if interactive then
             UIManager:show(InfoMessage:new{ text = _("Please login before reporting this device's library.") })
@@ -957,6 +970,7 @@ function CWNGSync:reportInventory(interactive, ensure_networking)
                         timeout = 4,
                     })
                 end
+                if on_complete then on_complete(body) end
             else
                 logger.warn("CWNGSync: device inventory report failed", reason or "unknown error")
                 if interactive then
@@ -966,6 +980,188 @@ function CWNGSync:reportInventory(interactive, ensure_networking)
                     })
                 end
             end
+        end)
+end
+
+function CWNGSync:getDeliveryRootPath()
+    local function usableRoot(candidate)
+        return candidate and util.directoryExists(candidate) and candidate or nil
+    end
+    return usableRoot(G_reader_settings:readSetting("home_dir"))
+        or usableRoot(Device.home_dir)
+        or usableRoot(G_reader_settings:readSetting("lastdir"))
+        or usableRoot(self.ui and self.ui.file_chooser and self.ui.file_chooser.path)
+end
+
+function CWNGSync:getDeliveryReceipt(delivery_id)
+    local receipts = G_reader_settings:readSetting(DELIVERY_RECEIPTS_KEY) or {}
+    return receipts[tostring(delivery_id)]
+end
+
+function CWNGSync:persistDeliveryReceipt(receipt)
+    local receipts = G_reader_settings:readSetting(DELIVERY_RECEIPTS_KEY) or {}
+    receipts[tostring(receipt.delivery_id)] = receipt
+    G_reader_settings:saveSetting(DELIVERY_RECEIPTS_KEY, receipts)
+    if G_reader_settings.flush then
+        local ok, error_message = pcall(G_reader_settings.flush, G_reader_settings)
+        if not ok then return false, tostring(error_message) end
+    end
+    return true
+end
+
+function CWNGSync:clearDeliveryReceipt(delivery_id)
+    local receipts = G_reader_settings:readSetting(DELIVERY_RECEIPTS_KEY) or {}
+    receipts[tostring(delivery_id)] = nil
+    G_reader_settings:saveSetting(DELIVERY_RECEIPTS_KEY, receipts)
+    if G_reader_settings.flush then
+        pcall(G_reader_settings.flush, G_reader_settings)
+    end
+end
+
+
+function CWNGSync:collectDeliveries(
+        interactive, ensure_networking, remaining, collected, inventory_ready)
+    remaining = remaining or 20
+    collected = collected or 0
+    if not self.settings.username or not self.settings.password then
+        if interactive then promptLogin() end
+        return
+    end
+    if not ensureServerConfigured(self.settings.server) then return end
+    if ensure_networking and NetworkMgr:willRerunWhenOnline(function()
+            self:collectDeliveries(interactive, ensure_networking)
+        end) then
+        return
+    end
+
+    -- A fresh positive observation is the authority for "already here". Wait
+    -- for it to reach the server before claiming; launching both async calls
+    -- together creates exactly the duplicate-delivery race inventory prevents.
+    if not inventory_ready then
+        self:reportInventory(interactive, false, function()
+            self:collectDeliveries(interactive, false, remaining, collected, true)
+        end)
+        return
+    end
+
+    local root_path = self:getDeliveryRootPath()
+    if not root_path then
+        if interactive then
+            UIManager:show(InfoMessage:new{
+                text = _("Choose a device library folder before collecting queued books."),
+                timeout = 5,
+            })
+        end
+        return
+    end
+
+    local CWNGSyncClient = require("CWNGSyncClient")
+    local client = CWNGSyncClient:new{
+        service_url = self.settings.server .. "/kosync",
+        service_spec = self.path .. "/api.json",
+    }
+    client:claim_delivery(
+        self.settings.username,
+        self.settings.password,
+        Device.model,
+        self.device_id,
+        function(ok, body, reason)
+            if not ok or type(body) ~= "table" then
+                logger.warn("CWNGSync: delivery claim failed", reason or "unknown error")
+                if interactive then
+                    UIManager:show(InfoMessage:new{
+                        text = T(_("Queued-book check failed: %1"), reason or _("unknown error")),
+                        timeout = 5,
+                    })
+                end
+                return
+            end
+            local delivery = body.delivery
+            if type(delivery) ~= "table" then
+                if collected > 0 then
+                    self:reportInventory(false, false)
+                elseif interactive then
+                    UIManager:show(InfoMessage:new{
+                        text = _("No books are queued for this device."),
+                        timeout = 3,
+                    })
+                end
+                return
+            end
+
+            local installed, install_error = Delivery.install(delivery, root_path, {
+                receipt = self:getDeliveryReceipt(delivery.id),
+                attributes = lfs.attributes,
+                digest = function(path) return self:getDocumentDigest(path) end,
+                sanitize = function(name, path)
+                    return util.getSafeFilename(name, path, 230, 0)
+                end,
+                remove = util.removeFile,
+                rename = os.rename,
+                persist_receipt = function(receipt)
+                    return self:persistDeliveryReceipt(receipt)
+                end,
+                download = function(temp_path)
+                    return client:download_delivery(
+                        self.settings.username,
+                        self.settings.password,
+                        Device.model,
+                        self.device_id,
+                        delivery,
+                        temp_path)
+                end,
+            })
+            if not installed then
+                logger.warn("CWNGSync: queued book was not installed", install_error)
+                if interactive then
+                    UIManager:show(InfoMessage:new{
+                        text = T(_("Queued book could not be installed: %1"),
+                            install_error or _("unknown error")),
+                        timeout = 6,
+                    })
+                end
+                return
+            end
+
+            self:refreshLibraryViews({ installed.path })
+            client:complete_delivery(
+                self.settings.username,
+                self.settings.password,
+                Device.model,
+                self.device_id,
+                delivery.id,
+                delivery.claim_token,
+                installed.lpath,
+                installed.checksum,
+                installed.size,
+                installed.mtime,
+                function(completed, _complete_body, complete_reason)
+                    if not completed then
+                        logger.warn("CWNGSync: queued book completion failed",
+                            complete_reason or "unknown error")
+                        if interactive then
+                            UIManager:show(InfoMessage:new{
+                                text = T(_("Book installed, but confirmation failed: %1"),
+                                    complete_reason or _("unknown error")),
+                                timeout = 6,
+                            })
+                        end
+                        return
+                    end
+                    self:clearDeliveryReceipt(delivery.id)
+                    logger.info("CWNGSync: queued book installed", installed.lpath)
+                    if remaining > 1 then
+                        UIManager:nextTick(function()
+                            self:collectDeliveries(
+                                interactive, false, remaining - 1, collected + 1, true)
+                        end)
+                    elseif interactive then
+                        UIManager:show(InfoMessage:new{
+                            text = T(_("Collected %1 queued books."), collected + 1),
+                            timeout = 4,
+                        })
+                    end
+                end)
         end)
 end
 
@@ -1656,6 +1852,7 @@ function CWNGSync:_onNetworkConnected()
     UIManager:scheduleIn(0.5, function()
         -- Network is supposed to be on already, don't wrap this in willRerunWhenOnline
         self:getProgress(false, false)
+        self:collectDeliveries(false, false)
     end)
 end
 

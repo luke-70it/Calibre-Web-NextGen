@@ -156,6 +156,7 @@ def _device_json(device, annotation_count=0, inventory_report=None):
             inventory_report.observed_at.isoformat()
             if inventory_report and inventory_report.observed_at else None
         ),
+        "can_receive_books": device.kind in ("kobo", "koreader"),
         "active": bool(device.active),
     }
 
