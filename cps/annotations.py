@@ -1546,13 +1546,30 @@ def _matching_container_child_index(value):
     the child-index fields, which stores as ``NULL``.  Both the position
     converter and the web-reader locator consume either spelling as "use the
     selector path", so the recovery comparator must not invent a content
-    conflict from that structural transport difference.
+    conflict from that structural transport difference.  See the measured wire
+    behavior documented in ``cps/services/kobo_position.py:153``.
     """
     from .services.kobo_position import KOBO_SELECTOR_SENTINEL
 
     if value is None or value == KOBO_SELECTOR_SENTINEL:
         return None
     return value
+
+
+def _imported_container_child_index(existing, imported):
+    """Keep the stored spelling when an imported child index is equivalent.
+
+    An authorised device edit may replace real content, but it should not turn
+    a wire-written ``NULL`` into the equivalent device sentinel ``-99`` as a
+    side effect.  A genuinely different child index still comes from the newer
+    device row.
+    """
+    if (
+        _matching_container_child_index(existing)
+        == _matching_container_child_index(imported)
+    ):
+        return existing
+    return imported
 
 
 def _matching_annotation_values(values):
@@ -1610,6 +1627,13 @@ def _bookmark_matches_annotation(bm, content_id, row) -> bool:
 def _apply_imported_bookmark(row, bm, content_id, *, device_modified_at,
                              origin_device_id):
     """Apply the content half of an already-authorised newer device edit."""
+    imported_values = list(_bookmark_values(bm, content_id))
+    imported_values[5] = _imported_container_child_index(
+        row.start_container_child_index, imported_values[5],
+    )
+    imported_values[8] = _imported_container_child_index(
+        row.end_container_child_index, imported_values[8],
+    )
     (
         row.highlighted_text,
         row.note_text,
@@ -1624,7 +1648,7 @@ def _apply_imported_bookmark(row, bm, content_id, *, device_modified_at,
         row.context_string,
         row.chapter_progress,
         row.annotation_type,
-    ) = _bookmark_values(bm, content_id)
+    ) = imported_values
     row.client_modified_at = device_modified_at
     row.server_modified_at = datetime.now(timezone.utc)
     row.last_synced = datetime.now(timezone.utc)
