@@ -539,7 +539,10 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Set up Docker Buildx
-        if: github.event_name == 'pull_request' && needs.changed_paths.outputs.build == 'true'
+        if: >-
+          github.event_name == 'pull_request' &&
+          needs.changed_paths.outputs.build == 'true' &&
+          needs.changed_paths.outputs.concurrency != 'true'
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR (app image and pbs-cache mirror)
@@ -557,7 +560,10 @@ jobs:
       # this exact tree; reuse its GHA cache and load a full-stack image so e2e
       # cannot silently exercise main's Python code under the branch's UI.
       - name: Build full-stack PR image
-        if: github.event_name == 'pull_request' && needs.changed_paths.outputs.build == 'true'
+        if: >-
+          github.event_name == 'pull_request' &&
+          needs.changed_paths.outputs.build == 'true' &&
+          needs.changed_paths.outputs.concurrency != 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -575,7 +581,15 @@ jobs:
           SUBJECT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           image="ghcr.io/new-usemame/calibre-web-nextgen"
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+          if [[ "${{ github.event_name }}" == "pull_request" \
+                  && "${{ needs.changed_paths.outputs.build }}" == "true" \
+                  && "${{ needs.changed_paths.outputs.concurrency }}" != "true" ]]; then
+            # Non-concurrency backend PRs already built their checked-out full
+            # stack above. Do not replace it with :dev or wait for a sha tag
+            # whose producer only owns the concurrency-shaped lane.
+            echo "image=cwng-e2e-head:local" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             tag="$GITHUB_REF_NAME"
             attempts=240
           elif [[ "${{ github.event_name }}" == "pull_request" \
@@ -606,7 +620,9 @@ jobs:
           IMAGE: ${{ steps.img.outputs.image }}
         run: |
           echo "Testing immutable image: $IMAGE"
-          if ! docker pull "$IMAGE"; then
+          # Backend PR images are built and loaded locally in this job. Registry
+          # artifacts remain digest-pinned by the resolver and must be pulled.
+          if ! docker image inspect "$IMAGE" >/dev/null 2>&1 && ! docker pull "$IMAGE"; then
             echo "::error::$IMAGE resolved but could not be pulled"
             exit 1
           fi
@@ -890,6 +906,7 @@ jobs:
       - name: Overlay the SPA bundle under test into the container
         if: >-
           github.event_name == 'pull_request' &&
+          needs.changed_paths.outputs.build != 'true' &&
           needs.changed_paths.outputs.concurrency != 'true'
         working-directory: frontend
         run: |

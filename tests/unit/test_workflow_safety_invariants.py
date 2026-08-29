@@ -647,6 +647,9 @@ def test_e2e_uses_head_backend_only_for_backend_prs():
     assert full_build is not None, "backend PR e2e no longer builds the checked-out full stack"
     assert full_build.get("uses") == "docker/build-push-action@v7"
     assert "needs.changed_paths.outputs.build == 'true'" in str(full_build.get("if") or "")
+    assert "needs.changed_paths.outputs.concurrency != 'true'" in str(full_build.get("if") or ""), (
+        "concurrency-shaped PRs use the exact-sha producer and must not also build a local image"
+    )
     build_with = full_build.get("with") or {}
     assert build_with.get("load") is True, "the HEAD image must be loaded for the following docker run"
     assert str(build_with.get("cache-from") or "").startswith("type=gha")
@@ -667,7 +670,15 @@ def test_e2e_uses_head_backend_only_for_backend_prs():
     assert resolver is not None
     resolver_run = str(resolver.get("run") or "")
     assert "needs.changed_paths.outputs.build" in resolver_run
+    assert "needs.changed_paths.outputs.concurrency" in resolver_run
     assert "cwng-e2e-head:local" in resolver_run
+
+    start = next((step for step in steps if step.get("name") == "Start container (SPA enabled)"), None)
+    assert start is not None
+    start_run = str(start.get("run") or "")
+    assert 'docker image inspect "$IMAGE"' in start_run, (
+        "the locally loaded full-stack PR image must not be rejected for being unpullable"
+    )
 
     overlay = next((step for step in steps if step.get("name") == "Overlay the SPA bundle under test into the container"), None)
     assert overlay is not None
@@ -675,6 +686,7 @@ def test_e2e_uses_head_backend_only_for_backend_prs():
     assert "needs.changed_paths.outputs.build != 'true'" in overlay_if, (
         "frontend-only PRs must keep the fast :dev + static-overlay path"
     )
+    assert "needs.changed_paths.outputs.concurrency != 'true'" in overlay_if
 
 
 def test_e2e_job_enables_remote_login_before_running_the_harness():
