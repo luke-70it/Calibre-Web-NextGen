@@ -59,6 +59,10 @@ KOBO_STOREAPI_URL = "https://storeapi.kobo.com"
 KOBO_IMAGEHOST_URL = "https://cdn.kobo.com/book-images"
 
 SYNC_ITEM_LIMIT = 100
+# Nickel reports a fresh/replaced download at the cover.  Only this narrow
+# start-of-book shape is eligible for the armed rehydrate no-regress guard;
+# ordinary newer backward jumps remain intentional reading movements.
+KOB0_COVER_RESET_PROGRESS_EPSILON = 1.0
 
 # Stored alongside the payload hash, never sent to Kobo.  Increment this when
 # the server intentionally changes the entitlement renderer's declared shape;
@@ -166,7 +170,8 @@ def _seed_existing_device_entitlement_ledgers(user_id):
     A durable per-device completion marker prevents later missing rows from
     being mistaken for migration work: resend, unsync, archive, purge and
     duplicate-merge paths deliberately clear individual ledger rows so the
-    next sync can deliver them.
+    next sync can deliver them. All writes are staged for HandleSyncRequest's
+    single checked commit; this helper never commits independently.
     """
     device_ids = kobo_sync_status.get_unseeded_kobo_device_ids(user_id)
     if not device_ids:
@@ -183,8 +188,6 @@ def _seed_existing_device_entitlement_ledgers(user_id):
             kobo_sync_status.user_has_completed_entitlement_seed(user_id)
         if existing_user_seed:
             kobo_sync_status.mark_device_entitlement_ledgers_seeded(device_ids)
-            if ub.session_commit() is False:
-                return False
             elapsed_ms = round((monotonic() - started) * 1000, 1)
             log.debug(
                 "Kobo Sync ledger seed: user=%s devices=%d books=0 deleted=0 "
@@ -323,11 +326,6 @@ def _seed_existing_device_entitlement_ledgers(user_id):
                 ENTITLEMENT_PAYLOAD_SCHEMA_VERSION,
             )
         kobo_sync_status.mark_device_entitlement_ledgers_seeded(device_ids)
-        # Legacy tests and a few downstream integrations replace this helper
-        # with a commit callable that returns None. Only the real helper's
-        # explicit False means the transaction was rolled back.
-        if ub.session_commit() is False:
-            return False
     except Exception:
         ub.session.rollback()
         log.exception(
@@ -666,6 +664,11 @@ def HandleSyncRequest():
     sync_token = SyncToken.SyncToken.from_headers(request.headers)
     sync_cursor_in = _sync_cursor_summary(sync_token)
     requesting_device_id = getattr(g, "annotation_origin_device_id", None)
+    # A server-time fence distinguishes repair work that existed when this
+    # request began from work armed by an entitlement/reset in this response.
+    # The latter must survive until the next request, after the device has had
+    # a chance to download and report a cover-shaped reset.
+    rehydrate_request_cutoff = device_positions.rehydrate_request_cutoff()
     replay_suppression_enabled = bool(getattr(
         config, "config_kobo_suppress_replayed_entitlements", True))
     # Layer 2 deliberately cannot suppress a tokenless request. A factory
@@ -1327,11 +1330,12 @@ def HandleSyncRequest():
             new_reading_state_last_modified = max(new_reading_state_last_modified, kobo_reading_state.last_modified)
 
     # Re-download repair is independent of the opaque reading-state cursor.
-    # Rows armed by a non-identical entitlement (or the legacy-marker reset)
-    # are deliberately emitted even if this response already carried the same
-    # state next to an entitlement: the standalone envelope is the repair
-    # contract. Clear only rows we can actually render, and stage that clear in
-    # the single checked request-level commit below.
+    # Only latches which pre-date this request are eligible: work armed by an
+    # entitlement/reset in this response must remain queued until a later sync,
+    # after the device has had a chance to replace the bytes. Entitlements
+    # delivered in this response are excluded even when their latch was older.
+    # The cap bounds renderer migrations/account resets; unserved rows stay
+    # latched and drain in book-id order on later requests.
     if requesting_device_id:
         pending_rehydrates = (
             ub.session.query(
@@ -1347,11 +1351,17 @@ def HandleSyncRequest():
                 ub.DeviceReadingPosition.device_id
                 == int(requesting_device_id),
                 ub.DeviceReadingPosition.rehydrate_needed.is_(True),
+                ub.DeviceReadingPosition.server_modified_at
+                < rehydrate_request_cutoff,
                 ub.KoboReadingState.user_id == current_user.id,
             )
             .order_by(ub.DeviceReadingPosition.book_id)
-            .all()
         )
+        if rehydrate_book_ids:
+            pending_rehydrates = pending_rehydrates.filter(
+                ub.DeviceReadingPosition.book_id.notin_(rehydrate_book_ids),
+            )
+        pending_rehydrates = pending_rehydrates.limit(SYNC_ITEM_LIMIT).all()
         for position, kobo_reading_state in pending_rehydrates:
             book = calibre_db.session.query(db.Books).filter(
                 db.Books.id == position.book_id,
@@ -1532,9 +1542,9 @@ def HandleSyncRequest():
             ub.KoboSyncedBooks.book_id.in_(books_to_delete_ids),
         ).delete(synchronize_session=False)
 
-    # Do not move this mutation above ``sync_shelves``: that legacy helper
-    # still has unchecked commits. The latch is acknowledged only here, with
-    # no intervening commit before the checked request-level boundary.
+    # The latch is acknowledged only here. Every sync helper above is
+    # stage-only, so this mutation and all response ledger/shelf effects become
+    # durable together at the checked request-level boundary below.
     for position in rehydrate_positions_emitted:
         position.rehydrate_needed = False
 
@@ -2258,6 +2268,7 @@ def HandleTagRemoveItem(tag_id):
 # Add new, changed, or deleted shelves to the sync_results.
 # Note: Public shelves that aren't owned by the user aren't supported.
 def sync_shelves(sync_token, sync_results, only_kobo_shelves=False):
+    """Stage shelf response effects for HandleSyncRequest's checked commit."""
     new_tags_last_modified = sync_token.tags_last_modified
     # transmit all archived shelfs independent of last sync (why should this matter?)
     for shelf in ub.session.query(ub.ShelfArchive).filter(ub.ShelfArchive.user_id == current_user.id):
@@ -2271,7 +2282,6 @@ def sync_shelves(sync_token, sync_results, only_kobo_shelves=False):
             }
         })
         ub.session.delete(shelf)
-        ub.session_commit()
 
     extra_filters = []
     if only_kobo_shelves:
@@ -2316,7 +2326,6 @@ def sync_shelves(sync_token, sync_results, only_kobo_shelves=False):
                 "ChangedTag": tag
             })
     sync_token.tags_last_modified = new_tags_last_modified
-    ub.session_commit()
 
 
 # Creates a Kobo "Tag" object from a ub.Shelf object
@@ -2419,16 +2428,25 @@ def HandleStateRequest(book_uuid):
                 )
 
                 stored_progress = current_bookmark.progress_percent
-                resolved_bookmark_accepted = (
-                    incoming_progress is None
-                    and device_positions.timestamp_is_newer(
-                        request_lm, current_bookmark.last_modified,
-                    )
-                ) or (
-                    incoming_progress is not None
-                    and (
-                        stored_progress is None
-                        or incoming_progress >= stored_progress
+                incoming_is_newer = device_positions.timestamp_is_newer(
+                    request_lm, current_bookmark.last_modified,
+                )
+                cover_reset_suppressed = bool(
+                    rehydrate_pending
+                    and incoming_progress is not None
+                    and stored_progress is not None
+                    and incoming_progress < stored_progress
+                    and incoming_progress
+                    <= KOB0_COVER_RESET_PROGRESS_EPSILON
+                )
+                resolved_bookmark_accepted = not cover_reset_suppressed and (
+                    incoming_is_newer
+                    or (
+                        incoming_progress is not None
+                        and (
+                            stored_progress is None
+                            or incoming_progress >= stored_progress
+                        )
                     )
                 )
                 if resolved_bookmark_accepted:
@@ -2443,12 +2461,10 @@ def HandleStateRequest(book_uuid):
                         current_bookmark.location_type = location["Type"]
                         current_bookmark.location_source = location["Source"]
                     _apply_kobo_last_modified(current_bookmark, request_lm)
-                elif (incoming_progress is not None
-                      and stored_progress is not None
-                      and incoming_progress < stored_progress):
+                elif cover_reset_suppressed:
                     log.info(
-                        "Kobo position decrease suppressed for device %s "
-                        "book %s (rehydrate_pending=%s): %.2f%% < %.2f%%",
+                        "Kobo cover reset suppressed for device %s book %s "
+                        "(rehydrate_pending=%s): %.2f%% < %.2f%%",
                         getattr(g, "annotation_origin_device_id", None),
                         book.id,
                         rehydrate_pending,

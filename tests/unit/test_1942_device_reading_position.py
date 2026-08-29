@@ -242,7 +242,7 @@ def state_harness(monkeypatch):
     engine.dispose()
 
 
-def test_resolved_policy_is_furthest_progress_and_newest_status_statistics(
+def test_newer_backward_jump_updates_resolved_row_and_both_fanouts(
         state_harness):
     harness = state_harness
 
@@ -254,12 +254,12 @@ def test_resolved_policy_is_furthest_progress_and_newest_status_statistics(
     )
     assert lower.get_json()["RequestResult"] == "Success"
     harness.session.expire_all()
-    assert harness.state.current_bookmark.progress_percent == 80.0
+    assert harness.state.current_bookmark.progress_percent == 20.0
     assert harness.read.read_status == ub.ReadBook.STATUS_FINISHED
     assert harness.state.statistics.spent_reading_minutes == 40
     journal = harness.session.query(ub.DeviceReadingPosition).one()
     assert journal.progress_percent == 20.0
-    assert harness.fanout == [], "a rejected decrease must not escape via fanout"
+    assert harness.fanout == [("hardcover", 20.0), ("kosync", 20.0)]
 
     higher = harness.put(
         90.0,
@@ -272,7 +272,12 @@ def test_resolved_policy_is_furthest_progress_and_newest_status_statistics(
     assert harness.state.current_bookmark.progress_percent == 90.0
     assert harness.read.read_status == ub.ReadBook.STATUS_FINISHED
     assert harness.state.statistics.spent_reading_minutes == 40
-    assert harness.fanout == [("hardcover", 90.0), ("kosync", 90.0)]
+    assert harness.fanout == [
+        ("hardcover", 20.0),
+        ("kosync", 20.0),
+        ("hardcover", 90.0),
+        ("kosync", 90.0),
+    ]
 
 
 def test_rehydrate_latch_survives_cover_reset_until_sync_clears_it(
@@ -289,6 +294,7 @@ def test_rehydrate_latch_survives_cover_reset_until_sync_clears_it(
     assert position.progress_percent == 0.0, "the device journal is truthful"
     assert position.rehydrate_needed is True
     assert harness.state.current_bookmark.progress_percent == 80.0
+    assert harness.fanout == [], "an armed cover reset must not escape"
 
     # HandleSyncRequest clears this field only after it has appended the state;
     # this direct clear models that single request-level commit boundary.
@@ -299,32 +305,48 @@ def test_rehydrate_latch_survives_cover_reset_until_sync_clears_it(
     ).scalar() is False
 
 
-def test_sync_then_download_and_download_then_sync_converge(state_harness):
+def test_armed_non_cover_backward_jump_is_not_misclassified_as_reset(
+        state_harness):
     from cps.services import device_reading_position as positions
 
     harness = state_harness
-
-    # Download/reset before the repairing sync.
     positions.mark_rehydrate_needed(harness.device.id, [BOOK_ID])
     harness.session.commit()
-    harness.put(0.0, clock="2026-08-29T15:00:00Z", spent=0)
-    before_sync = harness.state.current_bookmark.progress_percent
+    harness.put(30.0, clock="2026-08-29T15:00:00Z", spent=25)
+    harness.session.expire_all()
 
-    # Restore the starting point and model the inverse ordering: the sync has
-    # emitted and cleared its latch before Nickel reports the cover reset.
-    harness.session.query(ub.DeviceReadingPosition).delete()
-    harness.state.current_bookmark.progress_percent = 80.0
-    harness.session.commit()
+    position = harness.session.query(ub.DeviceReadingPosition).one()
+    assert position.progress_percent == 30.0
+    assert position.rehydrate_needed is True
+    assert harness.state.current_bookmark.progress_percent == 30.0
+    assert harness.fanout == [("hardcover", 30.0), ("kosync", 30.0)]
+
+
+@pytest.mark.parametrize(
+    ("cover_progress", "suppressed"),
+    [(0.0, True), (1.0, True), (1.01, False)],
+)
+def test_cover_reset_guard_is_latch_and_epsilon_scoped(
+        state_harness, cover_progress, suppressed):
+    from cps.services import device_reading_position as positions
+
+    harness = state_harness
     positions.mark_rehydrate_needed(harness.device.id, [BOOK_ID])
-    harness.session.flush()
-    harness.session.query(ub.DeviceReadingPosition).update({
-        ub.DeviceReadingPosition.rehydrate_needed: False,
-    })
     harness.session.commit()
-    harness.put(0.0, clock="2026-08-29T16:00:00Z", spent=0)
-    after_sync = harness.state.current_bookmark.progress_percent
 
-    assert before_sync == after_sync == 80.0
+    harness.put(
+        cover_progress,
+        clock="2026-08-29T15:00:00Z",
+        spent=0,
+    )
+    harness.session.expire_all()
+
+    expected = 80.0 if suppressed else cover_progress
+    assert harness.state.current_bookmark.progress_percent == expected
+    assert harness.session.query(
+        ub.DeviceReadingPosition.progress_percent,
+    ).scalar() == cover_progress
+    assert bool(harness.fanout) is not suppressed
 
 
 def test_duplicate_merge_keeps_newer_client_clock_then_progress_tie_break(

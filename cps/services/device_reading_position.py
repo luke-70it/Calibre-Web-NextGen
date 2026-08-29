@@ -22,6 +22,17 @@ def _now():
     return datetime.now(timezone.utc)
 
 
+def rehydrate_request_cutoff():
+    """Return the server clock fence for one sync request.
+
+    A latch whose ``server_modified_at`` is at or beyond this fence was armed
+    during the current request.  It cannot be consumed until a later request,
+    after the device has had a chance to apply the entitlement/download that
+    may reset its local position.
+    """
+    return _now()
+
+
 def timestamp_is_newer(candidate, current):
     """Compare SQLite clocks while tolerating naive/aware round trips."""
     if candidate is None:
