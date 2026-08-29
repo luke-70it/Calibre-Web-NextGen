@@ -800,6 +800,7 @@ is for things you can see or feel when running the app.
   being stored without a location.
 
 ## [v4.1.35] - 2026-08-15
+
 ### Changed
 
 - **Running it outside Docker no longer means hunting down `cps.py`.** If you
