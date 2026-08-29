@@ -78,22 +78,31 @@ test('stale prefixed login honors a prefixed next destination', async ({ page })
   await expect(page.getByText("This page doesn't exist here.", { exact: true })).toHaveCount(0);
 });
 
-test('Classic prefixed login bridge carries a safe next into the SPA', async ({ page }) => {
+test('Classic prefixed login bridge carries a safe next into the SPA', async ({
+  page, browser, baseURL,
+}) => {
   await page.goto('./app');
   const bookHref = await page.locator('a[href*="/cwa/app/book/"]').first().getAttribute('href');
   expect(bookHref).toBeTruthy();
-  await page.context().clearCookies();
+  const anonymous = await browser.newContext({
+    baseURL,
+    storageState: { cookies: [], origins: [] },
+  });
+  try {
+    const loginPage = await anonymous.newPage();
+    await loginPage.goto(`./login?next=${encodeURIComponent(bookHref!)}`);
+    const bridged = new URL(loginPage.url());
+    expect(bridged.pathname).toBe('/cwa/app/');
+    expect(bridged.searchParams.get('next')).toBe(bookHref);
+    await loginPage.locator('input[autocomplete="username"]').fill(process.env.E2E_USER || 'admin');
+    await loginPage.locator('input[autocomplete="current-password"]').fill(process.env.E2E_PASS || 'admin123');
+    await loginPage.getByRole('button', { name: /sign in/i }).click();
 
-  await page.goto(`./login?next=${encodeURIComponent(bookHref!)}`);
-  const bridged = new URL(page.url());
-  expect(bridged.pathname).toBe('/cwa/app/');
-  expect(bridged.searchParams.get('next')).toBe(bookHref);
-  await page.locator('input[autocomplete="username"]').fill(process.env.E2E_USER || 'admin');
-  await page.locator('input[autocomplete="current-password"]').fill(process.env.E2E_PASS || 'admin123');
-  await page.getByRole('button', { name: /sign in/i }).click();
-
-  await expect(page).toHaveURL(new RegExp(`${bookHref!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`));
-  await expect(page.locator('main h1')).toBeVisible();
+    await expect(loginPage).toHaveURL(new RegExp(`${bookHref!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`));
+    await expect(loginPage.locator('main h1')).toBeVisible();
+  } finally {
+    await anonymous.close();
+  }
 });
 
 test('prefixed login rejects a same-origin path outside its mount', async ({ page }) => {
