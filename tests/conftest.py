@@ -17,6 +17,7 @@ Environment Variables:
 """
 
 import os
+import re
 import sys
 import pytest
 import tempfile
@@ -930,17 +931,49 @@ def cwa_api_client(cwa_container) -> dict:
     # Create session with default credentials
     session = requests.Session()
 
-    # Login to CWA (default credentials: admin/admin123)
+    # Login to CWA (default credentials: admin/admin123).
+    #
+    # The login form is CSRF-protected, so the token has to be read off the
+    # rendered page first. Posting credentials alone returns 400 -- which reads
+    # like a malformed request rather than a missing token, and is why this went
+    # unnoticed: the fixture treated it as "no usable container" and skipped.
     try:
+        form = session.get(f"{base_url}/login", timeout=10)
+        token_match = re.search(
+            r'name="csrf_token"[^>]*value="([^"]+)"', form.text,
+        )
+        credentials = {"username": "admin", "password": "admin123"}
+        if token_match:
+            credentials["csrf_token"] = token_match.group(1)
+
         login_response = session.post(
             f"{base_url}/login",
-            data={"username": "admin", "password": "admin123"},
+            data=credentials,
             allow_redirects=False,
-            timeout=5
+            timeout=10
         )
 
+        # A reachable container that refuses our credentials is a FAILURE, not a
+        # skip. The two are different facts and only one of them is about the
+        # environment: skipping here turned a login regression into 48 silently
+        # disabled tests while the CI lane still reported success.
         if login_response.status_code not in (200, 302):
-            pytest.skip("Could not authenticate with CWA container")
+            pytest.fail(
+                f"CWA container on port {test_port} is reachable but rejected the "
+                f"test credentials (HTTP {login_response.status_code}). This is a "
+                f"regression in the login flow, not a missing test environment."
+            )
+
+        # A 302 alone does not mean success: a failed login also redirects, back
+        # to the login page. Confirm the session is actually authenticated before
+        # handing it to tests that would otherwise all fail in confusing ways.
+        whoami = session.get(f"{base_url}/api/v1/me", timeout=10)
+        if whoami.status_code != 200:
+            pytest.fail(
+                f"login to the CWA container appeared to succeed (HTTP "
+                f"{login_response.status_code}) but the session is not "
+                f"authenticated (/api/v1/me returned {whoami.status_code})."
+            )
     except requests.exceptions.RequestException as e:
         pytest.skip(f"Could not connect to CWA container: {e}")
 
