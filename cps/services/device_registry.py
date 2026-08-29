@@ -15,6 +15,8 @@ from sqlalchemy.orm import sessionmaker
 log = logging.getLogger(__name__)
 SCHEME = "kobo-header-hmac-sha256-v1"
 KOREADER_SCHEME = "koreader-client-hmac-sha256-v1"
+WEBREADER_SCHEME = "webreader-cookie-hmac-sha256-v1"
+WEBREADER_INSTALLATION_ID_HEADER = "X-CWNG-Webreader-Installation-Id"
 LAST_SEEN_WRITE_INTERVAL = timedelta(minutes=5)
 
 
@@ -43,6 +45,15 @@ def _opaque_fingerprint(raw_id, secret_key, *, namespace):
     if not raw_id or not key:
         return None
     return hmac.new(key, namespace + b"\0" + raw_id.encode(), hashlib.sha256).hexdigest()
+
+
+def _webreader_fingerprint(installation_id, secret_key):
+    """Key a browser-held installation id without retaining the raw value."""
+    return _opaque_fingerprint(
+        installation_id,
+        secret_key,
+        namespace=b"cwng-device:webreader:v1",
+    )
 
 
 def _deduplicated_label(session, ub, *, user_id, base):
@@ -139,27 +150,120 @@ def register_kobo_device_best_effort(*, user_id, headers, secret_key=None, retur
                 pass
 
 
-def ensure_webreader_device_best_effort(*, user_id):
-    """Return the logical web-reader device id without risking the save session."""
+def upsert_webreader_device(session, *, user_id, installation_id, secret_key, seen_at=None):
+    """Resolve one browser installation to one Device without storing its id."""
+    from cps import ub
+
+    fingerprint = _webreader_fingerprint(installation_id, secret_key)
+    if not fingerprint:
+        return None
+    identity = session.query(ub.DeviceIdentity).filter_by(
+        scheme=WEBREADER_SCHEME,
+        key_version=1,
+        fingerprint=fingerprint,
+    ).first()
+    if identity and identity.device.user_id != user_id:
+        log.warning("Ignoring web-reader device identity already bound to another user")
+        return None
+
+    now = seen_at or datetime.now(timezone.utc)
+    if identity is None:
+        device = ub.Device(
+            user_id=user_id,
+            kind="webreader",
+            display_name=_deduplicated_label(
+                session, ub, user_id=user_id, base="Web reader",
+            ),
+            model="CWNG web reader",
+            platform="epub.js",
+            first_seen_at=now,
+            last_seen_at=now,
+            last_metadata_at=now,
+            active=True,
+            created_by="auto",
+        )
+        identity = ub.DeviceIdentity(
+            device=device,
+            scheme=WEBREADER_SCHEME,
+            key_version=1,
+            fingerprint=fingerprint,
+            first_seen_at=now,
+            last_seen_at=now,
+        )
+        session.add(device)
+    else:
+        device = identity.device
+        observed_is_newer = (
+            device.last_seen_at is None
+            or now >= device.last_seen_at.replace(tzinfo=now.tzinfo)
+        )
+        last_seen_due = (
+            device.last_seen_at is None
+            or now - device.last_seen_at.replace(tzinfo=now.tzinfo)
+            >= LAST_SEEN_WRITE_INTERVAL
+        )
+        # Browser position writes can arrive every 800ms. Keep the identity
+        # observation read-only until the same coarse heartbeat Kobo uses is
+        # due, so those saves do not add another SQLite writer-lock contender.
+        if observed_is_newer and last_seen_due:
+            device.last_seen_at = now
+            identity.last_seen_at = now
+    session.flush()
+    return device
+
+
+def ensure_webreader_device_best_effort(*, user_id, installation_id=None,
+                                        secret_key=None):
+    """Return a per-browser device id, or the historical singleton fallback."""
     owned = None
     try:
+        from flask import current_app
         from cps import ub
+        key = secret_key if secret_key is not None else current_app.secret_key
         owned = sessionmaker(bind=ub.session.get_bind())()
-        device = owned.query(ub.Device).filter_by(
-            user_id=user_id, kind="webreader", created_by="auto",
-        ).order_by(ub.Device.id.asc()).first()
-        if device is None:
-            now = datetime.now(timezone.utc)
-            device = ub.Device(
-                user_id=user_id, kind="webreader",
-                display_name=_deduplicated_label(owned, ub, user_id=user_id, base="Web reader"),
-                model="CWNG web reader", platform="epub.js",
-                first_seen_at=now, last_seen_at=now, last_metadata_at=now,
-                active=True, created_by="auto",
+        if installation_id:
+            device = upsert_webreader_device(
+                owned,
+                user_id=user_id,
+                installation_id=installation_id,
+                secret_key=key,
             )
-            owned.add(device)
+        else:
+            # A legacy bucket is specifically a web-reader Device without the
+            # new cookie identity. Once per-browser rows exist, the old broad
+            # query would otherwise select one of them as the fallback.
+            device = (
+                owned.query(ub.Device)
+                .filter_by(user_id=user_id, kind="webreader", created_by="auto")
+                .filter(~ub.Device.identities.any(
+                    ub.DeviceIdentity.scheme == WEBREADER_SCHEME,
+                ))
+                .order_by(ub.Device.id.asc())
+                .first()
+            )
+            if device is None:
+                now = datetime.now(timezone.utc)
+                device = ub.Device(
+                    user_id=user_id,
+                    kind="webreader",
+                    display_name=_deduplicated_label(
+                        owned, ub, user_id=user_id, base="Web reader",
+                    ),
+                    model="CWNG web reader",
+                    platform="epub.js",
+                    first_seen_at=now,
+                    last_seen_at=now,
+                    last_metadata_at=now,
+                    active=True,
+                    created_by="auto",
+                )
+                owned.add(device)
+                owned.flush()
+        if device is None:
+            return None
+        device_id = device.id
         owned.commit()
-        return device.id
+        return device_id
     except Exception:
         if owned is not None:
             try:

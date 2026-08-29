@@ -558,7 +558,7 @@ export function Reader({ id }: { id: string }) {
       const created = await apiPost<Partial<AnnRow>>(`/annotations/${id}`, {
         cfi_range: cfiRange, highlighted_text: text, highlight_color: color,
         ...(note ? { note_text: note } : {}),
-      });
+      }, { webreaderDevice: true });
       const newId = created?.annotation_id ?? '';
       if (note && newId) notesRef.current.set(newId, note);
       setAnnList((rows) => [...rows, {
@@ -640,7 +640,7 @@ export function Reader({ id }: { id: string }) {
       try {
         const created = await apiPost<Partial<AnnRow>>(`/annotations/${id}`, {
           position_type: 'unanchored', note_text: note,
-        });
+        }, { webreaderDevice: true });
         setAnnList((rows) => [...rows, {
           annotation_id: created?.annotation_id ?? '',
           cfi_range: null,
@@ -661,7 +661,8 @@ export function Reader({ id }: { id: string }) {
     }
     if (!c.annotationId) return;
     try {
-      await apiPatch(`/annotations/${id}/${c.annotationId}`, { note_text: note });
+      await apiPatch(`/annotations/${id}/${c.annotationId}`, { note_text: note },
+        { webreaderDevice: true });
       if (note) notesRef.current.set(c.annotationId, note);
       else notesRef.current.delete(c.annotationId);
       setAnnList((rows) => rows.map((r) =>
@@ -774,7 +775,7 @@ export function Reader({ id }: { id: string }) {
     if (!hl) return;
     setActiveHl(null);
     try {
-      await apiDelete(`/annotations/${id}/${hl.id}`);
+      await apiDelete(`/annotations/${id}/${hl.id}`, { webreaderDevice: true });
       notesRef.current.delete(hl.id);
       setAnnList((rows) => rows.filter((r) => r.annotation_id !== hl.id));
       try { renditionRef.current?.annotations?.remove(hl.cfiRange, 'highlight'); } catch { /* noop */ }
@@ -791,7 +792,8 @@ export function Reader({ id }: { id: string }) {
     setActiveHl(null);
     if (hl.color === color) return;
     try {
-      await apiPatch(`/annotations/${id}/${hl.id}`, { highlight_color: color });
+      await apiPatch(`/annotations/${id}/${hl.id}`, { highlight_color: color },
+        { webreaderDevice: true });
       setAnnList((rows) => rows.map((r) =>
         r.annotation_id === hl.id ? { ...r, highlight_color: color } : r));
       // Recolouring must not silently drop the note marker.
@@ -1131,7 +1133,7 @@ export function Reader({ id }: { id: string }) {
             `/api/v1/books/${id}/bookmark`,
             pct != null ? { format: 'epub', bookmark: cfi, percentage: pct }
                         : { format: 'epub', bookmark: cfi },
-            { keepalive: true },
+            { keepalive: true, webreaderDevice: true },
           );
         }
       }
