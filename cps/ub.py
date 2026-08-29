@@ -1207,6 +1207,148 @@ class DeviceIdentity(Base):
     )
 
 
+class DeviceInventoryReport(Base):
+    """One complete inventory observation submitted by a registered device."""
+    __tablename__ = 'device_inventory_report'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(Integer, ForeignKey('device.id', ondelete='CASCADE'), nullable=False)
+    observed_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    item_count = Column(Integer, nullable=False)
+    matched_count = Column(Integer, nullable=False)
+    device = relationship("Device")
+    __table_args__ = (
+        Index('ix_device_inventory_report_device_observed', 'device_id', 'observed_at'),
+    )
+
+
+class DeviceInventoryItem(Base):
+    """A book observed on a device; absence from a later report is not deletion."""
+    __tablename__ = 'device_inventory_item'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(Integer, ForeignKey('device.id', ondelete='CASCADE'), nullable=False)
+    lpath = Column(String(1024), nullable=False)
+    checksum = Column(String(32), nullable=False)
+    book_id = Column(Integer, nullable=True)
+    size = Column(Integer, nullable=False)
+    mtime = Column(Integer, nullable=False)
+    first_seen_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    last_seen_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    last_report_id = Column(
+        Integer, ForeignKey('device_inventory_report.id', ondelete='CASCADE'), nullable=False,
+    )
+    device = relationship("Device")
+    last_report = relationship("DeviceInventoryReport")
+    __table_args__ = (
+        UniqueConstraint('device_id', 'lpath', 'checksum',
+                         name='uq_device_inventory_item_observation'),
+        Index('ix_device_inventory_item_device_report', 'device_id', 'last_report_id'),
+        Index('ix_device_inventory_item_book_device', 'book_id', 'device_id'),
+    )
+
+
+class DeviceBookDelivery(Base):
+    """One idempotent wanted-book entry for a registered device.
+
+    ``book_id`` belongs to calibre's separate metadata database, so it is an
+    ordinary integer rather than a foreign key. Ownership is derived through
+    ``Device``; no duplicate user id is stored and the registry remains the
+    authority for binding an opaque client identity to an account.
+    """
+    __tablename__ = 'device_book_delivery'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(Integer, ForeignKey('device.id', ondelete='CASCADE'), nullable=False)
+    book_id = Column(Integer, nullable=False)
+    state = Column(String(24), nullable=False)
+    format = Column(String(16), nullable=True)
+    filename = Column(String(255), nullable=True)
+    expected_size = Column(Integer, nullable=True)
+    expected_checksum = Column(String(32), nullable=True)
+    queued_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    claimed_at = Column(DateTime, nullable=True)
+    claim_expires_at = Column(DateTime, nullable=True)
+    claim_token = Column(String(96), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    completed_at = Column(DateTime, nullable=True)
+    installed_lpath = Column(String(1024), nullable=True)
+    installed_checksum = Column(String(32), nullable=True)
+    installed_size = Column(Integer, nullable=True)
+    installed_mtime = Column(Integer, nullable=True)
+    failure_reason = Column(String(512), nullable=True)
+    device = relationship("Device")
+    __table_args__ = (
+        UniqueConstraint('device_id', 'book_id', name='uq_device_book_delivery_book'),
+        Index('ix_device_book_delivery_claim', 'device_id', 'state', 'claim_expires_at'),
+    )
+
+
+class DeviceStorageSnapshot(Base):
+    """A device-supplied point-in-time disk measurement."""
+    __tablename__ = 'device_storage_snapshot'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(Integer, ForeignKey('device.id', ondelete='CASCADE'), nullable=False)
+    observed_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    free_bytes = Column(Integer, nullable=False)
+    total_bytes = Column(Integer, nullable=False)
+    device = relationship("Device")
+    __table_args__ = (
+        CheckConstraint('free_bytes >= 0', name='ck_device_storage_free_nonnegative'),
+        CheckConstraint('total_bytes >= free_bytes', name='ck_device_storage_total_gte_free'),
+        Index('ix_device_storage_device_observed', 'device_id', 'observed_at'),
+    )
+
+
+class DeviceBookDeletion(Base):
+    """One explicit, exact file-removal request for a registered device."""
+    __tablename__ = 'device_book_deletion'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(Integer, ForeignKey('device.id', ondelete='CASCADE'), nullable=False)
+    inventory_item_id = Column(
+        Integer, ForeignKey('device_inventory_item.id', ondelete='SET NULL'), nullable=True,
+    )
+    book_id = Column(Integer, nullable=True)
+    lpath = Column(String(1024), nullable=False)
+    checksum = Column(String(32), nullable=False)
+    state = Column(String(24), nullable=False)
+    requested_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    claimed_at = Column(DateTime, nullable=True)
+    claim_token = Column(String(96), nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+    failure_reason = Column(String(512), nullable=True)
+    device = relationship("Device")
+    __table_args__ = (
+        UniqueConstraint(
+            'device_id', 'lpath', 'checksum',
+            name='uq_device_book_deletion_named_target',
+        ),
+        Index('ix_device_book_deletion_claim', 'device_id', 'state', 'id'),
+    )
+
+
+class DeviceCollectionSync(Base):
+    """Per-user, per-device delivery state for server shelf collections."""
+    __tablename__ = 'device_collection_sync'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
+    device_id = Column(Integer, ForeignKey('device.id', ondelete='CASCADE'), nullable=False)
+    scope_id = Column(String(36), nullable=False, default=lambda: str(uuid.uuid4()))
+    revision = Column(Integer, nullable=False, default=1)
+    snapshot_hash = Column(String(64), nullable=False)
+    delivered_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    applied_at = Column(DateTime, nullable=True)
+    device = relationship("Device")
+    __table_args__ = (
+        UniqueConstraint('user_id', 'device_id', name='uq_device_collection_user_device'),
+        UniqueConstraint('scope_id', name='uq_device_collection_scope'),
+        Index('ix_device_collection_device_user', 'device_id', 'user_id'),
+    )
+
+
 class AnnotationContentIdMigration(Base):
     """Exact undo journal for conservative content-id backfills."""
     __tablename__ = 'annotation_content_id_migration'
@@ -2043,6 +2185,12 @@ def add_missing_tables(engine, _session):
         ("kobo_annotation_backup", KoboAnnotationBackup.__table__),
         ("favorite_book", FavoriteBook.__table__),
         ("user_library_book", UserLibraryBook.__table__),
+        ("device_inventory_report", DeviceInventoryReport.__table__),
+        ("device_inventory_item", DeviceInventoryItem.__table__),
+        ("device_book_delivery", DeviceBookDelivery.__table__),
+        ("device_storage_snapshot", DeviceStorageSnapshot.__table__),
+        ("device_book_deletion", DeviceBookDeletion.__table__),
+        ("device_collection_sync", DeviceCollectionSync.__table__),
     )
     kobo_entitlement_tables = (
         ("kobo_device_book_entitlement", KoboDeviceBookEntitlement.__table__),

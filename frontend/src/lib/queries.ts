@@ -8,13 +8,15 @@ import {
 import { removeBookFromCache, applyBookEditToCache } from './scrollCache';
 import { settleById } from './bulkResults';
 import { createEntityListQueryOptions } from './entityListQueryOptions';
+import { dismissNoticeIdsInBatches } from './noticeDismissal';
 import type { MetadataProvider, MetaSearchResponse } from './api';
 import type {
   Me, Book, BooksPage, BookDetail, EntityList, Shelf, ShelfDetail,
   SearchOptions, AdvancedSearchParams, AdvSearchResult, Account, ProfileUpdate,
   BookMetadata, MetadataUpdate, UploadResult, AdminUser, AboutInfo, TaskItem, AuthConfig,
   NoticeInbox, KoboTwoWaySettings, KoboTwoWayBookState, KoboTwoWayUpdate,
-  GlobalLibraryPage, LibraryModePayload, LibraryRemovalImpact,
+  GlobalLibraryPage, LibraryModePayload, LibraryRemovalImpact, DeliveryDevice,
+  DeviceDeliveryResult,
 } from './api';
 
 /** Entity kinds the catalog can be filtered by. Singular here; the browse-list
@@ -510,6 +512,28 @@ export function useSendToEreader(id: string | number) {
   });
 }
 
+/** Active Kobo/KOReader devices that can pull queued books on their next sync. */
+export function useActiveDeliveryDevices(enabled = true) {
+  return useQuery<{ devices: DeliveryDevice[] }>({
+    queryKey: ['annotation-devices', 'active'],
+    queryFn: () => apiGet<{ devices: DeliveryDevice[] }>(
+      '/api/annotations/devices?active=true'),
+    enabled,
+    staleTime: 30000,
+    select: (payload) => ({
+      devices: payload.devices.filter((device) => device.can_receive_books),
+    }),
+  });
+}
+
+/** Queue one idempotent pull delivery for a reader owned by this user. */
+export function useQueueDeviceDelivery(id: string | number) {
+  return useMutation({
+    mutationFn: (device: string) =>
+      apiPost<DeviceDeliveryResult>(`/api/v1/books/${id}/device-deliveries`, { device }),
+  });
+}
+
 // ── Shelves ──────────────────────────────────────────────────────────────────
 
 export function useShelves() {
@@ -937,10 +961,15 @@ export function useUpdateMetadata(id: string | number) {
  *  every cached catalog snapshot so a later scroll-restore can't resurrect it
  *  as a ghost card (#578), then refreshes the library + shelves. Callers redirect
  *  away from the now-deleted book's detail page on success. */
+export interface DeleteResult {
+  deleted: true;
+  warning?: { code: string; message: string };
+}
+
 export function useDeleteBook(id: string | number) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () => apiPost(`/api/v1/books/${id}/delete`),
+    mutationFn: () => apiPost<DeleteResult | undefined>(`/api/v1/books/${id}/delete`),
     onSuccess: () => {
       removeBookFromCache(Number(id));
       // Drop the deleted book's own detail cache, and refetch every surface that
@@ -980,7 +1009,7 @@ export function useDeleteFormat(id: string | number) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (fmt: string) =>
-      apiPost(`/api/v1/books/${id}/formats/${encodeURIComponent(fmt)}/delete`),
+      apiPost<DeleteResult | undefined>(`/api/v1/books/${id}/formats/${encodeURIComponent(fmt)}/delete`),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['book', String(id)] });
       void qc.invalidateQueries({ queryKey: ['books'] });
@@ -1469,10 +1498,13 @@ export function useDismissNotices() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (noticeIds: number[]) =>
-      apiPost<{ dismissed: number; remaining: number }>('/api/v1/notices/dismiss', {
-        notice_ids: noticeIds,
-      }),
-    onSuccess: () => void qc.invalidateQueries({ queryKey: ['notices'] }),
+      dismissNoticeIdsInBatches(noticeIds, (batch) =>
+        apiPost<{ dismissed: number; remaining: number }>('/api/v1/notices/dismiss', {
+          notice_ids: batch,
+        })),
+    // A later batch can fail after an earlier one committed. Refresh on either
+    // outcome so the banner reflects the server's actual remaining notices.
+    onSettled: () => void qc.invalidateQueries({ queryKey: ['notices'] }),
   });
 }
 

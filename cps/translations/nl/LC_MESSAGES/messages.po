@@ -24,6 +24,36 @@ msgstr ""
 "X-Generator: Poedit 3.9\n"
 
 #: cps/about.py cps/spa_strings.py
+msgid "Book queued for this device"
+msgstr "Boek in de wachtrij geplaatst voor dit apparaat"
+
+msgid "Choose a device"
+msgstr "Kies een apparaat"
+
+msgid "Collects on the device's next sync."
+msgstr "Het apparaat haalt dit op bij de volgende synchronisatie."
+
+msgid "Could not queue this book for the device."
+msgstr "Kan dit boek niet in de wachtrij voor het apparaat plaatsen."
+
+msgid "Could not request deletion from this device."
+msgstr "Verwijdering van dit apparaat kon niet worden aangevraagd."
+
+msgid "Delete from device"
+msgstr "Van apparaat verwijderen"
+
+msgid "Delete {path} from {name} on its next sync?"
+msgstr "{path} van {name} verwijderen bij de volgende synchronisatie?"
+
+msgid "Deletion requested"
+msgstr "Verwijdering aangevraagd"
+
+msgid "Queueing…"
+msgstr "In wachtrij plaatsen…"
+
+msgid "Send to device"
+msgstr "Naar apparaat verzenden"
+
 msgid "Statistics"
 msgstr "Statistieken"
 
@@ -46,6 +76,12 @@ msgid "Success! Database Reconnected"
 msgstr "Gelukt! Database opnieuw verbonden"
 
 #: cps/admin.py
+msgid "This book is already on that device"
+msgstr "Dit boek staat al op dat apparaat"
+
+msgid "This book is already queued for this device"
+msgstr "Dit boek staat al in de wachtrij voor dit apparaat"
+
 msgid "Unknown command"
 msgstr "Onbekende opdracht"
 
@@ -164,6 +200,9 @@ msgstr "Gebruiker niet gevonden"
 
 #: cps/admin.py
 #, python-brace-format
+msgid "{free} free of {total}"
+msgstr "{free} vrij van {total}"
+
 msgid "{} users deleted successfully"
 msgstr "{} gebruikers succesvol verwijderd"
 
@@ -2554,6 +2593,14 @@ msgstr "Metadata toegepast op {succeeded}; {failed} mislukt."
 msgid "A book must keep at least one format."
 msgstr "Een boek moet minstens één formaat behouden."
 
+#: cps/spa_strings.py
+msgid "Could not delete this format."
+msgstr "Kan dit formaat niet verwijderen."
+
+#: cps/spa_strings.py
+msgid "Format deleted."
+msgstr "Formaat verwijderd."
+
 #: cps/spa_strings.py cps/templates/detail.html
 msgid "Read now"
 msgstr "Nu lezen"
@@ -4349,6 +4396,10 @@ msgid "Add identifier"
 msgstr "Identificatiecode toevoegen"
 
 #: cps/spa_strings.py
+msgid "Add link"
+msgstr "Link toevoegen"
+
+#: cps/spa_strings.py
 msgid "Add note"
 msgstr "Notitie toevoegen"
 
@@ -4411,6 +4462,10 @@ msgstr "Elk label"
 #: cps/spa_strings.py
 msgid "Apply metadata"
 msgstr "Metadata toepassen"
+
+#: cps/spa_strings.py cps/templates/book_edit.html
+msgid "Apply"
+msgstr "Toepassen"
 
 #: cps/spa_strings.py
 msgid "Apply selected"
@@ -4479,6 +4534,10 @@ msgid "Auto-create users on first login"
 msgstr "Gebruikers automatisch aanmaken bij eerste aanmelding"
 
 #: cps/spa_strings.py
+msgid "Back to formatting"
+msgstr "Terug naar opmaak"
+
+#: cps/spa_strings.py
 msgid "Back to library"
 msgstr "Terug naar bibliotheek"
 
@@ -4501,6 +4560,10 @@ msgstr "Bèta"
 #: cps/spa_strings.py cps/templates/read.html
 msgid "Black"
 msgstr "Zwart"
+
+#: cps/spa_strings.py
+msgid "Bold"
+msgstr "Vet"
 
 #: cps/spa_strings.py
 msgid "Book default"
@@ -4544,6 +4607,10 @@ msgstr ""
 #: cps/spa_strings.py
 msgid "Built-in providers (leave blank to disable):"
 msgstr "Ingebouwde providers (laat leeg om uit te schakelen):"
+
+#: cps/spa_strings.py
+msgid "Bulleted list"
+msgstr "Lijst met opsommingstekens"
 
 #: cps/spa_strings.py
 msgid "CA certificate path"
@@ -4625,6 +4692,10 @@ msgid "Clear default"
 msgstr "Standaard wissen"
 
 #: cps/spa_strings.py
+msgid "Clear formatting"
+msgstr "Opmaak wissen"
+
+#: cps/spa_strings.py
 msgid "Clear selection"
 msgstr "Selectie wissen"
 
@@ -4643,6 +4714,10 @@ msgstr "Client geheim (laat leeg om te behouden)"
 #: cps/spa_strings.py
 msgid "Close reader"
 msgstr "Lezer sluiten"
+
+#: cps/spa_strings.py
+msgid "Code"
+msgstr "Code"
 
 #: cps/spa_strings.py
 msgid "Columns"
@@ -4985,6 +5060,10 @@ msgid "Description"
 msgstr "Omschrijving"
 
 #: cps/spa_strings.py
+msgid "Description formatting"
+msgstr "Opmaak van beschrijving"
+
+#: cps/spa_strings.py
 msgid "Device"
 msgstr "Apparaat"
 
@@ -5094,6 +5173,10 @@ msgstr "Randspiegeling — breid het artwork uit (aanbevolen)"
 #: cps/templates/user_table.html
 msgid "Edit"
 msgstr "Bewerken"
+
+#: cps/spa_strings.py
+msgid "Edit HTML"
+msgstr "HTML bewerken"
 
 #: cps/spa_strings.py
 msgid "Edit note"
@@ -5264,6 +5347,10 @@ msgid "Formats — include"
 msgstr "Formaten — opnemen"
 
 #: cps/spa_strings.py
+msgid "Formatting is kept where the book page supports it."
+msgstr "Opmaak blijft behouden waar de boekpagina dit ondersteunt."
+
+#: cps/spa_strings.py
 msgid "From address"
 msgstr "Van-adres"
 
@@ -5331,6 +5418,10 @@ msgstr "Heeft pen- of tekennotities"
 #: cps/spa_strings.py
 msgid "Header name"
 msgstr "Header naam"
+
+#: cps/spa_strings.py
+msgid "Heading"
+msgstr "Kop"
 
 #: cps/spa_strings.py
 msgid "Help & support"
@@ -5449,6 +5540,10 @@ msgstr ""
 "interface."
 
 #: cps/spa_strings.py
+msgid "Italic"
+msgstr "Cursief"
+
+#: cps/spa_strings.py
 msgid "KOReader"
 msgstr "KOReader"
 
@@ -5522,6 +5617,10 @@ msgstr "Bibliotheekinstellingen"
 #: cps/spa_strings.py cps/templates/read.html
 msgid "Line height"
 msgstr "Regelhoogte"
+
+#: cps/spa_strings.py
+msgid "Link address"
+msgstr "Linkadres"
 
 #: cps/spa_strings.py
 msgid "Load more"
@@ -5868,6 +5967,14 @@ msgstr ""
 "herstelbewijs — het verandert nog niets aan wat je Kobo ontvangt."
 
 #: cps/spa_strings.py
+msgid "Nothing to preview yet."
+msgstr "Nog niets om te tonen."
+
+#: cps/spa_strings.py
+msgid "Numbered list"
+msgstr "Genummerde lijst"
+
+#: cps/spa_strings.py
 msgid "Oldest"
 msgstr "Oudste"
 
@@ -6018,6 +6125,11 @@ msgstr "Poort"
 msgid "Preparing your magic link…"
 msgstr "Je magische link voorbereiden…"
 
+#: cps/spa_strings.py cps/templates/duplicates.html
+#: cps/templates/kobo_reconcile.html
+msgid "Preview"
+msgstr "Voorbeeld"
+
 #: cps/spa_strings.py
 msgid "Previous page"
 msgstr "Vorige pagina"
@@ -6037,6 +6149,10 @@ msgstr "Gepubliceerd na"
 #: cps/spa_strings.py
 msgid "Published before"
 msgstr "Gepubliceerd voor"
+
+#: cps/spa_strings.py
+msgid "Quote"
+msgstr "Citaat"
 
 #: cps/spa_strings.py
 msgid "Random books shown"
@@ -6129,6 +6245,10 @@ msgstr "Markering verwijderen"
 #: cps/spa_strings.py
 msgid "Remove identifier"
 msgstr "Identifier verwijderen"
+
+#: cps/spa_strings.py
+msgid "Remove link"
+msgstr "Link verwijderen"
 
 #: cps/spa_strings.py
 msgid "Remove note"
@@ -6582,6 +6702,10 @@ msgid "Stretch to fill — no border, slight distortion"
 msgstr "Uitrekken om te vullen — geen rand, lichte vervorming"
 
 #: cps/spa_strings.py
+msgid "Subheading"
+msgstr "Subkop"
+
+#: cps/spa_strings.py
 msgid "Support on Ko-fi →"
 msgstr "Steunen op Ko-fi →"
 
@@ -6666,6 +6790,12 @@ msgstr ""
 "Deze magic link is verlopen. Genereer een nieuwe om het opnieuw te proberen."
 
 #: cps/spa_strings.py
+msgid "This magic link can’t be checked. Generate a new one to try again."
+msgstr ""
+"Deze magic link kan niet worden gecontroleerd. Genereer een nieuwe om het "
+"opnieuw te proberen."
+
+#: cps/spa_strings.py
 msgid "This page doesn't exist here."
 msgstr "Deze pagina bestaat hier niet."
 
@@ -6701,6 +6831,14 @@ msgstr "Token URL"
 #: cps/spa_strings.py
 msgid "Top Rated"
 msgstr "Best beoordeeld"
+
+#: cps/spa_strings.py
+msgid ""
+"Too many magic-link checks were made from this network. Generate a new link "
+"or try again later."
+msgstr ""
+"Er zijn vanaf dit netwerk te veel controles van magic links uitgevoerd. "
+"Genereer een nieuwe link of probeer het later opnieuw."
 
 #: cps/spa_strings.py
 msgid "Trust authentication header"
@@ -7102,6 +7240,46 @@ msgid ""
 msgstr ""
 "{n} markeringen en notities zijn op dit apparaat gemaakt. Ze worden niet "
 "verwijderd. Hun herkomstgeschiedenis blijft bewaard."
+
+#: cps/spa_strings.py
+#, python-brace-format
+msgid "{n} books in latest inventory"
+msgstr "{n} boeken in de nieuwste inventaris"
+
+#: cps/spa_strings.py
+msgid "Could not load this device library."
+msgstr "Kan de bibliotheek van dit apparaat niet laden."
+
+#: cps/spa_strings.py
+msgid "Hide device library"
+msgstr "Apparaatbibliotheek verbergen"
+
+#: cps/spa_strings.py
+msgid "Loading device library…"
+msgstr "Apparaatbibliotheek laden…"
+
+#: cps/spa_strings.py
+msgid "No books were reported in the latest device inventory."
+msgstr "Er zijn geen boeken gemeld in de nieuwste apparaatinventaris."
+
+#: cps/spa_strings.py
+msgid "Not matched to this library"
+msgstr "Niet gekoppeld aan deze bibliotheek"
+
+#: cps/spa_strings.py
+msgid "On this device"
+msgstr "Op dit apparaat"
+
+#: cps/spa_strings.py
+#, python-brace-format
+msgid "Showing {shown} of {total} books from the latest device inventory."
+msgstr ""
+"{shown} van {total} boeken uit de nieuwste apparaatinventaris worden "
+"weergegeven."
+
+#: cps/spa_strings.py
+msgid "View device library"
+msgstr "Apparaatbibliotheek bekijken"
 
 #: cps/spa_strings.py
 #, python-brace-format
@@ -7747,12 +7925,34 @@ msgid "Convert Kobo books missing KEPUB"
 msgstr ""
 
 #: cps/tasks/kepub_backfill.py
+#, python-format
+msgid ""
+"%(processed)d/%(total)d processed: %(converted)d converted, %(skipped)d "
+"skipped, %(failed)d failed"
+msgstr ""
+
+#: cps/tasks/kepub_backfill.py
 msgid "Kepubify is not configured"
 msgstr ""
 
 #: cps/tasks/kepub_backfill.py
 #, python-format
-msgid "%(count)d KEPUB conversion(s) failed"
+msgid "%(count)d consecutive Calibre metadata database failures"
+msgstr ""
+
+#: cps/tasks/kepub_backfill.py
+#, python-format
+msgid "%(count)d consecutive Calibre metadata probe failures"
+msgstr ""
+
+#: cps/tasks/kepub_backfill.py
+#, python-format
+msgid "KEPUB backfill aborted after %(reason)s; %(status)s"
+msgstr ""
+
+#: cps/tasks/kepub_backfill.py
+#, python-format
+msgid "KEPUB backfill finished with failures; %(status)s"
 msgstr ""
 
 #: cps/tasks/kepub_package_repair.py
@@ -8504,10 +8704,6 @@ msgstr ""
 
 #: cps/templates/book_edit.html
 msgid "Cover size — smallest first"
-msgstr ""
-
-#: cps/templates/book_edit.html
-msgid "Apply"
 msgstr ""
 
 #: cps/templates/book_edit.html
@@ -11475,10 +11671,6 @@ msgstr ""
 #: cps/templates/duplicates.html
 msgid "Keep Largest File Size - Keep book with largest total file size"
 msgstr ""
-
-#: cps/templates/duplicates.html cps/templates/kobo_reconcile.html
-msgid "Preview"
-msgstr "Voorbeeld"
 
 #: cps/templates/duplicates.html
 msgid "Execute Resolution"

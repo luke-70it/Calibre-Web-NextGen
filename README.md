@@ -565,7 +565,7 @@ CWA has built-in KOReader progress sync; no separate kosync server is needed.
 2. Point the plugin at `http://your-cwa:8083` and log in with your CWA username and password.
 3. Read on any device. Progress syncs back to CWA, and from there to Kobo if Kobo sync is enabled.
 
-**Keeping the plugin updated.** KOReader's [Updates Manager](https://github.com/advokatb/updatesmanager.koplugin) and [appstore.koplugin](https://github.com/kaz-utashiro/appstore.koplugin) can both update the plugin in place. Point either at the plugin's own repository, [`new-usemame/cwasync.koplugin`](https://github.com/new-usemame/cwasync.koplugin/releases) — not at this one. The plugin publishes a release only when the plugin itself changes, and its version is the server version it last changed in, so it can legitimately sit behind your server version; that alone doesn't mean anything is wrong. With the plugin repository configured, a check that reports no new release means the plugin stream has nothing newer.
+**Keeping the plugin updated.** KOReader's [Updates Manager](https://github.com/advokatb/updatesmanager.koplugin) and [appstore.koplugin](https://github.com/kaz-utashiro/appstore.koplugin) can both update the plugin in place. Point either at the plugin's own repository, [`new-usemame/cwngsync.koplugin`](https://github.com/new-usemame/cwngsync.koplugin/releases) — not at this one. The plugin publishes a release only when the plugin itself changes, and its version is the server version it last changed in, so it can legitimately sit behind your server version; that alone doesn't mean anything is wrong. With the plugin repository configured, a check that reports no new release means the plugin stream has nothing newer.
 
 If your update manager is still pointed at this repository, switch it. That setup keeps working — a release that changes the plugin attaches the plugin download — but the plugin only appears on those releases, which is easy to misread as "no update available". The download on `/kosync` always serves the plugin bundled with your running server if you would rather update by hand.
 
@@ -733,34 +733,34 @@ The interface ships with the locales below. Completion is auto-refreshed on ever
 | Language | Completion | Strings | Fuzzy |
 |---|---|---:|---:|
 | English (source) | 100% | source | — |
-| Russian (`ru`) | `███████████████████░` 97% | 2843/2936 | 0 |
-| Spanish (`es`) | `██████████████████░░` 90% | 2637/2936 | 0 |
-| Polish (`pl`) | `██████████████████░░` 89% | 2601/2936 | 0 |
-| French (`fr`) | `█████████████████░░░` 83% | 2425/2936 | 127 |
-| German (`de`) | `███████████████░░░░░` 74% | 2171/2936 | 12 |
-| Dutch (`nl`) | `█████████████░░░░░░░` 67% | 1969/2936 | 292 |
-| Hungarian (`hu`) | `███████████░░░░░░░░░` 56% | 1644/2936 | 121 |
-| Portuguese (Brazil) (`pt_BR`) | `██████████░░░░░░░░░░` 48% | 1407/2936 | 310 |
-| Chinese (Traditional, Taiwan) (`zh_Hant_TW`) | `█████████░░░░░░░░░░░` 47% | 1382/2936 | 182 |
-| Japanese (`ja`) | `█████████░░░░░░░░░░░` 45% | 1318/2936 | 247 |
-| Slovenian (`sl`) | `████████░░░░░░░░░░░░` 41% | 1212/2936 | 317 |
-| Chinese (Simplified, China) (`zh_Hans_CN`) | `████████░░░░░░░░░░░░` 40% | 1174/2936 | 347 |
-| Italian (`it`) | `██████░░░░░░░░░░░░░░` 32% | 955/2936 | 269 |
-| Korean (`ko`) | `██████░░░░░░░░░░░░░░` 32% | 946/2936 | 269 |
-| Arabic (`ar`) | `█████░░░░░░░░░░░░░░░` 27% | 788/2936 | 285 |
-| Slovak (`sk`) | `█████░░░░░░░░░░░░░░░` 25% | 747/2936 | 312 |
-| Portuguese (`pt`) | `█████░░░░░░░░░░░░░░░` 24% | 699/2936 | 359 |
-| Galician (`gl`) | `█████░░░░░░░░░░░░░░░` 23% | 675/2936 | 360 |
-| Indonesian (`id`) | `█████░░░░░░░░░░░░░░░` 23% | 676/2936 | 361 |
-| Swedish (`sv`) | `████░░░░░░░░░░░░░░░░` 20% | 582/2936 | 387 |
-| Greek (`el`) | `███░░░░░░░░░░░░░░░░░` 17% | 504/2936 | 398 |
-| Czech (`cs`) | `███░░░░░░░░░░░░░░░░░` 16% | 475/2936 | 407 |
-| Ukrainian (`uk`) | `███░░░░░░░░░░░░░░░░░` 15% | 442/2936 | 371 |
-| Norwegian (`no`) | `███░░░░░░░░░░░░░░░░░` 15% | 431/2936 | 434 |
-| Vietnamese (`vi`) | `███░░░░░░░░░░░░░░░░░` 14% | 421/2936 | 356 |
-| Finnish (`fi`) | `██░░░░░░░░░░░░░░░░░░` 12% | 354/2936 | 387 |
-| Turkish (`tr`) | `██░░░░░░░░░░░░░░░░░░` 10% | 289/2936 | 384 |
-| Khmer (`km`) | `█░░░░░░░░░░░░░░░░░░░` 7% | 207/2936 | 342 |
+| Russian (`ru`) | `███████████████████░` 96% | 2842/2970 | 0 |
+| Spanish (`es`) | `██████████████████░░` 89% | 2636/2970 | 0 |
+| Polish (`pl`) | `██████████████████░░` 88% | 2601/2970 | 0 |
+| French (`fr`) | `█████████████████░░░` 83% | 2469/2983 | 127 |
+| German (`de`) | `███████████████░░░░░` 73% | 2171/2970 | 12 |
+| Dutch (`nl`) | `██████████████░░░░░░` 68% | 2013/2983 | 292 |
+| Hungarian (`hu`) | `███████████░░░░░░░░░` 55% | 1644/2970 | 121 |
+| Portuguese (Brazil) (`pt_BR`) | `█████████░░░░░░░░░░░` 47% | 1407/2970 | 309 |
+| Chinese (Traditional, Taiwan) (`zh_Hant_TW`) | `█████████░░░░░░░░░░░` 46% | 1382/2970 | 181 |
+| Japanese (`ja`) | `█████████░░░░░░░░░░░` 44% | 1318/2970 | 246 |
+| Slovenian (`sl`) | `████████░░░░░░░░░░░░` 41% | 1212/2970 | 316 |
+| Chinese (Simplified, China) (`zh_Hans_CN`) | `████████░░░░░░░░░░░░` 40% | 1174/2970 | 346 |
+| Italian (`it`) | `██████░░░░░░░░░░░░░░` 32% | 955/2970 | 268 |
+| Korean (`ko`) | `██████░░░░░░░░░░░░░░` 32% | 946/2970 | 268 |
+| Arabic (`ar`) | `█████░░░░░░░░░░░░░░░` 26% | 788/2970 | 284 |
+| Slovak (`sk`) | `█████░░░░░░░░░░░░░░░` 25% | 747/2970 | 311 |
+| Portuguese (`pt`) | `█████░░░░░░░░░░░░░░░` 24% | 699/2970 | 358 |
+| Indonesian (`id`) | `█████░░░░░░░░░░░░░░░` 23% | 676/2970 | 360 |
+| Galician (`gl`) | `█████░░░░░░░░░░░░░░░` 23% | 675/2970 | 359 |
+| Swedish (`sv`) | `████░░░░░░░░░░░░░░░░` 20% | 582/2970 | 386 |
+| Greek (`el`) | `███░░░░░░░░░░░░░░░░░` 17% | 504/2970 | 397 |
+| Czech (`cs`) | `███░░░░░░░░░░░░░░░░░` 16% | 475/2970 | 406 |
+| Ukrainian (`uk`) | `███░░░░░░░░░░░░░░░░░` 15% | 443/2970 | 370 |
+| Norwegian (`no`) | `███░░░░░░░░░░░░░░░░░` 14% | 431/2970 | 434 |
+| Vietnamese (`vi`) | `███░░░░░░░░░░░░░░░░░` 14% | 421/2970 | 355 |
+| Finnish (`fi`) | `██░░░░░░░░░░░░░░░░░░` 12% | 354/2970 | 386 |
+| Turkish (`tr`) | `██░░░░░░░░░░░░░░░░░░` 10% | 289/2970 | 383 |
+| Khmer (`km`) | `█░░░░░░░░░░░░░░░░░░░` 7% | 207/2970 | 341 |
 <!-- TRANSLATION_STATUS_END -->
 
 ---
