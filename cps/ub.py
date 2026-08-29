@@ -1248,6 +1248,107 @@ class DeviceInventoryItem(Base):
     )
 
 
+class DeviceBookDelivery(Base):
+    """One idempotent wanted-book entry for a registered device.
+
+    ``book_id`` belongs to calibre's separate metadata database, so it is an
+    ordinary integer rather than a foreign key. Ownership is derived through
+    ``Device``; no duplicate user id is stored and the registry remains the
+    authority for binding an opaque client identity to an account.
+    """
+    __tablename__ = 'device_book_delivery'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(Integer, ForeignKey('device.id', ondelete='CASCADE'), nullable=False)
+    book_id = Column(Integer, nullable=False)
+    state = Column(String(24), nullable=False)
+    format = Column(String(16), nullable=True)
+    filename = Column(String(255), nullable=True)
+    expected_size = Column(Integer, nullable=True)
+    expected_checksum = Column(String(32), nullable=True)
+    queued_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    claimed_at = Column(DateTime, nullable=True)
+    claim_expires_at = Column(DateTime, nullable=True)
+    claim_token = Column(String(96), nullable=True)
+    attempt_count = Column(Integer, nullable=False, default=0)
+    completed_at = Column(DateTime, nullable=True)
+    installed_lpath = Column(String(1024), nullable=True)
+    installed_checksum = Column(String(32), nullable=True)
+    installed_size = Column(Integer, nullable=True)
+    installed_mtime = Column(Integer, nullable=True)
+    failure_reason = Column(String(512), nullable=True)
+    device = relationship("Device")
+    __table_args__ = (
+        UniqueConstraint('device_id', 'book_id', name='uq_device_book_delivery_book'),
+        Index('ix_device_book_delivery_claim', 'device_id', 'state', 'claim_expires_at'),
+    )
+
+
+class DeviceStorageSnapshot(Base):
+    """A device-supplied point-in-time disk measurement."""
+    __tablename__ = 'device_storage_snapshot'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(Integer, ForeignKey('device.id', ondelete='CASCADE'), nullable=False)
+    observed_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    free_bytes = Column(Integer, nullable=False)
+    total_bytes = Column(Integer, nullable=False)
+    device = relationship("Device")
+    __table_args__ = (
+        CheckConstraint('free_bytes >= 0', name='ck_device_storage_free_nonnegative'),
+        CheckConstraint('total_bytes >= free_bytes', name='ck_device_storage_total_gte_free'),
+        Index('ix_device_storage_device_observed', 'device_id', 'observed_at'),
+    )
+
+
+class DeviceBookDeletion(Base):
+    """One explicit, exact file-removal request for a registered device."""
+    __tablename__ = 'device_book_deletion'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    device_id = Column(Integer, ForeignKey('device.id', ondelete='CASCADE'), nullable=False)
+    inventory_item_id = Column(
+        Integer, ForeignKey('device_inventory_item.id', ondelete='SET NULL'), nullable=True,
+    )
+    book_id = Column(Integer, nullable=True)
+    lpath = Column(String(1024), nullable=False)
+    checksum = Column(String(32), nullable=False)
+    state = Column(String(24), nullable=False)
+    requested_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    claimed_at = Column(DateTime, nullable=True)
+    claim_token = Column(String(96), nullable=False)
+    completed_at = Column(DateTime, nullable=True)
+    failure_reason = Column(String(512), nullable=True)
+    device = relationship("Device")
+    __table_args__ = (
+        UniqueConstraint(
+            'device_id', 'lpath', 'checksum',
+            name='uq_device_book_deletion_named_target',
+        ),
+        Index('ix_device_book_deletion_claim', 'device_id', 'state', 'id'),
+    )
+
+
+class DeviceCollectionSync(Base):
+    """Per-user, per-device delivery state for server shelf collections."""
+    __tablename__ = 'device_collection_sync'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('user.id', ondelete='CASCADE'), nullable=False)
+    device_id = Column(Integer, ForeignKey('device.id', ondelete='CASCADE'), nullable=False)
+    scope_id = Column(String(36), nullable=False, default=lambda: str(uuid.uuid4()))
+    revision = Column(Integer, nullable=False, default=1)
+    snapshot_hash = Column(String(64), nullable=False)
+    delivered_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    applied_at = Column(DateTime, nullable=True)
+    device = relationship("Device")
+    __table_args__ = (
+        UniqueConstraint('user_id', 'device_id', name='uq_device_collection_user_device'),
+        UniqueConstraint('scope_id', name='uq_device_collection_scope'),
+        Index('ix_device_collection_device_user', 'device_id', 'user_id'),
+    )
+
+
 class AnnotationContentIdMigration(Base):
     """Exact undo journal for conservative content-id backfills."""
     __tablename__ = 'annotation_content_id_migration'
@@ -1444,9 +1545,23 @@ class KoboAnnotationBookState(Base):
     content_id = Column(String(64), nullable=False)
     authority_status = Column(String(24), nullable=False, default='unseeded')
     authority_revision = Column(Integer, nullable=False, default=0)
+    ever_authoritative = Column(
+        Boolean, nullable=False, default=False, server_default=text("0"),
+    )
     generation_id = Column(String(36), nullable=False, default=lambda: str(uuid.uuid4()))
     set_digest = Column(String(64), nullable=True)
     current_etag = Column(Text, nullable=True)
+    # Exact bytes from the last complete local replacement set.  Nickel can
+    # treat an empty/error annotations GET as authoritative deletion, so this
+    # is the durable fallback when both live render queries fail after Kobo's
+    # cloud copy has become stale.
+    last_served_body_gzip = Column(BLOB, nullable=True)
+    last_served_body_sha256 = Column(String(64), nullable=True)
+    last_served_etag = Column(Text, nullable=True)
+    last_served_annotation_count = Column(Integer, nullable=True)
+    last_served_authority_revision = Column(Integer, nullable=True)
+    last_served_set_digest = Column(String(64), nullable=True)
+    last_served_at = Column(DateTime, nullable=True)
     etag_kind = Column(String(24), nullable=True)
     upstream_seed_etag = Column(Text, nullable=True)
     opaque_content_status = Column(String(16), nullable=False, default='unknown')
@@ -1548,6 +1663,12 @@ class KoboAnnotationSeedCapture(Base):
     )
     device_id = Column(Integer, ForeignKey('device.id', ondelete='SET NULL'), nullable=True)
     started_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    # Authority revision observed when this capture acquired the book-level
+    # pending-owner slot. Reconciliation is refused if the shared set moved in
+    # the meantime; a stale cloud snapshot may never overwrite newer state.
+    started_authority_revision = Column(
+        Integer, nullable=False, default=0, server_default=text("0"),
+    )
     completed_at = Column(DateTime, nullable=True)
     device_etag = Column(Text, nullable=True)
     upstream_etag = Column(Text, nullable=True)
@@ -1555,16 +1676,39 @@ class KoboAnnotationSeedCapture(Base):
     annotation_count = Column(Integer, nullable=True)
     page_count = Column(Integer, nullable=True)
     result = Column(String(24), nullable=False, default='pending')
+    seed_kind = Column(
+        String(32), nullable=False, default='upstream_capture',
+        server_default=text("'upstream_capture'"),
+    )
     failure_reason = Column(String(64), nullable=True)
+    reconciliation_conflict_count = Column(
+        Integer, nullable=False, default=0, server_default=text("0"),
+    )
     book_state = relationship("KoboAnnotationBookState", back_populates="seed_captures")
     pages = relationship(
         "KoboAnnotationSeedCapturePage", back_populates="seed_capture",
+        cascade="all, delete-orphan",
+    )
+    row_baselines = relationship(
+        "KoboAnnotationSeedRowBaseline", back_populates="seed_capture",
         cascade="all, delete-orphan",
     )
 
     __table_args__ = (
         CheckConstraint("result IN ('pending', 'accepted', 'rejected', 'failed')",
                         name='ck_kasc_result'),
+        CheckConstraint(
+            "seed_kind IN ('upstream_capture', 'routing_only')",
+            name='ck_kasc_seed_kind',
+        ),
+        # A pending capture is the SQLite-enforced reconciliation lease. The
+        # book_state row is already unique per (user, book), so this partial
+        # unique index permits historical completed captures while allowing
+        # only one live owner across all of the user's Kobo devices.
+        Index(
+            'uq_kasc_pending_book_owner', 'book_state_id', unique=True,
+            sqlite_where=text("result = 'pending'"),
+        ),
         Index('ix_kasc_book_time', 'book_state_id', 'started_at'),
     )
 
@@ -1587,6 +1731,34 @@ class KoboAnnotationSeedCapturePage(Base):
     __table_args__ = (
         UniqueConstraint('seed_capture_id', 'page_number', name='uq_kascp_capture_page'),
         Index('ix_kascp_capture', 'seed_capture_id', 'page_number'),
+    )
+
+
+class KoboAnnotationSeedRowBaseline(Base):
+    """Server-owned per-row CAS evidence for one upstream seed capture."""
+    __tablename__ = 'kobo_annotation_seed_row_baseline'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    seed_capture_id = Column(
+        Integer, ForeignKey('kobo_annotation_seed_capture.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    annotation_key = Column(String, nullable=False)
+    # Deliberately not a foreign key: deletion/reinsertion is itself CAS
+    # divergence and the historical identity must survive to prove it.
+    annotation_row_id = Column(Integer, nullable=True)
+    content_revision = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    content_sha256 = Column(String(64), nullable=True)
+    seed_capture = relationship(
+        "KoboAnnotationSeedCapture", back_populates="row_baselines",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            'seed_capture_id', 'annotation_key',
+            name='uq_kasrb_capture_annotation',
+        ),
+        Index('ix_kasrb_capture', 'seed_capture_id'),
     )
 
 
@@ -2015,6 +2187,10 @@ def add_missing_tables(engine, _session):
         ("user_library_book", UserLibraryBook.__table__),
         ("device_inventory_report", DeviceInventoryReport.__table__),
         ("device_inventory_item", DeviceInventoryItem.__table__),
+        ("device_book_delivery", DeviceBookDelivery.__table__),
+        ("device_storage_snapshot", DeviceStorageSnapshot.__table__),
+        ("device_book_deletion", DeviceBookDeletion.__table__),
+        ("device_collection_sync", DeviceCollectionSync.__table__),
     )
     kobo_entitlement_tables = (
         ("kobo_device_book_entitlement", KoboDeviceBookEntitlement.__table__),
@@ -3698,6 +3874,139 @@ def migrate_webreader_device_identity_slice(engine, _session):
         ))
 
 
+def migrate_kobo_annotation_seed_pipeline(engine, _session):
+    """Install M2's sticky-authority and capture-kind columns before ORM use."""
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            KoboAnnotationBookState.__table__,
+            KoboAnnotationSeedCapture.__table__,
+            KoboAnnotationSeedCapturePage.__table__,
+            KoboAnnotationSeedRowBaseline.__table__,
+        ],
+        checkfirst=True,
+    )
+    with engine.begin() as conn:
+        table_names = {
+            row[0] for row in conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+                "('kobo_annotation_book_state', 'kobo_annotation_seed_capture')"
+            ))
+        }
+        additions = (
+            (
+                "kobo_annotation_book_state",
+                "ever_authoritative",
+                "ever_authoritative BOOLEAN NOT NULL DEFAULT 0",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_body_gzip",
+                "last_served_body_gzip BLOB",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_body_sha256",
+                "last_served_body_sha256 VARCHAR(64)",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_etag",
+                "last_served_etag TEXT",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_annotation_count",
+                "last_served_annotation_count INTEGER",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_authority_revision",
+                "last_served_authority_revision INTEGER",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_set_digest",
+                "last_served_set_digest VARCHAR(64)",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_at",
+                "last_served_at DATETIME",
+            ),
+            (
+                "kobo_annotation_seed_capture",
+                "seed_kind",
+                "seed_kind TEXT NOT NULL DEFAULT 'upstream_capture' "
+                "CHECK (seed_kind IN ('upstream_capture', 'routing_only'))",
+            ),
+            (
+                "kobo_annotation_seed_capture",
+                "started_authority_revision",
+                "started_authority_revision INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "kobo_annotation_seed_capture",
+                "reconciliation_conflict_count",
+                "reconciliation_conflict_count INTEGER NOT NULL DEFAULT 0",
+            ),
+        )
+        for table_name, column_name, ddl in additions:
+            if table_name not in table_names:
+                continue
+            existing = {
+                row[1] for row in conn.execute(
+                    text(f"PRAGMA table_info({table_name})")
+                )
+            }
+            if column_name in existing:
+                continue
+            try:
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {ddl}"))
+            except exc.OperationalError as error:
+                if "duplicate column" not in str(error).lower():
+                    raise
+
+        # Preserve the safety history of databases that reached authority by
+        # the hand-run M2 precursor. Raw SQL keeps this pre-ORM per #1950.
+        conn.execute(text(
+            "UPDATE kobo_annotation_book_state SET ever_authoritative=1 "
+            "WHERE authority_status='authoritative' AND ever_authoritative=0"
+        ))
+        # Before M2, an accepted empty capture with no page evidence could only
+        # be the runbook's routing-only seed. Captured empty upstream sets have
+        # page evidence and are therefore not rewritten here.
+        conn.execute(text(
+            "UPDATE kobo_annotation_seed_capture SET seed_kind='routing_only' "
+            "WHERE result='accepted' AND annotation_count=0 "
+            "AND NOT EXISTS (SELECT 1 FROM kobo_annotation_seed_capture_page p "
+            "WHERE p.seed_capture_id=kobo_annotation_seed_capture.id)"
+        ))
+        # Retain only the newest legacy pending capture for each book before
+        # installing the partial unique owner index. Superseded rows are
+        # diagnostic history, not reconciliation candidates.
+        conn.execute(text(
+            "UPDATE kobo_annotation_seed_capture SET result='failed', "
+            "completed_at=COALESCE(completed_at, CURRENT_TIMESTAMP), "
+            "failure_reason='seed_capture_superseded' "
+            "WHERE result='pending' AND id NOT IN ("
+            "SELECT MAX(id) FROM kobo_annotation_seed_capture "
+            "WHERE result='pending' GROUP BY book_state_id)"
+        ))
+        conn.execute(text(
+            "UPDATE kobo_annotation_seed_capture "
+            "SET started_authority_revision=COALESCE(("
+            "SELECT authority_revision FROM kobo_annotation_book_state s "
+            "WHERE s.id=kobo_annotation_seed_capture.book_state_id), 0) "
+            "WHERE started_authority_revision=0 AND result='pending'"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_kasc_pending_book_owner "
+            "ON kobo_annotation_seed_capture(book_state_id) "
+            "WHERE result='pending'"
+        ))
+
+
 _KOBO_TWO_WAY_TABLES = (
     KoboAnnotationMaterialization.__table__,
     KoboAnnotationBookState.__table__,
@@ -3705,6 +4014,7 @@ _KOBO_TWO_WAY_TABLES = (
     KoboDeviceBookAnnotationState.__table__,
     KoboAnnotationSeedCapture.__table__,
     KoboAnnotationSeedCapturePage.__table__,
+    KoboAnnotationSeedRowBaseline.__table__,
     KoboAnnotationPageSnapshot.__table__,
     KoboAnnotationPageCursor.__table__,
 )
@@ -4016,8 +4326,9 @@ def migrate_kobo_two_way_annotation_sync(engine, _session):
                 result = conn.execute(text(
                     "INSERT INTO kobo_annotation_book_state "
                     "(user_id, book_id, content_id, authority_status, authority_revision, "
+                    "ever_authoritative, "
                     "generation_id, opaque_content_status, updated_at) VALUES "
-                    "(:user_id, :book_id, :content_id, 'unseeded', 0, :generation_id, "
+                    "(:user_id, :book_id, :content_id, 'unseeded', 0, 0, :generation_id, "
                     "'unknown', :updated_at)"
                 ), {
                     "user_id": user_id,
@@ -4379,6 +4690,7 @@ def migrate_Database(_session):
     migrate_multi_device_annotation_safe_slice(engine, _session)
     migrate_device_management_slice(engine, _session)
     migrate_webreader_device_identity_slice(engine, _session)
+    migrate_kobo_annotation_seed_pipeline(engine, _session)
     migrate_kobo_two_way_annotation_sync(engine, _session)
     migrate_book_cover_preview_table(engine, _session)
     migrate_notice_tables(engine, _session)

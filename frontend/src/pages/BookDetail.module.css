@@ -450,14 +450,6 @@
   background: transparent;
 }
 
-.dangerZoneTitle {
-  margin: 0;
-  color: var(--text-muted);
-  font-family: var(--font-body);
-  font-size: var(--fs-sm);
-  font-weight: var(--fw-medium);
-}
-
 .actionDanger {
   display: inline-flex;
   align-items: center;
@@ -614,6 +606,15 @@
 
 .sendField select:focus,
 .sendField input:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+
+.sendPanel select,
+.deviceSendButton {
+  min-height: 44px;
+}
+
+.deviceSendButton {
+  height: auto;
+}
 
 .sendActions {
   display: flex;

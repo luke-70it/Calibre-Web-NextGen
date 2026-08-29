@@ -3207,6 +3207,42 @@ msgid "More by {name}"
 msgstr "Plus de {name}"
 
 #: cps/spa_strings.py
+msgid "Send to device"
+msgstr "Envoyer vers l’appareil"
+
+#: cps/spa_strings.py
+msgid "Device"
+msgstr "Appareil"
+
+#: cps/spa_strings.py
+msgid "Collects on the device's next sync."
+msgstr "L’appareil le récupérera lors de sa prochaine synchronisation."
+
+#: cps/spa_strings.py
+msgid "Choose a device"
+msgstr "Choisir un appareil"
+
+#: cps/spa_strings.py
+msgid "Queueing…"
+msgstr "Mise en file d’attente…"
+
+#: cps/spa_strings.py
+msgid "Book queued for this device"
+msgstr "Livre mis en file d’attente pour cet appareil"
+
+#: cps/spa_strings.py
+msgid "This book is already queued for this device"
+msgstr "Ce livre est déjà en file d’attente pour cet appareil"
+
+#: cps/spa_strings.py
+msgid "This book is already on that device"
+msgstr "Ce livre se trouve déjà sur cet appareil"
+
+#: cps/spa_strings.py
+msgid "Could not queue this book for the device."
+msgstr "Impossible de mettre ce livre en file d’attente pour l’appareil."
+
+#: cps/spa_strings.py
 #, python-brace-format
 msgid ""
 "Merge {n} books into the first selected? The others are removed after their "
@@ -5152,10 +5188,6 @@ msgid "Description formatting"
 msgstr "Mise en forme de la description"
 
 #: cps/spa_strings.py
-msgid "Device"
-msgstr "Appareil"
-
-#: cps/spa_strings.py
 msgid "Device name"
 msgstr "Nom de l'appareil"
 
@@ -6893,6 +6925,12 @@ msgid "This magic link expired. Generate a new one to try again."
 msgstr "Ce lien magique a expiré. Générez-en un nouveau pour réessayer."
 
 #: cps/spa_strings.py
+msgid "This magic link can’t be checked. Generate a new one to try again."
+msgstr ""
+"Ce lien magique ne peut pas être vérifié. Générez-en un nouveau pour "
+"réessayer."
+
+#: cps/spa_strings.py
 msgid "This page doesn't exist here."
 msgstr "Cette page n’existe pas ici."
 
@@ -6927,6 +6965,14 @@ msgstr "URL du jeton"
 #: cps/spa_strings.py
 msgid "Top Rated"
 msgstr "Les mieux notés"
+
+#: cps/spa_strings.py
+msgid ""
+"Too many magic-link checks were made from this network. Generate a new link "
+"or try again later."
+msgstr ""
+"Trop de vérifications de liens magiques ont été effectuées depuis ce réseau. "
+"Générez un nouveau lien ou réessayez plus tard."
 
 #: cps/spa_strings.py
 msgid "Trust authentication header"
@@ -7370,6 +7416,28 @@ msgstr ""
 #: cps/spa_strings.py
 msgid "View device library"
 msgstr "Afficher la bibliothèque de l’appareil"
+
+#: cps/spa_strings.py
+msgid "Delete from device"
+msgstr "Supprimer de l’appareil"
+
+#: cps/spa_strings.py
+msgid "Deletion requested"
+msgstr "Suppression demandée"
+
+#: cps/spa_strings.py
+msgid "Could not request deletion from this device."
+msgstr "Impossible de demander la suppression sur cet appareil."
+
+#: cps/spa_strings.py
+#, python-brace-format
+msgid "Delete {path} from {name} on its next sync?"
+msgstr "Supprimer {path} de {name} lors de sa prochaine synchronisation ?"
+
+#: cps/spa_strings.py
+#, python-brace-format
+msgid "{free} free of {total}"
+msgstr "{free} libres sur {total}"
 
 #: cps/spa_strings.py
 #, python-brace-format

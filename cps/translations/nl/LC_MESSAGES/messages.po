@@ -3092,6 +3092,42 @@ msgid "More by {name}"
 msgstr "Meer van {name}"
 
 #: cps/spa_strings.py
+msgid "Send to device"
+msgstr "Naar apparaat verzenden"
+
+#: cps/spa_strings.py
+msgid "Device"
+msgstr "Apparaat"
+
+#: cps/spa_strings.py
+msgid "Collects on the device's next sync."
+msgstr "Het apparaat haalt dit op bij de volgende synchronisatie."
+
+#: cps/spa_strings.py
+msgid "Choose a device"
+msgstr "Kies een apparaat"
+
+#: cps/spa_strings.py
+msgid "Queueing…"
+msgstr "In wachtrij plaatsen…"
+
+#: cps/spa_strings.py
+msgid "Book queued for this device"
+msgstr "Boek in de wachtrij geplaatst voor dit apparaat"
+
+#: cps/spa_strings.py
+msgid "This book is already queued for this device"
+msgstr "Dit boek staat al in de wachtrij voor dit apparaat"
+
+#: cps/spa_strings.py
+msgid "This book is already on that device"
+msgstr "Dit boek staat al op dat apparaat"
+
+#: cps/spa_strings.py
+msgid "Could not queue this book for the device."
+msgstr "Kan dit boek niet in de wachtrij voor het apparaat plaatsen."
+
+#: cps/spa_strings.py
 #, python-brace-format
 msgid ""
 "Merge {n} books into the first selected? The others are removed after their "
@@ -5025,10 +5061,6 @@ msgid "Description formatting"
 msgstr "Opmaak van beschrijving"
 
 #: cps/spa_strings.py
-msgid "Device"
-msgstr "Apparaat"
-
-#: cps/spa_strings.py
 msgid "Device name"
 msgstr "Apparaatnaam"
 
@@ -6751,6 +6783,12 @@ msgstr ""
 "Deze magic link is verlopen. Genereer een nieuwe om het opnieuw te proberen."
 
 #: cps/spa_strings.py
+msgid "This magic link can’t be checked. Generate a new one to try again."
+msgstr ""
+"Deze magic link kan niet worden gecontroleerd. Genereer een nieuwe om het "
+"opnieuw te proberen."
+
+#: cps/spa_strings.py
 msgid "This page doesn't exist here."
 msgstr "Deze pagina bestaat hier niet."
 
@@ -6786,6 +6824,14 @@ msgstr "Token URL"
 #: cps/spa_strings.py
 msgid "Top Rated"
 msgstr "Best beoordeeld"
+
+#: cps/spa_strings.py
+msgid ""
+"Too many magic-link checks were made from this network. Generate a new link "
+"or try again later."
+msgstr ""
+"Er zijn vanaf dit netwerk te veel controles van magic links uitgevoerd. "
+"Genereer een nieuwe link of probeer het later opnieuw."
 
 #: cps/spa_strings.py
 msgid "Trust authentication header"
@@ -7227,6 +7273,28 @@ msgstr ""
 #: cps/spa_strings.py
 msgid "View device library"
 msgstr "Apparaatbibliotheek bekijken"
+
+#: cps/spa_strings.py
+msgid "Delete from device"
+msgstr "Van apparaat verwijderen"
+
+#: cps/spa_strings.py
+msgid "Deletion requested"
+msgstr "Verwijdering aangevraagd"
+
+#: cps/spa_strings.py
+msgid "Could not request deletion from this device."
+msgstr "Verwijdering van dit apparaat kon niet worden aangevraagd."
+
+#: cps/spa_strings.py
+#, python-brace-format
+msgid "Delete {path} from {name} on its next sync?"
+msgstr "{path} van {name} verwijderen bij de volgende synchronisatie?"
+
+#: cps/spa_strings.py
+#, python-brace-format
+msgid "{free} free of {total}"
+msgstr "{free} vrij van {total}"
 
 #: cps/spa_strings.py
 #, python-brace-format
