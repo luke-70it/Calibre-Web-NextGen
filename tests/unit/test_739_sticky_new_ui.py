@@ -8,12 +8,12 @@ loading the SPA clears that opt-out so Classic -> SPA -> Classic can round-trip
 indefinitely. Redirects are limited to explicit browser-document HTML requests,
 because wildcard or missing Accept headers are ordinary machine-client traffic.
 
-The web index (cps/web.py) can't be driven directly in a unit test — it sits
-behind login and pulls the Calibre DB via render_books_list — so tests b/c/d
-exercise the REAL spa.py helpers through a minimal Flask app whose '/' route
-wires them exactly like web.py:index does (that wiring equivalence is pinned by
-the last test). The SPA-shell cookie (test a) is hit over HTTP on the real spa
-blueprint; the template gating (test e) is a source-pin.
+Most sticky-cookie cases exercise the REAL spa.py helpers through a minimal
+Flask app whose '/' route mirrors web.py:index. Cases whose ordering or side
+effects matter mount the real web blueprint and patch only its final rendering
+and environment boundaries; a stand-in cannot prove those contracts. The
+SPA-shell cookie (test a) is hit over HTTP on the real spa blueprint; the
+template gating (test e) is a source-pin.
 
 Cookie mechanics: the test client is created with use_cookies=False so its own
 (empty) cookie jar doesn't clobber the HTTP_COOKIE we inject per-request, and we
@@ -105,6 +105,19 @@ def _login_app(tmp_path):
     monkey = _seed_bundle(tmp_path)
     app = flask.Flask(__name__)
     app.config["SECRET_KEY"] = "test"
+    _mirror_prod_session_config(app)
+    app.register_blueprint(spa_mod.spa)
+    app.register_blueprint(web_mod.web)
+    return app, web_mod, monkey
+
+
+def _index_app(tmp_path):
+    """App with the real SPA and web blueprints for behavioral index tests."""
+    import cps.web as web_mod
+
+    monkey = _seed_bundle(tmp_path)
+    app = flask.Flask(__name__)
+    app.config.update(SECRET_KEY="test", TESTING=True)
     _mirror_prod_session_config(app)
     app.register_blueprint(spa_mod.spa)
     app.register_blueprint(web_mod.web)
@@ -467,6 +480,58 @@ def test_production_web_index_executes_the_preference_contract(
         cookies = _set_cookie(response)
         assert "cwng_prefer_classic=1" in cookies
         assert "cwng_prefer_spa=" in cookies
+
+
+@pytest.mark.unit
+def test_real_index_flashes_architecture_warning_only_when_classic_renders(
+        tmp_path):
+    """#1959: redirects must not queue a Classic-only warning in the session.
+
+    Exercise the mounted production blueprint rather than the sticky stand-in:
+    both explicit Classic paths still flash, while the default SPA redirect
+    leaves ``session['_flashes']`` empty.
+    """
+    app, web_mod, monkey = _index_app(tmp_path)
+    admin = MagicMock()
+    admin.is_authenticated = True
+    admin.role_admin.return_value = True
+    warning = "Unsupported architecture"
+
+    try:
+        with patch.object(web_mod, "current_user", admin), \
+             patch.object(web_mod.helper, "check_architecture",
+                          return_value=warning), \
+             patch.object(web_mod, "render_books_list",
+                          return_value="CLASSIC HOME"), \
+             patch.object(web_mod.config, "config_anonbrowse", 1,
+                          create=True), \
+             patch.object(web_mod.config,
+                          "config_allow_reverse_proxy_header_login", False,
+                          create=True):
+            redirect_client = app.test_client()
+            redirected = redirect_client.get("/", headers=_HTML_ACCEPT)
+            assert redirected.status_code == 302
+            assert redirected.headers["Location"] == "/app/"
+            with redirect_client.session_transaction() as sess:
+                assert sess.get("_flashes", []) == []
+
+            feedback_client = app.test_client()
+            feedback = feedback_client.get(
+                "/?cwng_feedback=newui", headers=_HTML_ACCEPT)
+            assert feedback.status_code == 200
+            with feedback_client.session_transaction() as sess:
+                assert sess.get("_flashes") == [
+                    ("cwa_arch_warning", warning)]
+
+            classic_client = app.test_client()
+            classic_client.set_cookie("cwng_prefer_classic", "1")
+            classic = classic_client.get("/", headers=_HTML_ACCEPT)
+            assert classic.status_code == 200
+            with classic_client.session_transaction() as sess:
+                assert sess.get("_flashes") == [
+                    ("cwa_arch_warning", warning)]
+    finally:
+        monkey.undo()
 
 
 @pytest.mark.unit

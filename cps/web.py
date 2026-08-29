@@ -1561,12 +1561,19 @@ def health_check():
 @web.route('/page/<int:page>')
 @login_required_if_no_ano
 def index(page):
+    sort_param = (request.args.get('sort') or 'stored').lower()
+
+    # Decide the response surface before creating Classic-only flashes. The SPA
+    # does not consume Flask's flash queue (#1959), so flashing before this
+    # redirect would hide the warning and accumulate duplicates in the session.
+    # The helper returns False for cwng_feedback, preserving that Classic path.
+    if spa.classic_index_redirects_to_spa():
+        return redirect(spa.spa_shell_url())
+
     if current_user.is_authenticated and current_user.role_admin():
         arch_warning = helper.check_architecture()
         if arch_warning:
             flash(arch_warning, category="cwa_arch_warning")
-
-    sort_param = (request.args.get('sort') or 'stored').lower()
 
     # The SPA's "Back to classic view" nav lands here with a one-shot feedback
     # marker. Persist the explicit Classic opt-out and clear the legacy SPA
@@ -1577,12 +1584,6 @@ def index(page):
         spa.stamp_prefer_classic_cookie(response)
         spa.clear_prefer_spa_cookie(response)
         return response
-
-    # SPA is the default unless this browser explicitly chose Classic. Same
-    # web-index-only scope; the helper also gates on availability and an explicit
-    # browser HTML-document request so machine clients never acquire redirects.
-    if spa.classic_index_redirects_to_spa():
-        return redirect(spa.spa_shell_url())
 
     return render_books_list("root", sort_param, 1, page)
 
