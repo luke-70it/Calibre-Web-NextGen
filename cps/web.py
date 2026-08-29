@@ -15,6 +15,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path as _Path
+from urllib.parse import urlencode
 
 from flask import Blueprint, jsonify
 from flask import request, redirect, send_from_directory, send_file, make_response, flash, abort, url_for, Response, g
@@ -2959,8 +2960,16 @@ def login():
             and spa.preferred_spa_html_request()):
         # The destination is fixed and app-owned. spa_shell_url() preserves a
         # valid reverse-proxy subpath while rejecting hostile forwarded prefixes;
-        # never redirect to the user-controlled ``next`` query parameter.
-        return redirect(spa.spa_shell_url())
+        # ``next`` is carried only as encoded data for the SPA's strict
+        # post-auth sanitizer, never used as the redirect destination itself.
+        destination = spa.spa_shell_url()
+        next_url = request.args.get("next")
+        if next_url:
+            destination = "%s?%s" % (destination, urlencode({"next": next_url}))
+        # The SPA has no Flask flash renderer. Do not carry Classic-only login
+        # messages forward to accumulate or surface later on an unrelated page.
+        flask_session.pop("_flashes", None)
+        return redirect(destination)
 
     # Handle OAuth-only authentication mode
     if config.config_login_type == constants.LOGIN_OAUTH:

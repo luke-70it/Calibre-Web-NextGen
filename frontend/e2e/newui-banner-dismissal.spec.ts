@@ -25,6 +25,25 @@ test('a cookie-less browser opens the SPA and Classic remains an explicit opt-ou
   expect(cookies.cwng_prefer_spa).toBe('1');
 });
 
+test('a JavaScript-disabled browser self-heals to Classic', async ({ browser, baseURL }) => {
+  const context = await browser.newContext({
+    baseURL,
+    javaScriptEnabled: false,
+    storageState: { cookies: [], origins: [] },
+  });
+  try {
+    const page = await context.newPage();
+    await page.goto('/app');
+    await expect(page).toHaveURL(/\/?cwng_feedback=newui$/);
+    await expect(page.locator('#books')).toBeVisible();
+    const cookies = await preferenceCookies(context);
+    expect(cookies.cwng_prefer_classic).toBe('1');
+    expect(cookies.cwng_prefer_spa).toBeUndefined();
+  } finally {
+    await context.close();
+  }
+});
+
 test('SPA to Classic to SPA round-trips and the removed nudge stays absent', async ({
   page, context, isMobile,
 }) => {

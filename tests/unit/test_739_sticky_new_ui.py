@@ -23,6 +23,7 @@ range (1.x–3.x).
 """
 import pathlib
 import inspect
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import MagicMock, patch
 
 import flask
@@ -108,6 +109,26 @@ def _login_app(tmp_path):
     _mirror_prod_session_config(app)
     app.register_blueprint(spa_mod.spa)
     app.register_blueprint(web_mod.web)
+    return app, web_mod, monkey
+
+
+def _unauthorized_login_app(tmp_path):
+    """Real login manager + protected route feeding the real web login route."""
+    from cps.cw_login import LoginManager, login_required
+
+    app, web_mod, monkey = _login_app(tmp_path)
+    login_manager = LoginManager(app)
+    login_manager.login_view = "web.login"
+
+    @login_manager.user_loader
+    def _load_user(_user_id):
+        return None
+
+    @app.route("/private-book")
+    @login_required
+    def _private_book():
+        return "PRIVATE"
+
     return app, web_mod, monkey
 
 
@@ -595,36 +616,98 @@ def test_preferred_spa_login_redirect_preserves_reverse_proxy_subpath(tmp_path):
 
 
 @pytest.mark.unit
-def test_preferred_spa_login_ignores_next_and_preserves_subpath(tmp_path):
-    """The handoff stays on the app-owned shell even when login has a ``next``
-    target; the sanitized reverse-proxy prefix is the only preserved input."""
+def test_preferred_spa_login_preserves_safe_next_on_app_owned_shell(tmp_path):
+    """A safe next rides as data; it never replaces the fixed shell target."""
     app, web_mod, monkey = _login_app(tmp_path)
     try:
         resp = _get_login(
-            _client(app), web_mod, "/login?next=%2Fcwa%2Fadmin",
+            _client(app), web_mod, "/login?next=%2Fcwa%2Fbook%2F42",
             headers=_HTML_ACCEPT,
             environ_overrides={**_PREFER_COOKIE, "SCRIPT_NAME": "/cwa"},
         )
         assert resp.status_code == 302
-        assert resp.headers["Location"] == "/cwa/app/"
+        destination = urlsplit(resp.headers["Location"])
+        assert destination.scheme == ""
+        assert destination.netloc == ""
+        assert destination.path == "/cwa/app/"
+        assert parse_qs(destination.query) == {"next": ["/cwa/book/42"]}
     finally:
         monkey.undo()
 
 
 @pytest.mark.unit
-def test_preferred_spa_login_rejects_off_site_next_destination(tmp_path):
-    """An attacker-controlled next= must never turn /login -> /app into an
-    external redirect. The fixed SPA destination contains no hostile target."""
+@pytest.mark.parametrize("hostile_next", [
+    "//evil.example/steal",
+    "https://evil.example/steal",
+    "/\\evil.example/steal",
+    "/book\\evil.example",
+    "/different-prefix/book/42",
+])
+def test_preferred_spa_login_next_cannot_change_app_owned_destination(
+        tmp_path, hostile_next):
+    """Hostile next values remain encoded data for the SPA sanitizer.
+
+    Scheme, authority, and path are derived only from the sanitized mount
+    prefix; neither an off-origin value nor a same-origin path outside this
+    instance's subpath can influence where the browser is actually sent.
+    """
     app, web_mod, monkey = _login_app(tmp_path)
     try:
         resp = _get_login(
             _client(app), web_mod,
-            "/login?next=https%3A%2F%2Fevil.example%2Fsteal",
-            headers=_HTML_ACCEPT, environ_overrides=_PREFER_COOKIE,
+            "/login", query_string={"next": hostile_next},
+            headers=_HTML_ACCEPT,
+            environ_overrides={**_PREFER_COOKIE, "SCRIPT_NAME": "/cwa"},
         )
         assert resp.status_code == 302
-        assert resp.headers["Location"] == "/app/"
-        assert "evil.example" not in resp.headers["Location"]
+        destination = urlsplit(resp.headers["Location"])
+        assert destination.scheme == ""
+        assert destination.netloc == ""
+        assert destination.path == "/cwa/app/"
+        assert parse_qs(destination.query) == {"next": [hostile_next]}
+    finally:
+        monkey.undo()
+
+
+@pytest.mark.unit
+def test_real_unauthorized_login_redirect_drains_classic_flash(tmp_path):
+    """#1959: the SPA login cannot display Flask-Login's login message.
+
+    Drive the actual login manager through a protected route, confirm it queues
+    the message, then follow its real /login?next redirect and prove that the
+    SPA handoff preserves next without leaving the flash in the session.
+    """
+    app, web_mod, monkey = _unauthorized_login_app(tmp_path)
+    try:
+        with patch.object(web_mod.config, "config_login_type", 0, create=True), \
+             patch.object(web_mod.config,
+                          "config_allow_reverse_proxy_header_login", False,
+                          create=True), \
+             patch.object(web_mod.config, "config_disable_standard_login",
+                          False, create=True), \
+             patch.object(web_mod.config,
+                          "config_enable_oauth_auto_forward", False,
+                          create=True):
+            client = app.test_client()
+            unauthorized = client.get("/private-book", headers=_HTML_ACCEPT)
+            assert unauthorized.status_code == 302
+            login_location = urlsplit(unauthorized.headers["Location"])
+            assert login_location.path == "/login"
+            assert parse_qs(login_location.query) == {
+                "next": ["/private-book"]}
+            with client.session_transaction() as sess:
+                assert sess.get("_flashes") == [
+                    ("message", "Please log in to access this page.")]
+
+            spa_login = client.get(
+                unauthorized.headers["Location"], headers=_HTML_ACCEPT)
+            assert spa_login.status_code == 302
+            destination = urlsplit(spa_login.headers["Location"])
+            assert destination.path == "/app/"
+            assert parse_qs(destination.query) == {
+                "next": ["/private-book"]}
+            with client.session_transaction() as sess:
+                assert sess.get("_flashes", []) == []
     finally:
         monkey.undo()
 

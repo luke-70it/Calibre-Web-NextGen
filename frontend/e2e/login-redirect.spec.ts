@@ -8,6 +8,25 @@ async function expectLibrary(page: import('@playwright/test').Page) {
 }
 
 test.describe('SPA post-auth destination', () => {
+  test('classic deep-link login bridge preserves next for the SPA', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop', 'one real password login is sufficient for this bridge');
+    await page.goto('/app');
+    const bookHref = await page.locator('a[href*="/app/book/"]').first().getAttribute('href');
+    expect(bookHref).toBeTruthy();
+    await page.context().clearCookies();
+
+    await page.goto(`/login?next=${encodeURIComponent(bookHref!)}`);
+    const bridged = new URL(page.url());
+    expect(bridged.pathname).toBe('/app/');
+    expect(bridged.searchParams.get('next')).toBe(bookHref);
+    await page.locator('input[autocomplete="username"]').fill(process.env.E2E_USER || 'admin');
+    await page.locator('input[autocomplete="current-password"]').fill(process.env.E2E_PASS || 'admin123');
+    await page.getByRole('button', { name: /sign in/i }).click();
+
+    await expect(page).toHaveURL(new RegExp(`${bookHref!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/?$`));
+    await expect(page.locator('main h1')).toBeVisible();
+  });
+
   test('password login at /app/login?next=%2F lands on the library, not the in-app 404', async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== 'desktop', 'one real password login is sufficient for this redirect contract');
     await page.context().clearCookies();

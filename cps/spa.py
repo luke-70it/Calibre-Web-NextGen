@@ -231,7 +231,9 @@ def _render_shell(index_path, prefix):
     a reverse-proxy subpath those 404 (the reporter's white page, #571). Rewrite
     them to ``<prefix>/static/app/…`` and expose the prefix to the SPA runtime via
     ``window.__CWNG_PREFIX__`` so its API calls, router base and resource URLs are
-    prefixed too. At the domain root (prefix="") the file is served unchanged."""
+    prefixed too. Browsers with JavaScript disabled, or without module-script
+    support, are returned to the prefix-aware Classic feedback route rather
+    than being stranded on the shell's empty root element."""
     with open(index_path, "r", encoding="utf-8") as fh:
         html = fh.read()
     if prefix:
@@ -239,6 +241,8 @@ def _render_shell(index_path, prefix):
     # Inject, into <head>:
     #  * the favicon (#574 — the Vite shell ships none, so the new UI had a blank
     #    tab icon); reuse the app's existing /static/favicon.ico, prefix-aware.
+    #  * self-healing Classic fallbacks for JavaScript-disabled and pre-module
+    #    browsers. Modern module-capable browsers ignore both branches.
     #  * the mount prefix (even "") so the SPA reads an authoritative value rather
     #    than guessing from the URL. json.dumps → safely-quoted JS string.
     #  * the running version, so the SPA can name its own build. The classic UI
@@ -252,11 +256,21 @@ def _render_shell(index_path, prefix):
     #    build rather than the user, and is what the classic feedback popup
     #    already shows to every user regardless of role.
     static = prefix + "/static"
+    classic_fallback = prefix + "/?cwng_feedback=newui"
     inject = (
         '<link rel="icon" href="%s/favicon.ico">'
         '<link rel="apple-touch-icon" sizes="180x180" href="%s/img/apple-touch-icon.png">'
+        '<noscript><meta http-equiv="refresh" content="0;url=%s"></noscript>'
+        '<script nomodule>window.location.replace(%s);</script>'
         '<script>window.__CWNG_PREFIX__=%s;window.__CWNG_VERSION__=%s;</script>'
-    ) % (static, static, json.dumps(prefix), json.dumps(constants.INSTALLED_VERSION))
+    ) % (
+        static,
+        static,
+        classic_fallback,
+        json.dumps(classic_fallback),
+        json.dumps(prefix),
+        json.dumps(constants.INSTALLED_VERSION),
+    )
     html = html.replace("</head>", inject + "</head>", 1)
     resp = Response(html, mimetype="text/html")
     # The shell NAMES the content-addressed bundle files, which are served

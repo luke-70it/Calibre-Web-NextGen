@@ -67,6 +67,36 @@ def test_prefix_rewrites_assets_and_injects(monkeypatch, tmp_path):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(("prefix", "fallback"), [
+    ("", "/?cwng_feedback=newui"),
+    ("/cwa", "/cwa/?cwng_feedback=newui"),
+])
+def test_shell_injects_prefix_aware_no_js_and_legacy_fallbacks(
+        monkeypatch, tmp_path, prefix, fallback):
+    """A browser that cannot execute the module bundle self-heals to Classic.
+
+    The meta refresh is inert unless JavaScript is disabled because it lives in
+    ``noscript``. The script redirect is inert in module-capable browsers
+    because it is marked ``nomodule``. Both target the fixed, prefix-aware
+    feedback route, which persists the Classic opt-out.
+    """
+    app = _spa_app(monkeypatch, tmp_path)
+    resp = app.test_client().get(
+        "/app", environ_overrides={"SCRIPT_NAME": prefix})
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert (
+        '<noscript><meta http-equiv="refresh" content="0;url=%s">'
+        '</noscript>' % fallback
+    ) in body
+    assert (
+        '<script nomodule>window.location.replace(%s);</script>'
+        % __import__("json").dumps(fallback)
+    ) in body
+    assert body.count("window.location.replace(") == 1
+
+
+@pytest.mark.unit
 def test_prefix_via_reverseproxied_header(monkeypatch, tmp_path):
     """Faithful to production: the real ReverseProxied middleware reads
     X-Script-Name → SCRIPT_NAME → request.script_root, and the shell picks it up.
