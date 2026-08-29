@@ -52,6 +52,13 @@ async function csrfHeaders(page: Page): Promise<Record<string, string>> {
   return { 'X-CSRFToken': body.csrf_token };
 }
 
+async function resetShowHiddenPreference(page: Page) {
+  await page.request.post('/api/v1/account/preferences', {
+    headers: await csrfHeaders(page),
+    data: { preferences: { show_hidden_books: false } },
+  });
+}
+
 test('Hide persists across reload; Show hidden reveals a marked book and provides Unhide', async ({ page }) => {
   await page.goto('/app');
   const book = await firstBook(page);
@@ -85,7 +92,11 @@ test('Hide persists across reload; Show hidden reveals a marked book and provide
     await page.getByTestId('catalog-view-settings').click();
     const showHidden = page.getByTestId('show-hidden-books');
     await expect(showHidden).not.toBeChecked();
+    const preferenceSaved = page.waitForResponse((response) =>
+      response.url().includes('/api/v1/account/preferences')
+      && response.request().method() === 'POST');
     await showHidden.check();
+    expect((await preferenceSaved).ok()).toBeTruthy();
     expect(await page.evaluate(() => localStorage.getItem('cwng_show_hidden_books_v1'))).toBe('1');
     const revealed = await page.request.get('/api/v1/books?per_page=60&show_hidden=1').then((r) => r.json());
     expect(revealed.total).toBe(before.total);
@@ -111,6 +122,7 @@ test('Hide persists across reload; Show hidden reveals a marked book and provide
         headers: await csrfHeaders(page), data: { hidden: false },
       });
     }
+    await resetShowHiddenPreference(page);
     await page.evaluate(() => localStorage.removeItem('cwng_show_hidden_books_v1'));
   }
 
@@ -148,6 +160,7 @@ test('hidden+archived remains recoverable through Show hidden, while Archived ke
       });
     }
     if (detail?.archived) await page.request.post(`/api/v1/books/${book!.id}/archived`, { headers });
+    await resetShowHiddenPreference(page);
     await page.evaluate(() => localStorage.removeItem('cwng_show_hidden_books_v1'));
   }
 });

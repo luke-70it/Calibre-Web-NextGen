@@ -69,6 +69,17 @@ def test_me_ignores_malformed_stored_preference():
     assert payload["preferences"] == _UNSET_PREFERENCES
 
 
+@pytest.mark.parametrize("user", [
+    object(),
+    SimpleNamespace(get_view_property=MagicMock(
+        side_effect=RuntimeError("legacy JSON is unreadable"))),
+])
+def test_serializer_degrades_when_preference_store_is_missing_or_raises(user):
+    from cps.user_preferences import serialize_named_preferences
+
+    assert serialize_named_preferences(user) == _UNSET_PREFERENCES
+
+
 class _FakeUser:
     def __init__(self, *, anonymous=False, view_settings=None):
         self.is_authenticated = not anonymous
@@ -170,6 +181,25 @@ def test_endpoint_rolls_back_commit_failure():
     session.rollback.assert_called_once_with()
 
 
+def test_endpoint_rolls_back_staging_failure_without_committing():
+    user = _FakeUser()
+    user.set_view_property = MagicMock(side_effect=RuntimeError("bad store"))
+
+    response, session = _call(
+        {"preferences": {"discover_hidden": False}}, user)
+
+    assert _status(response) == 400
+    session.rollback.assert_called_once_with()
+    session.commit.assert_not_called()
+
+
+def test_named_preference_setter_requires_a_real_store():
+    from cps.user_preferences import set_named_preferences
+
+    with pytest.raises(AttributeError, match="store is unavailable"):
+        set_named_preferences(object(), {"discover_hidden": True})
+
+
 def test_endpoint_rejects_guest_without_writing():
     user = _FakeUser(anonymous=True)
     response, session = _call(
@@ -179,11 +209,41 @@ def test_endpoint_rejects_guest_without_writing():
     session.commit.assert_not_called()
 
 
+def test_user_store_can_stage_into_null_json_without_early_commit():
+    from cps import ub
+
+    user = ub.User()
+    user.view_settings = None
+    staged_session = MagicMock()
+    with patch.object(ub, "session", staged_session):
+        user.set_view_property(
+            "preferences", "discover_hidden", True, commit=False)
+
+    assert user.view_settings == {"preferences": {"discover_hidden": True}}
+    staged_session.commit.assert_not_called()
+
+
+def test_anonymous_store_accepts_the_uniform_non_committing_signature():
+    from cps import ub
+
+    app = flask.Flask(__name__)
+    app.secret_key = "test"
+    guest = object.__new__(ub.Anonymous)
+    with app.test_request_context("/"):
+        guest.set_view_property(
+            "preferences", "discover_hidden", True, commit=False)
+        assert flask.session["view"] == {
+            "preferences": {"discover_hidden": True},
+        }
+
+
 def test_frontend_uses_generic_named_preference_hook_for_catalog_preferences():
     hook = _FRONTEND / "lib" / "useNamedPreference.ts"
     card_hook = _FRONTEND / "lib" / "useCardActionsHidden.ts"
     assert hook.is_file()
     hook_src = hook.read_text(encoding="utf-8")
+    state_src = (_FRONTEND / "lib" / "namedPreferenceState.ts").read_text(
+        encoding="utf-8")
     card_hook_src = card_hook.read_text(encoding="utf-8")
     catalog_src = (_FRONTEND / "pages" / "Catalog.tsx").read_text(encoding="utf-8")
     queries_src = (_FRONTEND / "lib" / "queries.ts").read_text(encoding="utf-8")
@@ -198,5 +258,5 @@ def test_frontend_uses_generic_named_preference_hook_for_catalog_preferences():
     assert "card_actions_hidden" in card_hook_src
     assert "CARD_ACTIONS_HIDDEN_KEY" in card_hook_src
     assert "/account/preferences" in queries_src
-    assert "role?.anonymous" in hook_src
+    assert "role?.anonymous" in state_src
     assert "localStorage" in hook_src

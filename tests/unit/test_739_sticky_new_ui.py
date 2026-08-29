@@ -22,6 +22,7 @@ set_cookie() test-client API, which changed signature across the supported Flask
 range (1.x–3.x).
 """
 import pathlib
+import inspect
 from unittest.mock import MagicMock, patch
 
 import flask
@@ -135,6 +136,26 @@ def _client(app):
 
 def _set_cookie(resp):
     return ", ".join(resp.headers.getlist("Set-Cookie"))
+
+
+def _call_real_index(path, tmp_path, *, headers=None, environ_overrides=None):
+    """Drive the unwrapped production index branch with its rendering boundary
+    stubbed, so coverage and behavior both include cps.web.index itself."""
+    import cps.web as web_mod
+
+    monkey = _seed_bundle(tmp_path)
+    app = flask.Flask(__name__)
+    _mirror_prod_session_config(app)
+    anonymous = MagicMock()
+    anonymous.is_authenticated = False
+    with app.test_request_context(
+            path, headers=headers, environ_overrides=environ_overrides), \
+         patch.object(web_mod, "current_user", anonymous), \
+         patch.object(web_mod, "render_books_list", return_value="CLASSIC HOME"):
+        result = inspect.unwrap(web_mod.index)(1)
+        response = app.make_response(result)
+    monkey.undo()
+    return response
 
 
 @pytest.mark.unit
@@ -269,6 +290,38 @@ def test_non_document_fetch_with_html_accept_is_not_redirected(tmp_path):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("headers", [
+    {"Accept": "text/html;q=0,*/*;q=1"},
+    {"Accept": "text/html", "Sec-Fetch-Dest": "document",
+     "Sec-Fetch-Mode": "cors"},
+])
+def test_non_navigating_or_explicitly_rejected_html_is_not_redirected(
+        tmp_path, headers):
+    app, monkey = _sticky_app(tmp_path)
+    try:
+        resp = _client(app).get("/", headers=headers)
+        assert resp.status_code == 200
+        assert b"CLASSIC HOME" in resp.data
+    finally:
+        monkey.undo()
+
+
+@pytest.mark.unit
+def test_fetch_metadata_document_navigation_redirects(tmp_path):
+    app, monkey = _sticky_app(tmp_path)
+    try:
+        resp = _client(app).get("/", headers={
+            "Accept": "text/html,application/xhtml+xml",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+        })
+        assert resp.status_code == 302
+        assert resp.headers["Location"] == "/app/"
+    finally:
+        monkey.undo()
+
+
+@pytest.mark.unit
 def test_classic_opt_out_sticks_across_fresh_request(tmp_path):
     app, monkey = _sticky_app(tmp_path)
     try:
@@ -391,6 +444,29 @@ def test_auth_carve_out_does_not_disable_authenticated_index_spa(
         assert resp.headers["Location"] == "/app/"
     finally:
         monkey.undo()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("path", "headers", "cookie", "status"), [
+    ("/", _HTML_ACCEPT, None, 302),
+    ("/", _HTML_ACCEPT, _CLASSIC_COOKIE, 200),
+    ("/", {"Accept": "*/*", "User-Agent": "curl/8.7.1"}, None, 200),
+    ("/?cwng_feedback=newui", _HTML_ACCEPT, _PREFER_COOKIE, 200),
+])
+def test_production_web_index_executes_the_preference_contract(
+        tmp_path, path, headers, cookie, status):
+    response = _call_real_index(
+        path, tmp_path, headers=headers, environ_overrides=cookie)
+
+    assert response.status_code == status
+    if status == 302:
+        assert response.headers["Location"] == "/app/"
+    else:
+        assert response.get_data(as_text=True) == "CLASSIC HOME"
+    if "cwng_feedback" in path:
+        cookies = _set_cookie(response)
+        assert "cwng_prefer_classic=1" in cookies
+        assert "cwng_prefer_spa=" in cookies
 
 
 @pytest.mark.unit

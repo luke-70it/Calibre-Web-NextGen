@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useMe, useUpdateNamedPreferences } from './queries';
 import { usePersistentBool } from './usePersistentBool';
+import { resolveNamedPreferenceState } from './namedPreferenceState';
 
 function readStoredBool(key: string): boolean | null {
   try {
@@ -35,10 +36,10 @@ export function useNamedPreference(
   const storedAtMount = useRef<boolean | null>(readStoredBool(localStorageKey));
   const adoptionAttempted = useRef(false);
 
-  const isGuest = !!me?.role?.anonymous;
-  const hasServerSlot = !!me?.preferences
-    && Object.prototype.hasOwnProperty.call(me.preferences, name);
-  const serverValue = hasServerSlot ? me?.preferences?.[name] : undefined;
+  const state = resolveNamedPreferenceState(
+    me, name, localValue, storedAtMount.current,
+  );
+  const { serverValue, value } = state;
 
   // Keep the fallback current for offline use without letting it override the
   // server on an authenticated render.
@@ -49,27 +50,24 @@ export function useNamedPreference(
   // One-time adoption. An absent local key is not a preference and therefore
   // does not create a pointless write of the fallback default.
   useEffect(() => {
-    if (!me || isGuest || !hasServerSlot || serverValue !== null
-        || storedAtMount.current === null || adoptionAttempted.current) return;
+    const valueToAdopt = storedAtMount.current;
+    if (!state.shouldAdopt || valueToAdopt === null
+        || adoptionAttempted.current) return;
     adoptionAttempted.current = true;
     update.mutate(
-      { [name]: storedAtMount.current },
+      { [name]: valueToAdopt },
       {
         onError: () => {
           options.onError?.();
         },
       },
     );
-  }, [hasServerSlot, isGuest, me, name, options, serverValue, update]);
-
-  const value = (!isGuest && typeof serverValue === 'boolean')
-    ? serverValue
-    : localValue;
+  }, [name, options, state.shouldAdopt, update]);
 
   const setValue = useCallback((next: boolean) => {
     const previous = value;
     setLocalValue(next);
-    if (!me || isGuest || !hasServerSlot) return;
+    if (!state.canPersist) return;
     update.mutate(
       { [name]: next },
       {
@@ -79,7 +77,7 @@ export function useNamedPreference(
         },
       },
     );
-  }, [hasServerSlot, isGuest, me, name, options, setLocalValue, update, value]);
+  }, [name, options, setLocalValue, state.canPersist, update, value]);
 
   return [value, setValue, update.isPending] as const;
 }

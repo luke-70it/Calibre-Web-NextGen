@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 
 /*
  * #1054 — "Can we please have the option of hiding the 'Read Now' and the edit
@@ -7,7 +7,7 @@ import { test, expect } from '@playwright/test';
  * The controls were already hover-revealed on a mouse (#1185), but a user who
  * reads on an ereader never wants them, and on a touchscreen they are pinned
  * visible by the coarse-pointer block. So: a real preference in the catalog's
- * View settings, persisted per browser.
+ * View settings, persisted per account with a guest/local fallback.
  *
  * The load-bearing assertion is that switching it off REMOVES the controls
  * rather than hiding them. The hover-reveal uses `opacity: 0`, which leaves a
@@ -23,7 +23,8 @@ async function openViewSettings(page: import('@playwright/test').Page) {
   await expect(page.getByTestId('catalog-view-settings-menu')).toBeVisible();
 }
 
-test('the Read now + edit row can be switched off from View settings (#1054)', async ({ page }) => {
+test('the Read now + edit row can be switched off from View settings (#1054)', async ({ secondaryUser }) => {
+  const { page } = secondaryUser;
   await page.goto('/app/');
   await page.waitForLoadState('networkidle');
 
@@ -59,7 +60,8 @@ test('the Read now + edit row can be switched off from View settings (#1054)', a
   await expect(page.locator(PENCIL)).toHaveCount(pencilBefore);
 });
 
-test('hiding card actions leaves the cover link intact (#1054)', async ({ page }) => {
+test('hiding card actions leaves the cover link intact (#1054)', async ({ secondaryUser }) => {
+  const { page } = secondaryUser;
   await page.goto('/app/');
   await page.waitForLoadState('networkidle');
 
@@ -75,9 +77,8 @@ test('hiding card actions leaves the cover link intact (#1054)', async ({ page }
   const card = page.locator('[class*="grid"] a[href*="/book/"]').first();
   await expect(card).toBeVisible();
 
-  // Restore before leaving. Each test gets its own context, so this cannot leak
-  // into another spec — but the toggle is the thing under test and leaving it
-  // off would make a failure here read as a failure over there.
+  // Restore before leaving. The test-scoped account is deleted by the fixture,
+  // but exercising both directions is part of this control's contract.
   await openViewSettings(page);
   await page.getByTestId('show-card-actions').check();
 });

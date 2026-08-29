@@ -211,6 +211,83 @@ test('hidden books and card actions adopt local state and follow the account', a
   }
 });
 
+test('named preference writes are optimistic and roll back on failure', async ({
+  secondaryUser,
+}) => {
+  const { page } = secondaryUser;
+  let requestCount = 0;
+  let markFirstStarted!: () => void;
+  let markSecondStarted!: () => void;
+  let releaseFirst!: () => void;
+  let releaseSecond!: () => void;
+  const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+  const secondStarted = new Promise<void>((resolve) => { markSecondStarted = resolve; });
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+
+  await page.route('**/api/v1/account/preferences', async (route) => {
+    const payload = route.request().postDataJSON() as {
+      preferences?: Record<string, boolean>;
+    };
+    if (!Object.prototype.hasOwnProperty.call(
+      payload.preferences ?? {}, 'discover_hidden')) {
+      await route.continue();
+      return;
+    }
+    requestCount += 1;
+    if (requestCount === 1) {
+      markFirstStarted();
+      await firstGate;
+      await route.continue();
+      return;
+    }
+    markSecondStarted();
+    await secondGate;
+    await route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: { message: 'forced failure' } }),
+    });
+  });
+
+  await page.goto('/app');
+  await expect(page.getByTestId('discover-section')).toBeVisible();
+  await page.getByTestId('catalog-view-settings').click();
+  let showDiscover = page.getByTestId('show-discover-section');
+
+  // The section and local fallback update before the held server request ends.
+  const firstSaved = page.waitForResponse((response) =>
+    response.url().includes('/api/v1/account/preferences')
+    && response.request().method() === 'POST');
+  await showDiscover.uncheck();
+  await firstStarted;
+  await expect(page.getByTestId('discover-section')).toHaveCount(0);
+  expect(await page.evaluate(() =>
+    localStorage.getItem('cwng_discover_hidden_v1'))).toBe('1');
+  releaseFirst();
+  expect((await firstSaved).ok()).toBeTruthy();
+  await expect(showDiscover).toBeEnabled();
+  await expect(showDiscover).not.toBeChecked();
+
+  // A failed inverse write is optimistic too, then both query cache and local
+  // fallback return to the last server-confirmed value with an announced error.
+  await page.reload();
+  await expect(page.getByTestId('discover-section')).toHaveCount(0);
+  await page.getByTestId('catalog-view-settings').click();
+  showDiscover = page.getByTestId('show-discover-section');
+  await expect(showDiscover).not.toBeChecked();
+  await showDiscover.click();
+  await secondStarted;
+  await expect(page.getByTestId('discover-section')).toBeVisible();
+  expect(await page.evaluate(() =>
+    localStorage.getItem('cwng_discover_hidden_v1'))).toBe('0');
+  releaseSecond();
+  await expect(page.getByTestId('discover-section')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() =>
+    localStorage.getItem('cwng_discover_hidden_v1'))).toBe('1');
+  await expect(page.getByText('Could not save.', { exact: true })).toBeVisible();
+});
+
 test('guest catalog preferences stay local and never post', async ({ page }) => {
   let preferencePosts = 0;
   page.on('request', (request) => {
