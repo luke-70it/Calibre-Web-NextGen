@@ -2952,8 +2952,10 @@ def login():
 
     # #908: the UI preference is per-browser, not per-user, so it remains readable
     # after logout. Route an anonymous browser into the SPA's logged-out tree by
-    # default; an explicit Classic opt-out still renders the Classic login.
-    if spa.preferred_spa_html_request():
+    # default only when that tree can authenticate the configured login mode; an
+    # explicit Classic opt-out still renders the Classic login.
+    if (spa.spa_login_default_supported()
+            and spa.preferred_spa_html_request()):
         # The destination is fixed and app-owned. spa_shell_url() preserves a
         # valid reverse-proxy subpath while rejecting hostile forwarded prefixes;
         # never redirect to the user-controlled ``next`` query parameter.
