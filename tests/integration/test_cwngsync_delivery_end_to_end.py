@@ -136,7 +136,21 @@ def test_a_device_can_be_sent_a_book_and_confirm_it(cwng_server, device):
     # Sending an unreadable format would look like success and fail on the device.
     assert queued.json()["format"] in KOREADER_READABLE
 
-    claimed = _kosync(client, "POST", "/syncs/deliveries/claim", json=device)
+    # A claim carries the device's fresh free/total space: the server records it
+    # and will not hand over a book it knows cannot fit. Both api.json's payload
+    # and its required_params list them, so a claim without them is refused --
+    # asserted here so the two halves of that contract cannot drift apart
+    # silently, which is the failure mode lua-Spore makes invisible.
+    storage = {"free_space": 4 * 1024 * 1024 * 1024,
+               "total_space": 8 * 1024 * 1024 * 1024}
+    storageless = _kosync(client, "POST", "/syncs/deliveries/claim", json=device)
+    assert storageless.status_code == 400, (
+        "a claim with no storage reading was accepted; the fit check is then "
+        f"decoration (got {storageless.status_code})"
+    )
+
+    claimed = _kosync(client, "POST", "/syncs/deliveries/claim",
+                      json={**device, **storage})
     assert claimed.status_code == 200, claimed.text
     delivery = claimed.json()["delivery"]
     assert delivery is not None, "the queued book was not offered to its own device"
@@ -181,8 +195,143 @@ def test_a_device_can_be_sent_a_book_and_confirm_it(cwng_server, device):
 
     # A confirmed delivery must leave the queue. If it did not, the device would
     # re-download the same book on every sync for the rest of its life.
-    drained = _kosync(client, "POST", "/syncs/deliveries/claim", json=device)
+    drained = _kosync(client, "POST", "/syncs/deliveries/claim",
+                      json={**device, **storage})
     assert drained.status_code == 200, drained.text
     assert drained.json()["delivery"] is None, (
         "the completed delivery was offered again; this device would loop forever"
     )
+
+
+def _report_inventory(client, device, books, *, free_space=None, total_space=None):
+    payload = {**device, "inventory": books}
+    if free_space is not None:
+        payload["free_space"] = free_space
+        payload["total_space"] = total_space
+    response = _kosync(client, "PUT", "/syncs/inventory", json=payload)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def _inventory_view(client, public_id):
+    response = client["session"].get(
+        f"{client['base_url']}/api/annotations/devices/{public_id}/inventory",
+        timeout=15,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_a_named_deletion_is_carried_out_and_confirmed(cwng_server, device):
+    """Deleting from a device is NAMED end to end -- never inferred.
+
+    The request addresses an inventory item the device itself reported, so
+    "delete what is missing from the latest report" is not expressible through
+    this API. That is the property worth holding: a device that syncs mid-copy,
+    or with a card unmounted, sends a short report and must lose nothing.
+    """
+    client = cwng_server
+    book = {
+        "lpath": "Books/named-deletion.epub",
+        "checksum": "0" * 32,
+        "size": 1024,
+        "mtime": 1700000000,
+    }
+    registered = _report_inventory(client, device, [book])
+    public_id = registered["device"]
+
+    listed = _inventory_view(client, public_id)
+    item = next(b for b in listed["books"] if b["lpath"] == book["lpath"])
+
+    requested = client["session"].post(
+        f"{client['base_url']}/api/annotations/devices/{public_id}"
+        f"/inventory/{item['inventory_item_id']}/delete",
+        headers={"X-CSRFToken": _csrf(client)},
+        timeout=15,
+    )
+    assert requested.status_code == 202, requested.text
+
+    claimed = _kosync(client, "POST", "/syncs/deletions/claim", json=device)
+    assert claimed.status_code == 200, claimed.text
+    deletion = claimed.json()["deletion"]
+    assert deletion is not None, "the requested deletion was not offered to its device"
+    assert deletion["lpath"] == book["lpath"], (
+        "the device was told to delete a path it was not asked about"
+    )
+
+    confirmed = _kosync(client, "PUT", "/syncs/deletions/complete", json={
+        **device,
+        "deletion_id": deletion["id"],
+        "claim_token": deletion["claim_token"],
+        "deleted": True,
+    })
+    assert confirmed.status_code == 200, confirmed.text
+
+    # Only the device's confirmation removes the observation. Until it reports
+    # back, the server must keep believing the book is there.
+    remaining = _inventory_view(client, public_id)
+    assert all(b["lpath"] != book["lpath"] for b in remaining["books"]), (
+        "the confirmed deletion did not clear the observation"
+    )
+
+    drained = _kosync(client, "POST", "/syncs/deletions/claim", json=device)
+    assert drained.status_code == 200, drained.text
+    assert drained.json()["deletion"] is None, (
+        "the completed deletion was offered again; the device would delete twice"
+    )
+
+
+def test_a_device_reports_its_free_space(cwng_server, device):
+    """Storage has to survive the wire, not just the service layer.
+
+    ``free_space``/``total_space`` are declared in api.json, and lua-Spore drops
+    any field missing from the method's lists with no error at all, so only a
+    round trip shows they actually arrive.
+
+    Note the two names are deliberately different on the way in and the way out:
+    the device reports ``free_space``/``total_space``; the read API returns
+    ``storage_free``/``storage_total``. Asserting the wire names on the read side
+    would pass while reading nothing.
+    """
+    client = cwng_server
+    registered = _report_inventory(
+        client, device, [],
+        free_space=512 * 1024 * 1024,
+        total_space=8 * 1024 * 1024 * 1024,
+    )
+
+    listed = _inventory_view(client, registered["device"])
+    reported = listed["device"]
+    assert reported.get("storage_free") == 512 * 1024 * 1024, reported
+    assert reported.get("storage_total") == 8 * 1024 * 1024 * 1024, reported
+    assert reported.get("storage_observed") is not None, (
+        "storage was stored without a timestamp, so nothing can tell a fresh "
+        "reading from a stale one"
+    )
+
+
+def test_collections_are_acknowledged_by_revision(cwng_server, device):
+    """A device may only acknowledge the revision it was actually handed.
+
+    Acknowledgement clears "this device is out of date". Accepting a stale
+    revision would mark the device current against collections it never saw,
+    and nothing later would notice.
+    """
+    client = cwng_server
+    _report_inventory(client, device, [])
+
+    handed = _kosync(client, "POST", "/syncs/collections", json=device)
+    assert handed.status_code == 200, handed.text
+    snapshot = handed.json()
+    assert "collections" in snapshot and "revision" in snapshot, snapshot
+
+    stale = _kosync(client, "PUT", "/syncs/collections/complete",
+                    json={**device, "revision": snapshot["revision"] + 1})
+    assert stale.status_code == 409, (
+        f"a revision the device was never handed was accepted ({stale.status_code})"
+    )
+
+    acknowledged = _kosync(client, "PUT", "/syncs/collections/complete",
+                           json={**device, "revision": snapshot["revision"]})
+    assert acknowledged.status_code == 200, acknowledged.text
+    assert acknowledged.json()["completed"] is True
