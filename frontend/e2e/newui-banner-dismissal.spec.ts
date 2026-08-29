@@ -35,7 +35,7 @@ test('a JavaScript-disabled browser self-heals to Classic', async ({ browser, ba
     const page = await context.newPage();
     await page.goto('/app');
     await expect(page).toHaveURL(/\/?cwng_feedback=newui$/);
-    await expect(page.locator('#books')).toBeVisible();
+    await expect(page.locator('#books').first()).toBeVisible();
     const cookies = await preferenceCookies(context);
     expect(cookies.cwng_prefer_classic).toBe('1');
     expect(cookies.cwng_prefer_spa).toBeUndefined();

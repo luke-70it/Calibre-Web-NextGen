@@ -37,7 +37,7 @@ test('JavaScript-disabled browser self-heals to prefixed Classic', async ({ brow
     const page = await context.newPage();
     await page.goto('./app');
     await expect(page).toHaveURL(/\/cwa\/?\?cwng_feedback=newui$/);
-    await expect(page.locator('#books')).toBeVisible();
+    await expect(page.locator('#books').first()).toBeVisible();
     const classic = (await context.cookies()).find((cookie) =>
       cookie.name === 'cwng_prefer_classic');
     expect(classic?.value).toBe('1');
