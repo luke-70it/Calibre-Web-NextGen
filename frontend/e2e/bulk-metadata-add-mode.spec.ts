@@ -1,5 +1,5 @@
 import { test, expect, type Page, type Route } from '@playwright/test';
-import type { Book, BooksPage, MetadataUpdate } from '../src/lib/api';
+import type { Book, BooksPage, Me, MetadataUpdate } from '../src/lib/api';
 
 /*
  * #783 — bulk metadata must default to the non-destructive relationship mode,
@@ -20,7 +20,21 @@ const BOOKS: Book[] = [
   },
 ];
 
+const ADMIN: Me = {
+  id: 783,
+  name: 'Bulk metadata admin',
+  locale: 'en',
+  theme: 'dark',
+  role: { admin: true, edit: true, edit_shelfs: true, delete_books: true },
+};
+
 async function mockCatalog(page: Page) {
+  await page.route('**/api/v1/auth/me', (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify(ADMIN),
+  }));
+  await page.route('**/api/v1/shelves', (route) => route.fulfill({
+    status: 200, contentType: 'application/json', body: JSON.stringify({ items: [] }),
+  }));
   await page.route('**/api/v1/books?**', async (route: Route) => {
     const url = new URL(route.request().url());
     if (url.pathname !== '/api/v1/books') return route.continue();
@@ -77,6 +91,49 @@ test('mobile metadata keeps global navigation reachable and stays above the wrap
     'metadata panel overlaps the bulk bar instead of flowing above its actual wrapped height',
   ).toBeLessThanOrEqual(bulkBarBox!.y);
 });
+
+for (const viewport of [
+  { label: 'narrow and short', width: 375, height: 300 },
+  { label: 'landscape phone', width: 667, height: 375 },
+]) {
+  test(`${viewport.label} keeps every wrapped bulk action reachable and hit-testable`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await selectBothAndOpenMetadata(page);
+
+    const bulkBar = page.getByRole('region', { name: '2 selected' });
+    const actionNames = [
+      'Mark read',
+      'Mark unread',
+      'Add to shelf',
+      'Edit metadata',
+      'Merge',
+      'Delete',
+      'Clear selection',
+    ];
+
+    const actionRows = await bulkBar.getByRole('button').evaluateAll((buttons) =>
+      [...new Set(buttons.map((button) => Math.round(button.getBoundingClientRect().top)))],
+    );
+    expect(actionRows.length, 'the toolbar did not enter the wrapped state').toBeGreaterThan(1);
+
+    for (const name of actionNames) {
+      const button = bulkBar.getByRole('button', { name, exact: true });
+      await expect(button).toBeVisible();
+      await expect(button).toBeInViewport();
+      const ownsItsCenter = await button.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+        return hit === element || (hit !== null && element.contains(hit));
+      });
+      expect(ownsItsCenter, `${name} does not own its center hit target`).toBe(true);
+    }
+
+    page.once('dialog', (dialog) => void dialog.dismiss());
+    await bulkBar.getByRole('button', { name: 'Merge', exact: true }).click();
+    page.once('dialog', (dialog) => void dialog.dismiss());
+    await bulkBar.getByRole('button', { name: 'Delete', exact: true }).click();
+  });
+}
 
 test('Add is the default, explains the merge, and sends list_mode=add', async ({ page }) => {
   const payloads: MetadataUpdate[] = [];

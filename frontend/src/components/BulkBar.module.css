@@ -136,7 +136,10 @@
 
 @media (max-width: 600px) {
   .bar { padding-left: var(--sp-3); gap: var(--sp-2); }
-  .action span, .actionDanger span { display: none; }
+  /* The action labels are text nodes, not nested spans. Keep that text in the
+     accessibility tree while collapsing it visually so a wrapped toolbar can
+     fit inside short landscape/split-screen viewports. */
+  .action, .actionDanger { gap: 0; font-size: 0; }
 }
 
 .metaPanel {
