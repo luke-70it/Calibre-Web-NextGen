@@ -130,10 +130,24 @@ def _boot_and_read_log(image, tmp_path, *, install_legacy: bool) -> str:
                     ["docker", "logs", name],
                     capture_output=True, text=True, timeout=30, check=False,
                 ).stdout
+            # A dead container is not a slow one. Without this the run waits the
+            # full timeout and then reports "never reached plugin loading",
+            # which describes the symptom of any failure and points at none of
+            # them -- an architecture mismatch looks exactly like a slow boot.
+            state = subprocess.run(
+                ["docker", "inspect", "-f", "{{.State.Running}} {{.State.ExitCode}}", name],
+                capture_output=True, text=True, timeout=30, check=False,
+            ).stdout.split()
+            if state and state[0] == "false":
+                pytest.fail(
+                    f"the KOReader container exited (code {state[-1]}) before "
+                    f"loading plugins. Log was:\n{log[-4000:]}"
+                )
             time.sleep(2)
         pytest.fail(
             "KOReader never reached plugin loading within "
-            f"{BOOT_TIMEOUT_SECONDS}s. Log was:\n{log[-4000:]}"
+            f"{BOOT_TIMEOUT_SECONDS}s, and the container is still running. "
+            f"Log was:\n{log[-4000:]}"
         )
     finally:
         subprocess.run(["docker", "rm", "-f", name],

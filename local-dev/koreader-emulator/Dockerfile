@@ -19,11 +19,23 @@ ENV SCREEN_W=1072 SCREEN_H=1448 DISPLAY=:99 HOME=/koreader-home
 
 # Pinned upstream build. Fetched at build time rather than vendored so the repo
 # stays free of a 29 MB binary (see tests/unit/test_dockerignore_build_context.py).
+# The build must follow the host architecture. This was pinned to arm64 because
+# it was written on Apple Silicon, and an arm64 binary on an amd64 CI runner does
+# not fail loudly: the entrypoint prints "starting KOReader..." and then nothing
+# at all, which reads as a hung boot rather than a wrong binary.
 ARG KOREADER_VERSION=v2026.07.1
-RUN mkdir -p /opt/koreader && \
+ARG TARGETARCH
+RUN set -eu; \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      arm64|aarch64) ko_arch=arm64 ;; \
+      amd64|x86_64)  ko_arch=x86_64 ;; \
+      armhf|arm)     ko_arch=armhf ;; \
+      *) echo "unsupported architecture: ${TARGETARCH:-unknown}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/koreader; \
     curl -fsSL -o /tmp/ko.tar.xz \
-      "https://github.com/koreader/koreader/releases/download/${KOREADER_VERSION}/koreader-linux-arm64-${KOREADER_VERSION}.tar.xz" && \
-    tar -xJf /tmp/ko.tar.xz -C /opt/koreader && rm /tmp/ko.tar.xz
+      "https://github.com/koreader/koreader/releases/download/${KOREADER_VERSION}/koreader-linux-${ko_arch}-${KOREADER_VERSION}.tar.xz"; \
+    tar -xJf /tmp/ko.tar.xz -C /opt/koreader; rm /tmp/ko.tar.xz
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
