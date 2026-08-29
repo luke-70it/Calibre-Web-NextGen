@@ -46,7 +46,11 @@ test('JavaScript-disabled browser self-heals to prefixed Classic', async ({ brow
       return feedback || login;
     });
     if (new URL(page.url()).pathname === '/cwa/login') {
-      await expect(page.locator('input[autocomplete="username"]')).toBeVisible();
+      // Classic's own field. `input[autocomplete="username"]` is the SPA's React
+      // form, which renders nothing with JavaScript disabled. This branch only
+      // runs when the fixture requires login, so a wrong selector here would sit
+      // green indefinitely rather than failing.
+      await expect(page.locator('input#username[name="username"]')).toBeVisible();
     } else {
       await expect(page.locator('#books').first()).toBeVisible();
     }
