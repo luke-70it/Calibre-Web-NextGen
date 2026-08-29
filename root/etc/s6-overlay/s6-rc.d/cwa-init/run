@@ -195,7 +195,14 @@ else
   chown -R abc:abc "$INGEST_DIR" 2>/dev/null || true
 fi
 
-# For Calibre Plugins
+# Calibre's normal abc-run tools use a plugin-free config directory. Keeping it
+# beside, not above, the opt-in plugin directory prevents the default path from
+# discovering operator-supplied plugins. cwa-init is a dependency of both abc
+# services before their run scripts execute, so the directory is writable at
+# the moment they first launch a Calibre child (#1764).
+install -d -o abc -g abc /config/.config/calibre-runtime
+
+# For explicitly enabled Calibre Plugins
 install -d -o abc -g abc /config/.config/calibre/plugins
 # ln -sf /config/.config/calibre/plugins /config/calibre_plugins
 
