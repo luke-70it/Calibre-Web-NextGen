@@ -30,9 +30,9 @@ except (ImportError, RuntimeError) as e:
 _BASE_THUMBNAIL_HEIGHT = int(os.environ.get("CWA_THUMBNAIL_BASE_HEIGHT", "420"))
 
 
-def _positive_timeout_from_env(name, default):
+def _positive_timeout(raw, default):
     try:
-        timeout = float(os.environ.get(name, str(default)))
+        timeout = float(raw if raw is not None else default)
     except (TypeError, ValueError):
         return float(default)
     return timeout if timeout > 0 else float(default)
@@ -43,8 +43,8 @@ def _positive_timeout_from_env(name, default):
 # thread and is joined for a bounded interval. Three consecutive timeouts are
 # treated as systemic so a broken image stack cannot leave an unbounded number
 # of abandoned daemon threads behind it.
-_COVER_TIMEOUT_SECONDS = _positive_timeout_from_env(
-    "CWA_THUMBNAIL_COVER_TIMEOUT", 60)
+_COVER_TIMEOUT_SECONDS = _positive_timeout(
+    os.environ.get("CWA_THUMBNAIL_COVER_TIMEOUT"), 60)
 _TIMEOUT_BREAKER_LIMIT = 3
 
 
