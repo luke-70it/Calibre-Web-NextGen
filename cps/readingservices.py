@@ -561,15 +561,23 @@ def _proxy_owned_annotation_get(capture_session, ownership, entitlement_id):
 
 def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
     """Return one complete eligible local page, otherwise proxy unchanged."""
+    sticky = False
     try:
         from cps.services.kobo_annotation_authority import (
+            ever_authoritative,
             local_get_is_eligible,
             render_owned_annotations,
+            sticky_render_page_limit,
         )
 
         page_limit = _owned_annotation_page_limit()
+        sticky = ever_authoritative(current_user.id, ownership.id)
+        if sticky:
+            page_limit = sticky_render_page_limit(
+                current_user.id, ownership.id, page_limit,
+            )
         has_cursor = request.args.get("pageOffsetToken") is not None
-        if has_cursor or not local_get_is_eligible(
+        if (has_cursor and not sticky) or not local_get_is_eligible(
             settings=config,
             user=current_user,
             book_id=ownership.id,
@@ -578,8 +586,15 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
             device_id=getattr(g, "annotation_origin_device_id", None),
             log=log,
         ):
-            return _proxy_owned_annotation_get(
-                capture_session, ownership, entitlement_id,
+            if not sticky:
+                return _proxy_owned_annotation_get(
+                    capture_session, ownership, entitlement_id,
+                )
+            # Kobo's cloud has been starved by local PATCH acknowledgements.
+            # A local refusal is safer than sending that stale replacement set.
+            return make_response(
+                jsonify({"error": "Local annotation set temporarily unavailable"}),
+                503,
             )
 
         rendered = render_owned_annotations(
@@ -591,8 +606,13 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
             log=log,
         )
         if rendered is None:
-            return _proxy_owned_annotation_get(
-                capture_session, ownership, entitlement_id,
+            if not sticky:
+                return _proxy_owned_annotation_get(
+                    capture_session, ownership, entitlement_id,
+                )
+            return make_response(
+                jsonify({"error": "Local annotation set temporarily unavailable"}),
+                503,
             )
         body, etag = rendered
         _record_annotation_decision(
@@ -602,12 +622,45 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
         response.headers["Content-Type"] = "application/json"
         response.headers["Content-Length"] = str(len(body))
         response.headers["ETag"] = etag
+        if sticky:
+            try:
+                from cps.services.kobo_annotation_seeding import (
+                    accept_routing_only_seed,
+                )
+                accept_routing_only_seed(
+                    user_id=current_user.id,
+                    book_id=ownership.id,
+                    device_id=getattr(g, "annotation_origin_device_id", None),
+                    log=log,
+                )
+            except Exception:
+                log.warning(
+                    "Kobo routing-only seed could not attach user_id=%s book_id=%s",
+                    getattr(current_user, "id", None), ownership.id,
+                    exc_info=True,
+                )
         return response
     except Exception:
         log.exception(
-            "Owned Kobo annotation GET local authority failed; proxying "
-            "entitlement=%s", entitlement_id,
+            "Owned Kobo annotation GET local authority failed entitlement=%s",
+            entitlement_id,
         )
+        if sticky:
+            return make_response(
+                jsonify({"error": "Local annotation set temporarily unavailable"}),
+                503,
+            )
+        try:
+            from cps.services.kobo_annotation_authority import ever_authoritative
+            if ever_authoritative(current_user.id, ownership.id):
+                return make_response(
+                    jsonify({
+                        "error": "Local annotation set temporarily unavailable",
+                    }),
+                    503,
+                )
+        except Exception:
+            pass
         return _proxy_owned_annotation_get(
             capture_session, ownership, entitlement_id,
         )

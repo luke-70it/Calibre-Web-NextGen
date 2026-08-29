@@ -131,6 +131,14 @@ def _span(annotation, entitlement_id, *, dogear=False):
 def _exact_raw(annotation, materialization):
     if materialization is None:
         return None
+    # A cloud-seed sidecar is authoritative only when reconciliation proved
+    # that its captured content was applied or already content-equivalent.
+    # PATCH sidecars retain their existing authenticated-user replay policy.
+    if (
+        materialization.provenance == "kobo_cloud_seed"
+        and not materialization.serveable
+    ):
+        return None
     # A generic-column edit advances content_revision without rewriting the
     # Kobo sidecar.  Replaying that stale object would resurrect the old edit.
     if materialization.materialization_revision != annotation.content_revision:
@@ -403,36 +411,103 @@ def _visible_annotation_count(user_id, book_id):
     )
 
 
+def ever_authoritative(user_id, book_id):
+    try:
+        state = _state_for_book(user_id, book_id)
+        return bool(state is not None and state.ever_authoritative)
+    except Exception:
+        _safe_rollback()
+        return False
+
+
+def sticky_render_page_limit(user_id, book_id, requested_limit):
+    """Return a complete local bound after Kobo's cloud becomes stale."""
+    try:
+        visible_count = _visible_annotation_count(user_id, book_id)
+    except Exception:
+        _safe_rollback()
+        visible_count = _LOCAL_PAGE_CAPACITY
+    base = requested_limit if isinstance(requested_limit, int) else _LOCAL_PAGE_CAPACITY
+    return max(1, base, visible_count)
+
+
+def _captured_membership_is_safe(
+    *, state, user_id, book_id, device_id, visible_ids,
+):
+    """Prove captured identities are visible or have newer local tombstones."""
+    from cps.services.kobo_annotation_seeding import accepted_identity_requirements
+
+    requirements = accepted_identity_requirements(
+        state.id,
+        # Before first authority, this exact device's capture is the proof.
+        # Afterwards all upstream captures are shared baseline evidence.
+        device_id=None if state.ever_authoritative else device_id,
+    )
+    if requirements is None:
+        return False
+    missing = set(requirements) - set(visible_ids)
+    if not missing:
+        return True
+    rows = (
+        ub.session.query(ub.Annotation)
+        .filter(
+            ub.Annotation.user_id == user_id,
+            ub.Annotation.book_id == book_id,
+            ub.Annotation.annotation_id.in_(missing),
+        )
+        .all()
+    )
+    by_id = {row.annotation_id: row for row in rows}
+    for annotation_id in missing:
+        row = by_id.get(annotation_id)
+        captured_at = requirements[annotation_id]
+        modified_at = row.server_modified_at if row is not None else None
+        if modified_at is not None and modified_at.tzinfo is None:
+            modified_at = modified_at.replace(tzinfo=timezone.utc)
+        elif modified_at is not None:
+            modified_at = modified_at.astimezone(timezone.utc)
+        if (
+            row is None
+            or not bool(row.hidden)
+            or captured_at is None
+            or modified_at is None
+            or modified_at <= captured_at
+        ):
+            return False
+    return True
+
+
 def local_get_is_eligible(*, settings, user, book_id, entitlement_id,
                           page_limit, device_id, log):
-    """Gate both GET and PATCH on one proven, locally serveable seed.
+    """Gate GET/PATCH as a pair and prove captured identity membership.
 
-    ``authority_status='authoritative'`` is Stage 0's stored spelling for a
-    fully seeded book.  It is not sufficient by itself: an accepted complete
-    seed count must exist for this exact device/book, the local visible set may
-    not be smaller than that declaration, and the entire set must fit in the
-    one-page implementation.  PATCH uses the same function with a limit of 100
-    so it can never stop feeding Kobo while GET still needs Kobo as authority.
+    Before first authority, all normal gates and this device's accepted seed
+    evidence are required. Once ``ever_authoritative`` is set, Kobo's cloud is
+    stale by construction: gate drift or a new device may not split GET back
+    to upstream while PATCH remains local.
     """
     user_id = getattr(user, "id", None)
     reason = None
     try:
+        state = _state_for_book(user_id, book_id)
+        sticky = bool(state is not None and state.ever_authoritative)
         if not isinstance(page_limit, int) or isinstance(page_limit, bool):
             reason = "page_limit_invalid"
-        elif page_limit < 1 or page_limit > _LOCAL_PAGE_CAPACITY:
+        elif page_limit < 1 or (
+            page_limit > _LOCAL_PAGE_CAPACITY and not sticky
+        ):
             reason = "page_limit_unsupported"
 
-        from cps.services import kobo_annotation_stage0
-
-        state = None
-        if reason is None:
+        if reason is None and not sticky:
+            from cps.services import kobo_annotation_stage0
             schema_ready = kobo_annotation_stage0.schema_capable(
                 ub.session.get_bind(),
             )
-            state = _state_for_book(user_id, book_id)
             reason = kobo_annotation_stage0.gate_failure_reason(
                 settings, user, state, schema_ready=schema_ready,
             )
+        elif reason is None and state is None:
+            reason = "book_state_missing"
         if reason is None and (
             _normalized_entitlement_id(state.content_id)
             != _normalized_entitlement_id(entitlement_id)
@@ -440,7 +515,7 @@ def local_get_is_eligible(*, settings, user, book_id, entitlement_id,
             reason = "content_id_mismatch"
 
         declared_count = None
-        if reason is None:
+        if reason is None and not sticky:
             declared_count = _accepted_device_annotation_count(state.id, device_id)
             if declared_count is None:
                 reason = "accepted_device_seed_count_missing"
@@ -448,12 +523,35 @@ def local_get_is_eligible(*, settings, user, book_id, entitlement_id,
         visible_count = None
         if reason is None:
             visible_count = _visible_annotation_count(user_id, book_id)
-            if visible_count < declared_count:
+            if declared_count is not None and visible_count < declared_count:
                 reason = "local_count_below_device_seed"
-            elif visible_count > _LOCAL_PAGE_CAPACITY:
+            elif not sticky and visible_count > _LOCAL_PAGE_CAPACITY:
                 reason = "local_set_requires_pagination"
             elif visible_count > page_limit:
                 reason = "requested_page_too_small"
+        if reason is None:
+            visible_ids = {
+                row[0] for row in (
+                    ub.session.query(ub.Annotation.annotation_id)
+                    .filter(
+                        ub.Annotation.user_id == user_id,
+                        ub.Annotation.book_id == book_id,
+                        (
+                            ub.Annotation.hidden.is_(None)
+                            | (ub.Annotation.hidden == False)  # noqa: E712
+                        ),
+                    )
+                    .all()
+                )
+            }
+            if not _captured_membership_is_safe(
+                state=state,
+                user_id=user_id,
+                book_id=book_id,
+                device_id=device_id,
+                visible_ids=visible_ids,
+            ):
+                reason = "captured_identity_missing"
     except Exception as error:
         _safe_rollback()
         reason = _failure_reason("authority_gate", error)
@@ -466,13 +564,27 @@ def local_get_is_eligible(*, settings, user, book_id, entitlement_id,
     return True
 
 
-def _render_count_is_safe(*, user_id, book_id, device_id, row_count):
-    """Recheck the accepted count at render time to close the query race."""
+def _render_count_is_safe(
+    *, user_id, book_id, device_id, row_count, row_ids=None,
+):
+    """Recheck count and captured identity membership at render time."""
     state = _state_for_book(user_id, book_id)
-    if state is None or state.authority_status != "authoritative":
+    if state is None or (
+        state.authority_status != "authoritative"
+        and not state.ever_authoritative
+    ):
         return False
-    declared_count = _accepted_device_annotation_count(state.id, device_id)
-    return declared_count is not None and row_count >= declared_count
+    if not state.ever_authoritative:
+        declared_count = _accepted_device_annotation_count(state.id, device_id)
+        if declared_count is None or row_count < declared_count:
+            return False
+    return _captured_membership_is_safe(
+        state=state,
+        user_id=user_id,
+        book_id=book_id,
+        device_id=device_id,
+        visible_ids=row_ids or set(),
+    )
 
 
 def _book_state(user_id, book_id, entitlement_id):
@@ -644,6 +756,7 @@ def _emergency_render(*, user_id, book_id, entitlement_id, page_limit,
     if not _render_count_is_safe(
         user_id=user_id, book_id=book_id, device_id=device_id,
         row_count=len(rows),
+        row_ids={annotation.annotation_id for annotation, _ in rows},
     ):
         return None
     reasons = [reason]
@@ -692,6 +805,7 @@ def _render_owned_annotations(*, user_id, book_id, entitlement_id, page_limit,
     if not _render_count_is_safe(
         user_id=user_id, book_id=book_id, device_id=device_id,
         row_count=len(rows),
+        row_ids={annotation.annotation_id for annotation, _ in rows},
     ):
         return None
     for annotation, materialization in rows:

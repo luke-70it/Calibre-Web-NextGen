@@ -1,23 +1,24 @@
 # Mission: #1942 M2 annotation seeding pipeline
 
 Updated: 2026-08-29
-Phase: complete
-Status: 8/8 outcomes done and verified
+Phase: adversarial correction R2 complete
+Status: 9/9 correction outcomes done and verified
 
-## Definition of done
+## R2 definition of done (FIX-FIRST verdict)
 
-- [x] Additive, idempotent migration adds `ever_authoritative` and `seed_kind` before ORM use; migration tests pass.
-- [x] An eligible owned annotations GET creates a pending capture, proxies Kobo, persists every captured page, reconciles the final response, and promotes only a complete servable set.
-- [x] Promotion repairs legacy content IDs, preserves/mints generation IDs correctly, increments authority revision, records accepted capture counts, and sets sticky `ever_authoritative`.
-- [x] Unsafe captures quarantine with enumerated privacy-safe reason codes for local-below-upstream, local-over-100, or multi-page capture; no subset becomes locally serveable.
-- [x] Once ever authoritative, owned PATCH persists and returns the byte-exact local 204 acknowledgement even when current gates fail.
-- [x] Mixed-device state is explicit: accepted captures are assessed against all active Kobo devices, missing devices are captured on their next eligible GET, and a partial-seed diagnostic is emitted.
-- [x] New `tests/unit/test_1942_seed_pipeline.py`, existing #1923 regression tests, and the full unit suite report exact observed counts, with known sandbox-infrastructure failures separated.
-- [x] Changelog fragment is present; scoped changes are committed with the `new-usemame` identity and a verified bundle is produced.
+- [x] `ever_authoritative` is sticky across the paired GET/PATCH decision: after local PATCH starvation starts, no owned GET can proxy a stale Kobo replacement set.
+- [x] Promotion and render prove every captured annotation ID is included in the visible served ID set; cardinality equality alone cannot promote or serve.
+- [x] Captured raw sidecars become serveable only when the captured content was applied or is content-equivalent to the current generic row.
+- [x] Reconciliation protects newer server/browser edits using server-side revision/modification evidence, including equal Kobo client clocks.
+- [x] A later device's capture failure is device-scoped and cannot globally quarantine an already-authoritative book.
+- [x] An explicit authenticated production API can recover/retry a genuinely quarantined book.
+- [x] Abandoned pending captures expire/restart, including a dead paginated cursor returning to a first-page request.
+- [x] SQLite enforces one reconciliation owner per user/book and reconciliation rejects captures whose starting authority revision is stale.
+- [x] Named regressions cover every reproduced review sequence; focused suites, Ruff, `git diff --check`, and the full unit suite have fresh exact evidence.
 
 ## Now / next action
 
-Mission complete. Hardware verification remains the post-merge Clara step owned by the operator's later workflow.
+R2 correction set complete and verified. Commit as `new-usemame`, produce `1942-m2-r2.bundle`, and push if network permits.
 
 ## Verification commands
 
@@ -27,6 +28,18 @@ Mission complete. Hardware verification remains the post-merge Clara step owned 
 - Git: `git diff --check`; inspect scoped diff; verify commit author and remote owner before push/bundle.
 
 ## Decisions and rationale
+
+- 2026-08-29 R2: adversarial review `/tmp/cwng-m2-review-last.txt` was read completely (318 lines); its FIX-FIRST verdict reopens the mission and invalidates the prior merge-ready claim.
+- 2026-08-29 R2: when the review leaves behavior open, choose fail-safe proxy/status-quo behavior only if the cloud has not yet been starved; once `ever_authoritative=1`, paired GET/PATCH stickiness forbids stale upstream replacement-set GETs.
+- 2026-08-29 R2: CWNG briefing is stale since 2026-06-12. Git Manager hydration is unavailable because the broker is down and managed DNS cannot resolve the board; direct operator instructions are the governing authority.
+- 2026-08-29 R2: a new/reset device on an ever-authoritative book receives the complete local set and records `routing_only` acceptance; it never recaptures the already-starved Kobo cloud.
+- 2026-08-29 R2: if an ever-authoritative local GET cannot prove/render a complete set, fail closed locally with 503 rather than proxy stale cloud bytes. Before first authority, the status-quo proxy remains the fail-safe.
+- 2026-08-29 R2: accepted upstream capture pages are durable identity evidence. A missing identity is safe only when the retained hidden row has a server modification later than the capture completion (an explicit newer authoritative tombstone).
+- 2026-08-29 R2: captured content may update an existing row only when server evidence does not outrank it; exact content equivalence can still make its raw sidecar serveable. Browser edit/delete paths now advance `content_revision` and `server_modified_at`.
+- 2026-08-29 R2: initial quarantine recovery returns to `unseeded`; historical `ever_authoritative` quarantine returns to local `authoritative`, because cloud fallback is no longer safe.
+- 2026-08-29 R2: pending captures expire after 15 minutes. A same-device first-page request immediately supersedes a pending chain whose continuation cursor will not be used.
+- 2026-08-29 R2: one `result='pending'` row per book-state is enforced with a SQLite partial unique index; migration retires duplicate legacy owners before creating it. Every capture snapshots and rechecks `authority_revision`.
+- 2026-08-29 R2 delivery: correction commit uses the exact `new-usemame` noreply identity. Push was attempted and blocked by managed DNS (`github.com` could not resolve). The sandbox rejected the requested parent path `../1942-m2-r2.bundle`; the verified complete-history fallback is `1942-m2-r2.bundle` in this writable worktree root.
 
 - 2026-08-29: preserved unrelated completed `state/MISSION.md`; this mission uses a task-specific ledger.
 - 2026-08-29: capture all upstream pages, but quarantine any capture requiring more than the one page local authority can serve.
@@ -39,6 +52,15 @@ Mission complete. Hardware verification remains the post-merge Clara step owned 
 - 2026-08-29: final spec/runbook audit added capture-derived W1 opaque evidence in `c407da24fe`: a complete set records `absent` only when attachments prove it, records `present` when observed, and never downgrades durable prior `present` evidence.
 
 ## Evidence classification
+
+- OBSERVED R2: exact base is `e4be9b4df1bb54afa50aa3cfaa0e5a7276799467`; worktree has no code modifications at reopen.
+- OBSERVED R2: review reproduced paired-authority inversion, membership-substitution promotion, stale-sidecar serving, global quarantine from later-device failure, dead paginated capture stranding, and missing logical reconciliation serialization.
+- OBSERVED R2 at reopen: all nine R2 boxes were unchecked; prior green evidence was historical and could not establish the corrected branch.
+- OBSERVED R2 final: all nine R2 boxes are checked against named regression or schema evidence.
+- OBSERVED R2: `tests/unit/test_1942_seed_pipeline.py` passes 21/21 and includes named reproductions for both paired-authority inversions, promotion and render membership substitution, stale sidecar, equal-clock browser edit, later-device failure isolation, authenticated recovery, dead cursor/TTL restart, SQLite ownership, and stale authority revision.
+- OBSERVED R2: required focused compatibility suites pass 66/66 (`#1942`, `#1923`, Kobo two-way API). Adjacent edit/delete, vocabulary, sync-helper, and schema suites pass 134/134.
+- OBSERVED R2: final full unit suite collected 7,614 tests: 7,491 passed, 106 skipped, 17 failed, 6,165 warnings in 275.97s. All 17 failures are the known managed-sandbox infrastructure set: 10 loopback socket-bind denials and 7 `ps` execution denials. No application assertion failed.
+- OBSERVED R2: scoped Ruff passes; fatal-error Ruff across every changed Python file passes; `git diff --check` passes.
 
 - OBSERVED: operator supplied the M2 objective, exact scope, done conditions, identity, and hardware deferral.
 - OBSERVED: required spec and seeding runbook were read; their M2, migration, completeness, C1-C4, wire, and replay constraints govern this mission.

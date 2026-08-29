@@ -1510,6 +1510,12 @@ class KoboAnnotationSeedCapture(Base):
     )
     device_id = Column(Integer, ForeignKey('device.id', ondelete='SET NULL'), nullable=True)
     started_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    # Authority revision observed when this capture acquired the book-level
+    # pending-owner slot. Reconciliation is refused if the shared set moved in
+    # the meantime; a stale cloud snapshot may never overwrite newer state.
+    started_authority_revision = Column(
+        Integer, nullable=False, default=0, server_default=text("0"),
+    )
     completed_at = Column(DateTime, nullable=True)
     device_etag = Column(Text, nullable=True)
     upstream_etag = Column(Text, nullable=True)
@@ -1534,6 +1540,14 @@ class KoboAnnotationSeedCapture(Base):
         CheckConstraint(
             "seed_kind IN ('upstream_capture', 'routing_only')",
             name='ck_kasc_seed_kind',
+        ),
+        # A pending capture is the SQLite-enforced reconciliation lease. The
+        # book_state row is already unique per (user, book), so this partial
+        # unique index permits historical completed captures while allowing
+        # only one live owner across all of the user's Kobo devices.
+        Index(
+            'uq_kasc_pending_book_owner', 'book_state_id', unique=True,
+            sqlite_where=text("result = 'pending'"),
         ),
         Index('ix_kasc_book_time', 'book_state_id', 'started_at'),
     )
@@ -3696,6 +3710,11 @@ def migrate_kobo_annotation_seed_pipeline(engine, _session):
                 "seed_kind TEXT NOT NULL DEFAULT 'upstream_capture' "
                 "CHECK (seed_kind IN ('upstream_capture', 'routing_only'))",
             ),
+            (
+                "kobo_annotation_seed_capture",
+                "started_authority_revision",
+                "started_authority_revision INTEGER NOT NULL DEFAULT 0",
+            ),
         )
         for table_name, column_name, ddl in additions:
             if table_name not in table_names:
@@ -3727,6 +3746,29 @@ def migrate_kobo_annotation_seed_pipeline(engine, _session):
             "WHERE result='accepted' AND annotation_count=0 "
             "AND NOT EXISTS (SELECT 1 FROM kobo_annotation_seed_capture_page p "
             "WHERE p.seed_capture_id=kobo_annotation_seed_capture.id)"
+        ))
+        # Retain only the newest legacy pending capture for each book before
+        # installing the partial unique owner index. Superseded rows are
+        # diagnostic history, not reconciliation candidates.
+        conn.execute(text(
+            "UPDATE kobo_annotation_seed_capture SET result='failed', "
+            "completed_at=COALESCE(completed_at, CURRENT_TIMESTAMP), "
+            "failure_reason='seed_capture_superseded' "
+            "WHERE result='pending' AND id NOT IN ("
+            "SELECT MAX(id) FROM kobo_annotation_seed_capture "
+            "WHERE result='pending' GROUP BY book_state_id)"
+        ))
+        conn.execute(text(
+            "UPDATE kobo_annotation_seed_capture "
+            "SET started_authority_revision=COALESCE(("
+            "SELECT authority_revision FROM kobo_annotation_book_state s "
+            "WHERE s.id=kobo_annotation_seed_capture.book_state_id), 0) "
+            "WHERE started_authority_revision=0 AND result='pending'"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_kasc_pending_book_owner "
+            "ON kobo_annotation_seed_capture(book_state_id) "
+            "WHERE result='pending'"
         ))
 
 

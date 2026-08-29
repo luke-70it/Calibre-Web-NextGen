@@ -163,6 +163,7 @@ def _kobo_payload_matches_row(annotation, payload, span, normalized_content_id):
     current = (
         annotation.highlighted_text, annotation.note_text,
         to_storage_color(annotation.highlight_color),
+        to_storage_type(getattr(annotation, "annotation_type", None)),
         annotation.chapter_progress, annotation.content_id,
         annotation.start_container_path, annotation.end_container_path,
         annotation.start_offset, annotation.end_offset,
@@ -176,6 +177,9 @@ def _kobo_payload_matches_row(annotation, payload, span, normalized_content_id):
         # changes nothing must not be counted as a change just because the
         # stored spelling is older than the wire one.
         to_storage_color(supplied(payload, "highlightColor", annotation.highlight_color)),
+        to_storage_type(supplied(
+            payload, "type", getattr(annotation, "annotation_type", None),
+        )),
         chapter_progress if chapter_progress is not None else annotation.chapter_progress,
         normalized_content_id or annotation.content_id,
         supplied(span, "startPath", annotation.start_container_path),
@@ -185,6 +189,35 @@ def _kobo_payload_matches_row(annotation, payload, span, normalized_content_id):
         next_context, False,
     )
     return incoming == current
+
+
+def kobo_payload_matches_annotation(annotation, payload, book):
+    """Compare a captured Kobo object with the generic row it would produce.
+
+    This is the reconciliation proof used before a raw cloud sidecar is made
+    replayable. Invalid or incomplete locator data deliberately compares as
+    the same conservative no-op that ``_upsert_annotation`` would apply.
+    """
+    if not isinstance(payload, dict):
+        return False
+    location = payload.get("location")
+    span = location.get("span") if isinstance(location, dict) else {}
+    if not isinstance(span, dict):
+        span = {}
+    normalized_content_id = None
+    chapter_filename = span.get("chapterFilename")
+    if chapter_filename and _book_uuid(book):
+        from cps.services.annotation_content_id import normalize_content_id, ContentIdError
+        try:
+            normalized_content_id = normalize_content_id(
+                f"{_book_uuid(book)}!!{chapter_filename}",
+                book_uuid=_book_uuid(book),
+            )
+        except ContentIdError:
+            normalized_content_id = None
+    return _kobo_payload_matches_row(
+        annotation, payload, span, normalized_content_id,
+    )
 
 
 def _upsert_annotation(

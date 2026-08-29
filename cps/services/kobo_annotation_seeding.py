@@ -14,7 +14,7 @@ import gzip
 import hashlib
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.exc import IntegrityError
 
@@ -23,11 +23,16 @@ from cps.services import kobo_annotation_stage0
 
 
 LOCAL_PAGE_CAPACITY = 100
+PENDING_CAPTURE_TTL = timedelta(minutes=15)
 _SAFE_FAILURE_REASONS = frozenset({
+    "seed_authority_revision_changed",
+    "seed_capture_expired",
     "seed_capture_requires_pagination",
+    "seed_capture_superseded",
     "seed_content_id_conflict",
     "seed_duplicate_annotation_id",
     "seed_local_count_below_capture",
+    "seed_local_set_missing_captured_id",
     "seed_local_set_requires_pagination",
     "seed_response_invalid",
 })
@@ -83,12 +88,12 @@ def _accepted_capture(book_state_id, device_id):
     )
 
 
-def _pending_capture(book_state_id, device_id):
+def _pending_capture(book_state_id):
+    """Return the single SQLite-owned pending reconciliation capture."""
     return (
         ub.session.query(ub.KoboAnnotationSeedCapture)
         .filter(
             ub.KoboAnnotationSeedCapture.book_state_id == book_state_id,
-            ub.KoboAnnotationSeedCapture.device_id == device_id,
             ub.KoboAnnotationSeedCapture.result == "pending",
         )
         .order_by(
@@ -107,6 +112,47 @@ def _expected_offset(capture):
         .first()
     )
     return None if page is None else page.next_offset_token
+
+
+def _as_utc(value):
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _capture_expired(capture, *, now=None):
+    started_at = _as_utc(getattr(capture, "started_at", None))
+    if started_at is None:
+        return True
+    return (now or _now()) - started_at >= PENDING_CAPTURE_TTL
+
+
+def _retire_pending(capture, reason):
+    """Release one pending-owner slot without globally quarantining a book."""
+    state = capture.book_state
+    capture.completed_at = _now()
+    capture.page_count = len(capture.pages)
+    capture.result = "failed"
+    capture.failure_reason = (
+        reason if reason in _SAFE_FAILURE_REASONS else "seed_response_invalid"
+    )
+    if state.authority_status == "seeding" and not state.ever_authoritative:
+        state.authority_status = "unseeded"
+        state.quarantine_reason = None
+
+
+def _capture_revision_is_current(capture):
+    state_revision = getattr(capture.book_state, "authority_revision", None)
+    started_revision = getattr(capture, "started_authority_revision", None)
+    return (
+        isinstance(state_revision, int)
+        and not isinstance(state_revision, bool)
+        and isinstance(started_revision, int)
+        and not isinstance(started_revision, bool)
+        and state_revision == started_revision
+    )
 
 
 def _seeding_gates_allow(settings, user):
@@ -176,11 +222,32 @@ def begin_or_resume_capture(
             else:
                 state = candidate
 
-        pending = _pending_capture(state.id, device_id)
+        pending = _pending_capture(state.id)
         if pending is not None:
-            if _expected_offset(pending) != request_offset_token:
+            expected_offset = _expected_offset(pending)
+            same_device = pending.device_id == device_id
+            dead_cursor_restart = (
+                same_device
+                and request_offset_token is None
+                and expected_offset is not None
+            )
+            expired = _capture_expired(pending)
+            if expired or dead_cursor_restart:
+                _retire_pending(
+                    pending,
+                    "seed_capture_expired" if expired
+                    else "seed_capture_superseded",
+                )
+                # A continuation token can only belong to the retired owner.
+                # Persist the release, but never attach it to a fresh capture.
+                if request_offset_token is not None:
+                    ub.session_commit()
+                    return None
+                ub.session.flush()
+            elif not same_device or expected_offset != request_offset_token:
                 return None
-            return pending.id
+            else:
+                return pending.id
 
         # Never start a new capture in the middle of an upstream page chain.
         if request_offset_token is not None:
@@ -198,6 +265,7 @@ def begin_or_resume_capture(
             book_state_id=state.id,
             device_id=device_id,
             started_at=_now(),
+            started_authority_revision=state.authority_revision or 0,
             device_etag=device_etag,
             result="pending",
             seed_kind="upstream_capture",
@@ -262,6 +330,50 @@ def _load_captured_pages(capture_id):
     return pages, annotations, raw_pages
 
 
+def accepted_identity_requirements(book_state_id, *, device_id=None):
+    """Return ``{annotation_id: captured_at}`` or ``None`` on bad evidence.
+
+    Only durable upstream page captures impose membership requirements.
+    Historical/routing-only acceptance has no captured annotation identities.
+    """
+    query = (
+        ub.session.query(ub.KoboAnnotationSeedCapture)
+        .filter(
+            ub.KoboAnnotationSeedCapture.book_state_id == book_state_id,
+            ub.KoboAnnotationSeedCapture.result == "accepted",
+            ub.KoboAnnotationSeedCapture.completed_at.isnot(None),
+            ub.KoboAnnotationSeedCapture.seed_kind == "upstream_capture",
+        )
+    )
+    if device_id is not None:
+        query = query.filter(
+            ub.KoboAnnotationSeedCapture.device_id == device_id,
+        )
+    captures = query.order_by(ub.KoboAnnotationSeedCapture.id.asc()).all()
+    requirements = {}
+    for capture in captures:
+        # Pre-M2/manual rows may have no page evidence. They cannot contribute
+        # identities, but neither may invented identities be inferred from a
+        # cardinality alone.
+        if not capture.pages:
+            continue
+        try:
+            _pages, annotations, _raw_pages = _load_captured_pages(capture.id)
+        except Exception:
+            return None
+        completed_at = _as_utc(capture.completed_at)
+        for payload in annotations:
+            annotation_id = payload.get("id") if isinstance(payload, dict) else None
+            if not isinstance(annotation_id, str) or not annotation_id:
+                return None
+            prior = requirements.get(annotation_id)
+            if prior is None or (
+                completed_at is not None and completed_at > prior
+            ):
+                requirements[annotation_id] = completed_at
+    return requirements
+
+
 def _visible_count(user_id, book_id):
     return (
         ub.session.query(ub.Annotation.id)
@@ -274,6 +386,57 @@ def _visible_count(user_id, book_id):
             ),
         )
         .count()
+    )
+
+
+def _visible_ids(user_id, book_id):
+    return {
+        row[0] for row in (
+            ub.session.query(ub.Annotation.annotation_id)
+            .filter(
+                ub.Annotation.user_id == user_id,
+                ub.Annotation.book_id == book_id,
+                (
+                    ub.Annotation.hidden.is_(None)
+                    | (ub.Annotation.hidden == False)  # noqa: E712
+                ),
+            )
+            .all()
+        )
+    }
+
+
+def _server_evidence_is_newer(
+    annotation, payload, capture, annotation_sync, book,
+):
+    """Prefer current server state when a cloud seed cannot prove it is newer."""
+    if annotation is None:
+        return False
+    if annotation_sync.kobo_payload_matches_annotation(annotation, payload, book):
+        return False
+    if annotation.source == "webreader":
+        return True
+
+    server_modified = _as_utc(annotation.server_modified_at)
+    capture_started = _as_utc(capture.started_at)
+    client_modified = annotation_sync.parse_client_modified_utc(
+        payload.get("clientLastModifiedUtc"),
+    )
+    client_modified = _as_utc(client_modified)
+    if server_modified is not None and (
+        client_modified is None or server_modified >= client_modified
+    ):
+        return True
+    if (
+        server_modified is not None
+        and capture_started is not None
+        and server_modified >= capture_started
+    ):
+        return True
+    materialization = getattr(annotation, "kobo_materialization", None)
+    return bool(
+        materialization is not None
+        and materialization.materialization_revision != annotation.content_revision
     )
 
 
@@ -298,14 +461,18 @@ def _set_failure(capture_id, reason, *, quarantine, log):
     capture.page_count = len(capture.pages)
     capture.result = "rejected" if quarantine else "failed"
     capture.failure_reason = reason
-    if quarantine:
+    # A missing/new device contributes only device-scoped capture evidence.
+    # Once this book has ever been authoritative, one device's bad cloud page
+    # cannot revoke the shared local set for devices already using it.
+    global_quarantine = quarantine and not state.ever_authoritative
+    if global_quarantine:
         state.authority_status = "quarantined"
         state.quarantine_reason = reason
     elif state.authority_status == "seeding" and not state.ever_authoritative:
         state.authority_status = "unseeded"
     committed = ub.session_commit()
     kobo_annotation_stage0.record_event(
-        "seed_capture", "quarantined" if quarantine else "failed",
+        "seed_capture", "quarantined" if global_quarantine else "failed",
         user_id=state.user_id, book_id=state.book_id,
     )
     if committed is False:
@@ -352,11 +519,87 @@ def seed_coverage(*, user_id, book_state_id):
     }
 
 
+def accept_routing_only_seed(*, user_id, book_id, device_id, log):
+    """Record device coverage after an ever-authoritative local GET.
+
+    Kobo's cloud is stale after local PATCH acknowledgements begin, so a new
+    device must receive the local complete set. Its acceptance evidence is
+    routing-only; it must not start a fresh upstream reconciliation.
+    """
+    try:
+        state = _state_for_book(user_id, book_id)
+        if state is None or not state.ever_authoritative:
+            return False
+        if _requesting_device(user_id, device_id) is None:
+            return False
+        if _accepted_capture(state.id, device_id) is not None:
+            return True
+        pending = _pending_capture(state.id)
+        if pending is not None:
+            _retire_pending(pending, "seed_capture_superseded")
+        now = _now()
+        ub.session.add(ub.KoboAnnotationSeedCapture(
+            book_state_id=state.id,
+            device_id=device_id,
+            started_at=now,
+            started_authority_revision=state.authority_revision or 0,
+            completed_at=now,
+            annotation_count=_visible_count(user_id, book_id),
+            page_count=0,
+            result="accepted",
+            seed_kind="routing_only",
+        ))
+        return ub.session_commit()
+    except Exception:
+        ub.session.rollback()
+        log.exception(
+            "Kobo routing-only seed could not persist user_id=%s book_id=%s",
+            user_id, book_id,
+        )
+        return False
+
+
+def recover_quarantined_book(*, user_id, book_id):
+    """User-scoped state transition used by the authenticated retry API."""
+    state = _state_for_book(user_id, book_id)
+    if state is None:
+        return "not_found", None
+    if state.authority_status != "quarantined":
+        return "conflict", state
+    now = _now()
+    pending = (
+        ub.session.query(ub.KoboAnnotationSeedCapture)
+        .filter(
+            ub.KoboAnnotationSeedCapture.book_state_id == state.id,
+            ub.KoboAnnotationSeedCapture.result == "pending",
+        )
+        .all()
+    )
+    for capture in pending:
+        capture.result = "failed"
+        capture.failure_reason = "seed_capture_superseded"
+        capture.completed_at = now
+        capture.page_count = len(capture.pages)
+    state.authority_status = (
+        "authoritative" if state.ever_authoritative else "unseeded"
+    )
+    state.authority_revision = (state.authority_revision or 0) + 1
+    state.quarantine_reason = None
+    if ub.session_commit() is False:
+        return "db_error", state
+    return "ok", state
+
+
 def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
     capture = ub.session.get(ub.KoboAnnotationSeedCapture, capture_id)
     if capture is None or capture.result != "pending":
         return False
     state = capture.book_state
+    if not _capture_revision_is_current(capture):
+        return _set_failure(
+            capture_id, "seed_authority_revision_changed",
+            quarantine=False, log=log,
+        )
     try:
         pages, annotations, raw_pages = _load_captured_pages(capture_id)
     except Exception:
@@ -374,6 +617,14 @@ def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
     ):
         return _set_failure(
             capture_id, "seed_duplicate_annotation_id", quarantine=True, log=log,
+        )
+    if len(pages) > 1:
+        capture.annotation_count = len(annotations)
+        capture.page_count = len(pages)
+        ub.session.flush()
+        return _set_failure(
+            capture_id, "seed_capture_requires_pagination",
+            quarantine=True, log=log,
         )
 
     try:
@@ -393,14 +644,37 @@ def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
             raw_by_id.update({record.annotation_id: record for record in records})
 
         for payload in annotations:
-            annotation = annotation_sync._upsert_annotation(
-                ub.session,
-                payload,
-                book,
-                user,
-                origin_device_id=device_id,
-                mark_last_editor=False,
+            annotation = (
+                ub.session.query(ub.Annotation)
+                .filter(
+                    ub.Annotation.user_id == user.id,
+                    ub.Annotation.book_id == book.id,
+                    ub.Annotation.annotation_id == payload["id"],
+                )
+                .first()
             )
+            equivalent_before = bool(
+                annotation is not None
+                and annotation_sync.kobo_payload_matches_annotation(
+                    annotation, payload, book,
+                )
+            )
+            protected_by_server = _server_evidence_is_newer(
+                annotation, payload, capture, annotation_sync, book,
+            )
+            applied = False
+            if not equivalent_before and not protected_by_server:
+                applied_row = annotation_sync._upsert_annotation(
+                    ub.session,
+                    payload,
+                    book,
+                    user,
+                    origin_device_id=device_id,
+                    mark_last_editor=False,
+                )
+                if applied_row is not None:
+                    annotation = applied_row
+                    applied = True
             if annotation is None:
                 annotation = (
                     ub.session.query(ub.Annotation)
@@ -411,15 +685,15 @@ def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
                     )
                     .first()
                 )
-                if (
-                    annotation is not None
-                    and annotation.origin_device_id is None
-                ):
-                    annotation.origin_device_id = device_id
+            if annotation is not None and annotation.origin_device_id is None:
+                annotation.origin_device_id = device_id
             if annotation is None:
                 raise ValueError("captured annotation was not reconciled")
+            equivalent_after = annotation_sync.kobo_payload_matches_annotation(
+                annotation, payload, book,
+            )
             raw_record = raw_by_id.get(payload["id"])
-            if raw_record is not None:
+            if raw_record is not None and (applied or equivalent_after):
                 annotation_sync._store_raw_materialization(
                     ub.session,
                     annotation,
@@ -439,13 +713,14 @@ def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
             capture_id, "seed_response_invalid", quarantine=False, log=log,
         )
 
-    visible_count = _visible_count(user.id, book.id)
+    visible_ids = _visible_ids(user.id, book.id)
+    visible_count = len(visible_ids)
     captured_count = len(annotations)
     refusal_reason = None
-    if len(pages) > 1:
-        refusal_reason = "seed_capture_requires_pagination"
-    elif visible_count < captured_count:
+    if visible_count < captured_count:
         refusal_reason = "seed_local_count_below_capture"
+    elif not set(annotation_ids).issubset(visible_ids):
+        refusal_reason = "seed_local_set_missing_captured_id"
     elif visible_count > LOCAL_PAGE_CAPACITY:
         refusal_reason = "seed_local_set_requires_pagination"
     if refusal_reason is not None:
@@ -453,6 +728,15 @@ def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
         capture.page_count = len(pages)
         ub.session.flush()
         return _set_failure(capture_id, refusal_reason, quarantine=True, log=log)
+
+    # Close the page-commit/reconcile window: any concurrent authority move
+    # invalidates this capture even if its annotation membership still looks
+    # plausible at this instant.
+    if not _capture_revision_is_current(capture):
+        return _set_failure(
+            capture_id, "seed_authority_revision_changed",
+            quarantine=False, log=log,
+        )
 
     normalized_content_id = _normalized_book_uuid(book)
     conflict = None
@@ -531,6 +815,11 @@ def record_proxy_response(
         capture = ub.session.get(ub.KoboAnnotationSeedCapture, capture_id)
         if capture is None or capture.result != "pending":
             return False
+        if not _capture_revision_is_current(capture):
+            return _set_failure(
+                capture_id, "seed_authority_revision_changed",
+                quarantine=False, log=log,
+            )
         if response.status_code < 200 or response.status_code >= 300:
             return _set_failure(
                 capture_id, "seed_response_invalid", quarantine=False, log=log,
