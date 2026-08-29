@@ -30,7 +30,16 @@ import uuid
 
 import pytest
 
-pytestmark = [pytest.mark.docker_integration, pytest.mark.slow]
+# KOReader sync ships OFF, and while it is off every /kosync endpoint answers 503
+# before any handler runs -- so without this fixture these four tests would fail
+# on `assert 503`, which looks like a delivery outage and is a missing
+# precondition. These are docker_integration, not unit, so requesting a
+# container-backed fixture here is legitimate.
+pytestmark = [
+    pytest.mark.docker_integration,
+    pytest.mark.slow,
+    pytest.mark.usefixtures("koreader_sync_enabled"),
+]
 
 KOREADER_READABLE = {"EPUB", "PDF", "MOBI", "FB2", "DJVU", "CBZ", "CBR", "TXT", "HTML", "RTF"}
 KOSYNC_ACCEPT = "application/vnd.koreader.v1+json"
