@@ -133,7 +133,8 @@ class TaskConvert(CalibreTask):
                                                                EmailText,
                                                                self.settings['body'],
                                                                id=self.book_id,
-                                                               internal=True)
+                                                               internal=True,
+                                                               book_title=self.book_title or self.title)
                                           )
                 except Exception as ex:
                     return self._handleError(str(ex))

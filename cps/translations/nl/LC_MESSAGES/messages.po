@@ -7217,7 +7217,7 @@ msgstr "metagegevens opslaan"
 msgid "Convert Library – full run"
 msgstr ""
 
-#: cps/tasks/ops.py
+#: cps/spa_strings.py cps/tasks/ops.py
 msgid "Convert Library"
 msgstr "Omzetten bibliotheek"
 
@@ -7225,9 +7225,9 @@ msgstr "Omzetten bibliotheek"
 msgid "EPUB Fixer – full run"
 msgstr ""
 
-#: cps/tasks/ops.py
+#: cps/spa_strings.py cps/tasks/ops.py
 msgid "EPUB Fixer"
-msgstr ""
+msgstr "EPUB-reparatie"
 
 #: cps/tasks/thumbnail.py
 #, python-format
@@ -12248,18 +12248,17 @@ msgstr "Looptijd"
 msgid "Actions"
 msgstr "Acties"
 
-#: cps/templates/tasks.html
+#: cps/spa_strings.py cps/templates/tasks.html
 msgid "Upcoming scheduled sends"
-msgstr ""
+msgstr "Aankomende geplande verzendingen"
 
-#: cps/templates/tasks.html
+#: cps/spa_strings.py cps/templates/tasks.html
 msgid "Scheduled Time"
-msgstr ""
+msgstr "Gepland tijdstip"
 
-#: cps/templates/tasks.html
-#, fuzzy
+#: cps/spa_strings.py cps/templates/tasks.html
 msgid "State"
-msgstr "Draaien"
+msgstr "Status"
 
 #: cps/templates/tasks.html
 msgid ""
@@ -12267,13 +12266,13 @@ msgid ""
 "time. You can cancel a pending send before it runs."
 msgstr ""
 
-#: cps/templates/tasks.html
+#: cps/spa_strings.py cps/templates/tasks.html
 msgid "Upcoming scheduled operations"
-msgstr ""
+msgstr "Aankomende geplande bewerkingen"
 
-#: cps/templates/tasks.html
+#: cps/spa_strings.py cps/templates/tasks.html
 msgid "Type"
-msgstr ""
+msgstr "Type"
 
 #: cps/templates/tasks.html
 msgid ""
@@ -12303,6 +12302,22 @@ msgstr "Geselecteerde dubbele boeken zijn succesvol verwijderd!"
 #: cps/templates/tasks.html
 msgid "Error cancelling scheduled item"
 msgstr ""
+
+#: cps/spa_strings.py
+msgid "No upcoming scheduled sends."
+msgstr "Geen aankomende geplande verzendingen."
+
+#: cps/spa_strings.py
+msgid "No upcoming scheduled operations."
+msgstr "Geen aankomende geplande bewerkingen."
+
+#: cps/spa_strings.py
+msgid "Could not load scheduled tasks."
+msgstr "Geplande taken konden niet worden geladen."
+
+#: cps/spa_strings.py
+msgid "Cancel scheduled item \"{title}\"? This cannot be undone."
+msgstr "Gepland item \"{title}\" annuleren? Dit kan niet ongedaan worden gemaakt."
 
 #: cps/templates/update_now_modal.html
 #, fuzzy

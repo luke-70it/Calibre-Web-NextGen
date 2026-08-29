@@ -436,6 +436,32 @@ export interface TaskItem {
   error?: string | null;
 }
 
+export interface ScheduledSend {
+  id: number;
+  book_id: number;
+  user_id: number;
+  username: string;
+  title: string;
+  run_at_utc: string;
+  state: string;
+}
+
+export interface ScheduledOperation {
+  id: number;
+  job_type: 'convert_library' | 'epub_fixer' | string;
+  book_id: number | null;
+  user_id: number | null;
+  username: string;
+  title: string;
+  run_at_utc: string;
+  state: string;
+}
+
+export interface ScheduledQueues {
+  sends: ScheduledSend[];
+  operations: ScheduledOperation[];
+}
+
 export class ApiError extends Error {
   status: number;
   /** The parsed `error` object from the response body, when there was one.
