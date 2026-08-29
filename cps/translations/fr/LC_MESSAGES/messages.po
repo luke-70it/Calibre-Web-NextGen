@@ -14750,6 +14750,9 @@ msgstr "Aucune correspondance dans cette bibliothèque"
 msgid "On this device"
 msgstr "Sur cet appareil"
 
+msgid "Showing {shown} of {total} books from the latest device inventory."
+msgstr "Affichage de {shown} livres sur {total} dans le dernier inventaire de l’appareil."
+
 msgid "View device library"
 msgstr "Afficher la bibliothèque de l’appareil"
 

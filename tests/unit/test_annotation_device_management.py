@@ -70,6 +70,137 @@ def test_device_list_exposes_webreader_kind_without_faking_legacy_rows(session):
     assert payload["label"] == "Web reader"
 
 
+@pytest.mark.unit
+def test_device_inventory_default_page_is_bounded_at_the_write_cap(session, monkeypatch):
+    from datetime import datetime, timezone
+
+    from cps import annotations, ub
+
+    device = _device(session)
+    report = ub.DeviceInventoryReport(
+        device_id=device.id, item_count=5000, matched_count=0,
+        observed_at=datetime.now(timezone.utc),
+    )
+    session.add(report)
+    session.flush()
+    session.add_all([
+        ub.DeviceInventoryItem(
+            device_id=device.id, lpath=f"Books/{index:04d}.epub", checksum=f"{index:032x}",
+            size=index, mtime=index, last_report_id=report.id,
+        )
+        for index in range(5000)
+    ])
+    session.commit()
+
+    app = Flask(__name__)
+    monkeypatch.setattr(annotations, "current_user", SimpleNamespace(id=7))
+    monkeypatch.setattr(ub, "session", session)
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/inventory"):
+        response = annotations.annotation_device_inventory.__wrapped__(device.public_id)
+
+    payload = response.get_json()
+    assert len(payload["books"]) == 200
+    assert payload["total"] == 5000
+    assert payload["limit"] == 200
+    assert payload["offset"] == 0
+    assert payload["books"][0]["lpath"] == "Books/0000.epub"
+    assert payload["books"][-1]["lpath"] == "Books/0199.epub"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("query", "field"), [
+    ("limit=-1", "limit"),
+    ("limit=0", "limit"),
+    ("limit=not-a-number", "limit"),
+    ("limit=201", "limit"),
+    ("limit=999999999999999999999999", "limit"),
+    ("offset=-1", "offset"),
+    ("offset=not-a-number", "offset"),
+])
+def test_device_inventory_rejects_invalid_pagination(session, monkeypatch, query, field):
+    from cps import annotations, ub
+
+    device = _device(session)
+    session.commit()
+    app = Flask(__name__)
+    monkeypatch.setattr(annotations, "current_user", SimpleNamespace(id=7))
+    monkeypatch.setattr(ub, "session", session)
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/inventory?{query}"):
+        response, status = annotations.annotation_device_inventory.__wrapped__(device.public_id)
+
+    assert status == 400
+    assert response.get_json()["error"] == "invalid_pagination"
+    assert response.get_json()["field"] == field
+
+
+@pytest.mark.unit
+def test_device_inventory_applies_limit_and_offset_and_allows_past_end(session, monkeypatch):
+    from datetime import datetime, timezone
+
+    from cps import annotations, ub
+
+    device = _device(session)
+    report = ub.DeviceInventoryReport(
+        device_id=device.id, item_count=5, matched_count=0,
+        observed_at=datetime.now(timezone.utc),
+    )
+    session.add(report)
+    session.flush()
+    session.add_all([
+        ub.DeviceInventoryItem(
+            device_id=device.id, lpath=f"Books/{index}.epub", checksum=f"{index:032x}",
+            size=index, mtime=index, last_report_id=report.id,
+        )
+        for index in range(5)
+    ])
+    session.commit()
+    app = Flask(__name__)
+    monkeypatch.setattr(annotations, "current_user", SimpleNamespace(id=7))
+    monkeypatch.setattr(ub, "session", session)
+
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/inventory?limit=2&offset=0"):
+        first_page = annotations.annotation_device_inventory.__wrapped__(device.public_id).get_json()
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/inventory?limit=2&offset=2"):
+        middle_page = annotations.annotation_device_inventory.__wrapped__(device.public_id).get_json()
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/inventory"
+            "?limit=2&offset=999999999999999999999999"):
+        past_end = annotations.annotation_device_inventory.__wrapped__(device.public_id).get_json()
+
+    assert [book["lpath"] for book in first_page["books"]] == [
+        "Books/0.epub", "Books/1.epub",
+    ]
+    assert [book["lpath"] for book in middle_page["books"]] == [
+        "Books/2.epub", "Books/3.epub",
+    ]
+    assert middle_page["total"] == 5
+    assert middle_page["limit"] == 2
+    assert middle_page["offset"] == 2
+    assert past_end["books"] == []
+    assert past_end["total"] == 5
+
+
+@pytest.mark.unit
+def test_device_inventory_pagination_does_not_widen_device_ownership(session, monkeypatch):
+    from cps import annotations, ub
+    from werkzeug.exceptions import NotFound
+
+    other_users_device = _device(session, user_id=8)
+    session.commit()
+    app = Flask(__name__)
+    monkeypatch.setattr(annotations, "current_user", SimpleNamespace(id=7))
+    monkeypatch.setattr(ub, "session", session)
+    with app.test_request_context(
+            f"/api/annotations/devices/{other_users_device.public_id}/inventory"
+            "?limit=200&offset=0"):
+        with pytest.raises(NotFound):
+            annotations.annotation_device_inventory.__wrapped__(other_users_device.public_id)
+
+
 @pytest.mark.parametrize("label", ["", "x" * 61, " leading", "trailing ", "bad\nlabel"])
 def test_device_rename_rejects_out_of_range_or_unsafe_labels(session, label):
     from cps.annotations import rename_annotation_device
