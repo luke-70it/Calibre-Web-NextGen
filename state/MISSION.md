@@ -1,39 +1,39 @@
-# Mission: cwngsync storage, deletion, and device collections
+# Mission: Make the SPA default and persist Discover visibility per user
 
-Updated: 2026-08-28   Phase: delivery   Status: 9/9 outcomes verified
+Updated: 2026-08-28  Phase: objective 2 red tests  Status: 1/8 outcomes observed
 
 ## Definition of done
 
-- [x] Phase 2 accepted head is clean, pushed, and is the implementation base.
-- [x] Phase 3 stores fresh per-device free/total space without changing `Device`.
-- [x] Phase 3 refuses an oversized delivery at claim time and reports the refusal cleanly.
-- [x] Phase 3 names server-requested deletions, lets the device confirm them, and never derives deletion from inventory omission.
-- [x] Phase 3 has behavioral red-before-green evidence and a user-facing changelog fragment.
-- [x] Phase 4 publishes shelf snapshots scoped by both user and device and applies them as KOReader collections.
-- [x] Phase 4 has behavioral red-before-green evidence and a user-facing changelog fragment.
-- [x] Full unit lane `python -m pytest -q -p no:randomly -m unit` has zero failures.
-- [x] All scoped changes are committed as `new-usemame` and pushed to `feat/cwngsync-send-to-device`.
+- [x] Required project authority, code index, stale M3 briefing, capability/routing, git-manager, run-to-done, and accessibility guidance consumed.
+- [ ] Cookie-less browser navigation to `/` and GET `/login` selects the SPA; old `cwng_prefer_spa=1` remains SPA-compatible.
+- [ ] Classic opt-out sticks across requests/restarts and repeated classic↔SPA round trips; feedback popup remains one-shot and the classic nudge is removed.
+- [ ] Machine-client requests (missing or wildcard Accept, curl/wget, OPDS UA, Kobo routes) have unchanged status/redirect behavior; explicit browser navigation and reverse-proxy subpaths work.
+- [ ] Generic named per-user JSON preference API/client facility exists without a migration and safely validates/rolls back.
+- [ ] Discover preference is server-authoritative for authenticated users, adopts an existing local hidden value once, works across browsers/logout/localStorage clearing, and stays local-only for anonymous users.
+- [ ] Objective-specific tests are demonstrated red on the origin/main base and green on the branch; touched Python suites, frontend build/typecheck, and touched e2e/a11y specs pass.
+- [ ] Live local HTTP/browser flow, adjacent regression pass, changelog fragment, commits, and pushed final HEAD are recorded with OBSERVED/ASSUMED evidence.
 
 ## Now / next action
 
-Commit the verified implementation with the required public identity and push the branch.
+Add backend and client regressions for named user preferences and one-time Discover adoption before implementing objective 2.
 
-## How to verify
+## How to build/run/verify
 
-- Focused Phase 3 and Phase 4 pytest modules, with their pre-implementation failures retained in the session report.
-- Existing CWNGSync unit group: `python -m pytest -q -p no:randomly tests/unit/test_cwngsync_*.py`.
-- Full unit lane: `python -m pytest -q -p no:randomly -m unit`.
-- `git diff --check`, scoped staged-diff audit, clean local/remote commit equality.
+- `python -m pytest <touched unit suites>`
+- `cd frontend && npm run build`
+- `cd frontend && npm run test:e2e -- <touched specs>`
+- Local Docker/dev HTTP and browser verification using the repository harness.
 
-## Decisions and rationale
+## Decisions & rationale
 
-- 2026-08-28: use CWNG briefing/git-manager, capabilities/routing, and run-to-done guidance; implement locally in the current Sol session with no parallel agents.
-- 2026-08-28: replace the completed SPA mission ledger inherited from another branch with this branch's active two-phase mission.
-- 2026-08-28: preserve the immutable Phase 1 rule that an inventory omission is only absence of evidence and can never create a delete request.
-- 2026-08-28: use latest storage at queue time as an early refusal, freshly reported storage at claim time as server admission, and KOReader's immediate pre-download `df` result as the authoritative racing check. A losing final check reports refusal and requeues without creating a partial file.
-- 2026-08-28: namespace KOReader-managed collection names with an opaque per-user/per-device scope; rebuild only that scope's collections so membership removals and shelf renames converge without touching another account's or unmanaged collections.
-- 2026-08-28: expose exact inventory observation IDs and storage values in the existing Devices API/UI; deletion requests are always explicit user actions against one named observation.
+- 2026-08-28: implement inline as Sol; no delegate fleet, matching current model-routing doctrine and the operator's implementer assignment.
+- 2026-08-28: reuse `User.view_settings`; no schema migration.
+- 2026-08-28: build a generic named boolean-preference facility but wire only Discover in this pass.
+- 2026-08-28: remove the classic opt-in nudge and retain only the plain new-UI nav affordance plus one-shot departure feedback.
+- 2026-08-28: M3 briefing is stale since 2026-06-12; treat it as historical and rely on the operator-supplied branch/objectives plus current code.
+- 2026-08-28: use `cwng_prefer_classic=1` as the opt-out; continue stamping/deleting legacy `cwng_prefer_spa` for downgrade compatibility.
+- 2026-08-28: browser routing requires an explicit positive `text/html` media range and rejects stated non-document/non-navigation Fetch Metadata.
 
-## Open questions
+## Open questions for the operator
 
-- None.
+- None; the supplied defaults and scope are sufficient.

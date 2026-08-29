@@ -1568,18 +1568,19 @@ def index(page):
 
     sort_param = (request.args.get('sort') or 'stored').lower()
 
-    # Sticky new UI (#739). The SPA's "Back to classic view" nav lands here
-    # carrying cwng_feedback=newui — drop the preference cookie so leaving the
-    # SPA is sticky too. Only the web index does this; books_list, authors,
-    # OPDS, Kobo and the API never touch the cookie.
+    # The SPA's "Back to classic view" nav lands here with a one-shot feedback
+    # marker. Persist the explicit Classic opt-out and clear the legacy SPA
+    # cookie (downgrade compatibility). Only the web index does this; books_list,
+    # authors, OPDS, Kobo and the API never touch either cookie.
     if request.args.get('cwng_feedback'):
         response = make_response(render_books_list("root", sort_param, 1, page))
+        spa.stamp_prefer_classic_cookie(response)
         spa.clear_prefer_spa_cookie(response)
         return response
 
-    # And once a browser prefers the SPA, bounce a bookmarked classic-home URL
-    # to the new UI rather than silently reverting (and re-nagging). Same
-    # web-index-only scope; the helper also gates on SPA available + accepts HTML.
+    # SPA is the default unless this browser explicitly chose Classic. Same
+    # web-index-only scope; the helper also gates on availability and an explicit
+    # browser HTML-document request so machine clients never acquire redirects.
     if spa.classic_index_redirects_to_spa():
         return redirect(spa.spa_shell_url())
 
@@ -2949,9 +2950,9 @@ def login():
     if config.config_login_type != constants.LOGIN_OAUTH:
         oauth_auto_redirect.clear_auto_redirect_state(flask_session)
 
-    # #908: the UI preference is intentionally per-browser, not per-user, so it
-    # remains readable after logout. Route an anonymous HTML browser into the
-    # SPA's logged-out tree before rendering the Classic login template.
+    # #908: the UI preference is per-browser, not per-user, so it remains readable
+    # after logout. Route an anonymous browser into the SPA's logged-out tree by
+    # default; an explicit Classic opt-out still renders the Classic login.
     if spa.preferred_spa_html_request():
         # The destination is fixed and app-owned. spa_shell_url() preserves a
         # valid reverse-proxy subpath while rejecting hostile forwarded prefixes;

@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""#739: choosing the new UI is not sticky — nothing persists the choice, so a
-later visit to a classic page (or opening one in a new tab) reverts to classic
-and the "Try the new UI" nudge shows again.
+"""#739/#908: the SPA is the default UI and Classic is a sticky opt-out.
 
-Server-side fix (this file): the SPA shell sets a cwng_prefer_spa cookie when it
-loads; the classic web index ('/') redirects to the shell while the cookie is
-present, and the SPA's "Back to classic view" nav (the cwng_feedback marker)
-clears it. layout.html hides the nudge banner and relabels the header pill once
-the cookie is set.
+A cookie-less browser and the old ``cwng_prefer_spa=1`` population both use the
+SPA. Leaving through ``?cwng_feedback=newui`` stores ``cwng_prefer_classic=1``;
+loading the SPA clears that opt-out so Classic -> SPA -> Classic can round-trip
+indefinitely. Redirects are limited to explicit browser-document HTML requests,
+because wildcard or missing Accept headers are ordinary machine-client traffic.
 
 The web index (cps/web.py) can't be driven directly in a unit test — it sits
 behind login and pulls the Calibre DB via render_books_list — so tests b/c/d
@@ -37,6 +35,7 @@ _WEB = _REPO / "cps" / "web.py"
 
 _HTML_ACCEPT = {"Accept": "text/html,application/xhtml+xml"}
 _PREFER_COOKIE = {"HTTP_COOKIE": "cwng_prefer_spa=1"}
+_CLASSIC_COOKIE = {"HTTP_COOKIE": "cwng_prefer_classic=1"}
 
 
 def _seed_bundle(tmp_path):
@@ -83,6 +82,7 @@ def _sticky_app(tmp_path):
     def _classic_index_stand_in():
         if flask.request.args.get("cwng_feedback"):
             resp = flask.make_response("CLASSIC HOME")
+            spa_mod.stamp_prefer_classic_cookie(resp)
             spa_mod.clear_prefer_spa_cookie(resp)
             return resp
         if spa_mod.classic_index_redirects_to_spa():
@@ -149,6 +149,23 @@ def test_a_app_shell_sets_prefer_cookie(tmp_path):
 
 
 @pytest.mark.unit
+def test_app_shell_clears_classic_opt_out(tmp_path):
+    """Choosing the SPA again removes the durable Classic preference while
+    retaining the legacy SPA cookie for downgrade compatibility."""
+    app, monkey = _spa_only_app(tmp_path)
+    try:
+        resp = _client(app).get(
+            "/app", headers=_HTML_ACCEPT, environ_overrides=_CLASSIC_COOKIE)
+        assert resp.status_code == 200
+        sc = _set_cookie(resp)
+        assert "cwng_prefer_classic=" in sc
+        assert "Max-Age=0" in sc
+        assert "cwng_prefer_spa=1" in sc
+    finally:
+        monkey.undo()
+
+
+@pytest.mark.unit
 def test_app_shell_cookie_path_under_subpath(tmp_path):
     """Behind a reverse-proxy subpath (script_root=/cwa) the cookie path must be
     the app root (/cwa), not '/' — so two CWNG instances on different subpaths of
@@ -168,9 +185,8 @@ def test_app_shell_cookie_path_under_subpath(tmp_path):
 
 
 @pytest.mark.unit
-def test_b_classic_index_redirects_when_cookie_present(tmp_path):
-    """(b) GET / with the cookie + SPA enabled → 302 to /app. On main this is a
-    200 classic home (the regression)."""
+def test_b_legacy_spa_cookie_still_redirects(tmp_path):
+    """Existing ``cwng_prefer_spa=1`` users keep their SPA experience."""
     app, monkey = _sticky_app(tmp_path)
     try:
         resp = _client(app).get(
@@ -182,9 +198,9 @@ def test_b_classic_index_redirects_when_cookie_present(tmp_path):
 
 
 @pytest.mark.unit
-def test_c_feedback_clears_cookie_and_does_not_redirect(tmp_path):
-    """(c) GET /?cwng_feedback=newui → 200 (NOT a redirect) and the response
-    deletes cwng_prefer_spa. This is the SPA's 'Back to classic' nav path."""
+def test_c_feedback_sets_classic_opt_out_and_does_not_redirect(tmp_path):
+    """Leaving the SPA renders Classic, sets its durable opt-out, and deletes
+    the legacy SPA preference so downgrades preserve the same choice."""
     app, monkey = _sticky_app(tmp_path)
     try:
         resp = _client(app).get(
@@ -192,18 +208,41 @@ def test_c_feedback_clears_cookie_and_does_not_redirect(tmp_path):
             headers=_HTML_ACCEPT, environ_overrides=_PREFER_COOKIE)
         assert resp.status_code == 200
         sc = _set_cookie(resp)
+        assert "cwng_prefer_classic=1" in sc
+        assert "Max-Age=31536000" in sc
         assert "cwng_prefer_spa=" in sc
-        assert "Max-Age=0" in sc  # deletion
     finally:
         monkey.undo()
 
 
 @pytest.mark.unit
-def test_d_no_cookie_no_redirect(tmp_path):
-    """(d) GET / with no cookie → 200 classic home, no redirect."""
+def test_d_cookie_less_browser_redirects_to_spa(tmp_path):
+    """The changed default: a fresh browser navigation enters the SPA."""
     app, monkey = _sticky_app(tmp_path)
     try:
         resp = _client(app).get("/", headers=_HTML_ACCEPT)
+        assert resp.status_code == 302
+        assert resp.headers["Location"] == "/app/"
+    finally:
+        monkey.undo()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("headers", [
+    {},
+    {"Accept": "*/*", "User-Agent": "curl/8.7.1"},
+    {"Accept": "*/*", "User-Agent": "Wget/1.21.4"},
+    {"Accept": "application/atom+xml,application/xml;q=0.9,*/*;q=0.1",
+     "User-Agent": "Moon+ Reader Pro/9.6 (OPDS)"},
+    {"Accept": "*/*", "User-Agent": "Kobo Touch/4.38.21908"},
+    {"Accept": "application/json"},
+])
+def test_machine_client_header_sets_are_not_redirected(tmp_path, headers):
+    """Missing/wildcard/non-HTML Accept sets used by curl, wget, OPDS readers,
+    and Kobo must retain the classic endpoint response after SPA becomes default."""
+    app, monkey = _sticky_app(tmp_path)
+    try:
+        resp = _client(app).get("/", headers=headers)
         assert resp.status_code == 200
         assert b"CLASSIC HOME" in resp.data
     finally:
@@ -211,15 +250,25 @@ def test_d_no_cookie_no_redirect(tmp_path):
 
 
 @pytest.mark.unit
-def test_non_html_accept_not_redirected(tmp_path):
-    """A machine client (Accept: application/json) hitting '/' must NOT bounce to
-    the HTML shell even with the cookie set — guards the accept-html gate."""
+def test_non_document_fetch_with_html_accept_is_not_redirected(tmp_path):
+    """An HTML fetch for a subresource is not a top-level browser navigation."""
     app, monkey = _sticky_app(tmp_path)
     try:
         resp = _client(app).get(
-            "/", headers={"Accept": "application/json"},
-            environ_overrides=_PREFER_COOKIE)
+            "/", headers={"Accept": "text/html", "Sec-Fetch-Dest": "empty"})
         assert resp.status_code == 200
+    finally:
+        monkey.undo()
+
+
+@pytest.mark.unit
+def test_classic_opt_out_sticks_across_fresh_request(tmp_path):
+    app, monkey = _sticky_app(tmp_path)
+    try:
+        resp = _client(app).get(
+            "/", headers=_HTML_ACCEPT, environ_overrides=_CLASSIC_COOKIE)
+        assert resp.status_code == 200
+        assert b"CLASSIC HOME" in resp.data
     finally:
         monkey.undo()
 
@@ -259,11 +308,25 @@ def test_preferred_spa_redirects_anonymous_login_to_new_ui(tmp_path):
 
 
 @pytest.mark.unit
-def test_login_without_preference_keeps_classic_surface(tmp_path):
-    """A new/no-cookie browser keeps the existing Classic login behavior."""
+def test_login_without_preference_uses_spa_surface(tmp_path):
+    """A new/no-cookie browser uses the SPA login tree by default."""
     app, web_mod, monkey = _login_app(tmp_path)
     try:
         resp = _get_login(_client(app), web_mod, "/login", headers=_HTML_ACCEPT)
+        assert resp.status_code == 302
+        assert resp.headers["Location"] == "/app/"
+    finally:
+        monkey.undo()
+
+
+@pytest.mark.unit
+def test_classic_opt_out_keeps_anonymous_login_classic(tmp_path):
+    app, web_mod, monkey = _login_app(tmp_path)
+    try:
+        resp = _get_login(
+            _client(app), web_mod, "/login", headers=_HTML_ACCEPT,
+            environ_overrides=_CLASSIC_COOKIE,
+        )
         assert resp.status_code == 200
         assert resp.get_data(as_text=True) == "CLASSIC LOGIN"
     finally:
@@ -294,7 +357,6 @@ def test_preferred_spa_login_stays_classic_when_spa_disabled(tmp_path):
     try:
         resp = _get_login(
             _client(app), web_mod, "/login", headers=_HTML_ACCEPT,
-            environ_overrides=_PREFER_COOKIE,
         )
         assert resp.status_code == 200
         assert resp.get_data(as_text=True) == "CLASSIC LOGIN"
@@ -309,7 +371,7 @@ def test_preferred_spa_login_redirect_preserves_reverse_proxy_subpath(tmp_path):
     try:
         resp = _get_login(
             _client(app), web_mod, "/login", headers=_HTML_ACCEPT,
-            environ_overrides={**_PREFER_COOKIE, "SCRIPT_NAME": "/cwa"},
+            environ_overrides={"SCRIPT_NAME": "/cwa"},
         )
         assert resp.status_code == 302
         assert resp.headers["Location"] == "/cwa/app/"
@@ -378,15 +440,14 @@ def test_preferred_spa_login_rejects_hostile_proxy_prefix(tmp_path, bad_prefix):
 # ---- source pins: template gating + web.py wiring ----
 
 @pytest.mark.unit
-def test_e_layout_gates_banner_on_prefer_cookie():
-    """(e) layout.html must hide the 'Try the new UI' banner when the preference
-    cookie is set, and flip the header pill to 'Back to New UI'."""
+def test_e_layout_has_plain_return_affordance_without_banner():
+    """Classic has one quiet return affordance; the opt-in nudge is gone."""
     src = _LAYOUT.read_text()
-    assert "request.cookies.get('cwng_prefer_spa') != '1'" in src, (
-        "banner {% if %} not gated on cwng_prefer_spa absence")
-    assert "Back to New UI" in src, "pill relabel not added"
-    assert "request.cookies.get('cwng_prefer_spa') == '1'" in src, (
-        "pill label not conditioned on the preference cookie")
+    assert 'id="cwng-newui-banner"' not in src
+    assert "Your classic view stays the default until you switch." not in src
+    assert "cwng_newui_banner_dismissed" not in src
+    assert "Back to New UI" in src
+    assert "Switch to New UI" not in src
 
 
 @pytest.mark.unit
@@ -394,6 +455,7 @@ def test_web_index_wires_sticky_helpers():
     """web.py:index must clear on cwng_feedback and call the redirect helper —
     pins that the stand-in '/' route above mirrors production."""
     src = _WEB.read_text()
+    assert "spa.stamp_prefer_classic_cookie" in src
     assert "spa.clear_prefer_spa_cookie" in src
     assert "spa.classic_index_redirects_to_spa" in src
     assert "cwng_feedback" in src
