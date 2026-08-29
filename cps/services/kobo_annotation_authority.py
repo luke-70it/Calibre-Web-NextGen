@@ -482,6 +482,43 @@ def mark_authoritative_oversize(user_id, book_id, *, log):
         return False
 
 
+def advance_authoritative_patch_revision(user_id, book_id, *, log):
+    """Invalidate prior rendered bytes before acknowledging a local PATCH.
+
+    Annotation upserts/deletes have already reported durable persistence when
+    this boundary is called. The replacement-set generation must now move in
+    its own checked commit before Nickel receives 204. ``set_digest`` and the
+    current ETag are cleared because no complete post-PATCH body has yet been
+    rendered; the next successful GET will bind them to exact response bytes.
+    """
+    try:
+        state = _state_for_book(user_id, book_id)
+        if state is None or not (
+            state.ever_authoritative
+            or state.authority_status == "authoritative"
+        ):
+            return False
+        state.authority_revision = (state.authority_revision or 0) + 1
+        state.set_digest = None
+        state.current_etag = None
+        state.etag_kind = None
+        state.last_mutation_at = datetime.now(timezone.utc)
+        committed = ub.session_commit()
+        if committed is False:
+            log.error(
+                "Kobo authoritative PATCH revision did not commit "
+                "user_id=%s book_id=%s", user_id, book_id,
+            )
+        return committed
+    except Exception:
+        _safe_rollback()
+        log.exception(
+            "Kobo authoritative PATCH revision failed "
+            "user_id=%s book_id=%s", user_id, book_id,
+        )
+        return False
+
+
 def _captured_membership_is_safe(
     *, state, user_id, book_id, device_id, visible_ids,
 ):
@@ -916,15 +953,26 @@ def _log_degraded(log, *, user_id, book_id, visible_count, reasons):
 
 
 def _snapshot_payload(state, *, log, user_id, book_id):
-    """Validate and return the last exact complete-set bytes and ETag."""
+    """Return last exact bytes only when bound to the current authority set."""
     compressed = _blob(getattr(state, "last_served_body_gzip", None))
     expected_digest = getattr(state, "last_served_body_sha256", None)
     etag = getattr(state, "last_served_etag", None)
     expected_count = getattr(state, "last_served_annotation_count", None)
+    snapshot_revision = getattr(state, "last_served_authority_revision", None)
+    snapshot_set_digest = getattr(state, "last_served_set_digest", None)
+    current_revision = getattr(state, "authority_revision", None)
+    current_set_digest = getattr(state, "set_digest", None)
     if (
         compressed is None
         or not isinstance(expected_digest, str)
         or len(expected_digest) != 64
+        or not isinstance(snapshot_set_digest, str)
+        or len(snapshot_set_digest) != 64
+        or snapshot_set_digest != expected_digest
+        or snapshot_set_digest != current_set_digest
+        or not isinstance(snapshot_revision, int)
+        or isinstance(snapshot_revision, bool)
+        or snapshot_revision != current_revision
         or not isinstance(etag, str)
         or not etag.startswith('W/"CWNG:')
         or not isinstance(expected_count, int)
@@ -996,6 +1044,8 @@ def _commit_complete_render(*, state, body, digest, annotation_count):
     state.last_served_body_sha256 = digest
     state.last_served_etag = etag
     state.last_served_annotation_count = annotation_count
+    state.last_served_authority_revision = revision
+    state.last_served_set_digest = digest
     state.last_served_at = datetime.now(timezone.utc)
     # State, ETag, and fallback bytes become durable together before Flask can
     # begin sending the replacement-set response.
@@ -1067,16 +1117,12 @@ def _emergency_render(*, user_id, book_id, entitlement_id, page_limit,
         except Exception as error:
             _safe_rollback()
             reasons.append(_failure_reason("book_state_commit", error))
-            fallback = load_last_served_complete_set(
-                user_id=user_id, book_id=book_id, log=log,
+            # The complete live body is newer evidence than any stored
+            # snapshot. Persistence failure may degrade durability, but must
+            # never replace known-complete live membership with an older set.
+            etag = _transient_etag(
+                user_id, book_id, normalized_content_id, digest,
             )
-            if fallback is not None:
-                _log_degraded(
-                    log, user_id=user_id, book_id=book_id,
-                    visible_count=len(rows), reasons=reasons,
-                )
-                return fallback
-            return None
     _log_degraded(
         log, user_id=user_id, book_id=book_id,
         visible_count=len(rows), reasons=reasons,
@@ -1135,16 +1181,11 @@ def _render_owned_annotations(*, user_id, book_id, entitlement_id, page_limit,
         except Exception as error:
             _safe_rollback()
             reasons.append(_failure_reason("book_state_commit", error))
-            fallback = load_last_served_complete_set(
-                user_id=user_id, book_id=book_id, log=log,
+            # Never discard the current complete render in favor of a prior
+            # snapshot merely because its persistence/ETag commit failed.
+            etag = _transient_etag(
+                user_id, book_id, normalized_content_id, digest,
             )
-            if fallback is not None:
-                _log_degraded(
-                    log, user_id=user_id, book_id=book_id,
-                    visible_count=len(rows), reasons=reasons,
-                )
-                return fallback
-            return None
 
     _log_degraded(
         log, user_id=user_id, book_id=book_id,

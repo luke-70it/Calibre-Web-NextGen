@@ -22,3 +22,7 @@
   ETag locally, durably snapshots each complete response for exact replay when
   live reads fail, and blocks initial authority while same-ID reconciliation
   conflicts remain unresolved.
+- **Fallback snapshots now belong to one exact authority revision.** A local
+  Kobo PATCH advances and invalidates the rendered-set digest before its 204;
+  stale snapshots are rejected, while a current complete live render is never
+  replaced by older bytes if snapshot persistence fails.

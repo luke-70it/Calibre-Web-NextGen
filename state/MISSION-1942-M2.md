@@ -1,8 +1,14 @@
 # Mission: #1942 M2 annotation seeding pipeline
 
 Updated: 2026-08-29
-Phase: closure correction R4 implementation
-Status: 3/3 R4 outcomes done and verified
+Phase: closure correction R5 implementation
+Status: 3/3 R5 outcomes done and verified
+
+## R5 definition of done (surgical F2 closure)
+
+- [x] A snapshot stores its exact `authority_revision` and `set_digest`, and replay requires both values to equal current book state.
+- [x] Every locally acknowledged authoritative PATCH first commits an authority revision increment plus set-digest/current-ETag invalidation; failure withholds the 204.
+- [x] The exact `{A}` GET → `{B}` PATCH → dual-read-failure ordering cannot replay `{A}`; a newer complete live render survives snapshot-commit failure; a pre-R4 authority row without a snapshot reaches only the loud terminal fallback.
 
 ## R4 definition of done (closure FIX-FIRST verdict)
 
@@ -32,7 +38,7 @@ Status: 3/3 R4 outcomes done and verified
 
 ## Now / next action
 
-Commit the verified R4 correction atop exact base `a8cf4694dc711577fe527c4c9a61fd6f266940ba` with the required identity and create/verify `1942-m2-r4.bundle` at the worktree root.
+Commit the verified R5 correction atop exact base `f5db7afead28485afc5991dac94549744cacd789` with the required identity and create/verify `1942-m2-r5.bundle` at the worktree root.
 
 ## Verification commands
 
@@ -42,6 +48,13 @@ Commit the verified R4 correction atop exact base `a8cf4694dc711577fe527c4c9a61f
 - Git: `git diff --check`; inspect scoped diff; verify commit author and remote owner before push/bundle.
 
 ## Decisions and rationale
+
+- 2026-08-29 R5: closure review `/tmp/cwng-m2-review4-last.txt` was read completely (147 lines); F1 and F3 are confirmed closed, while the reproduced GET `{A}` → PATCH `{B}` → dual-read-failure sequence proves R4's unversioned snapshot can wipe `B`.
+- 2026-08-29 R5: snapshots are mutation proofs, not time-based caches. Exact replay now requires stored/current authority revision equality and stored/current set-digest equality in addition to gzip/SHA/count/JSON integrity.
+- 2026-08-29 R5: after local annotation persistence, the PATCH route commits a revision increment and clears `set_digest`/`current_etag` before emitting the byte-exact 204. Clearing is deliberate: until a complete post-PATCH body is rendered, fabricating a body digest or ETag would be dishonest.
+- 2026-08-29 R5: a complete live body outranks durability failure. If its snapshot commit fails, return that known-complete body with a body-derived transient ETag; never substitute older snapshot membership.
+- 2026-08-29 R5 design boundary: review4's stronger bar says PATCH must not 204 until a complete new fallback representation is itself durable, while the manager explicitly chose revision invalidation followed by terminal 503 when live reads fail. The newer manager instruction governs this surgical round; the disagreement is recorded rather than silently treated as review-level closure.
+- 2026-08-29 R5: the M3 briefing is stale since 2026-06-12 and reports no #1942 escalation; the direct manager brief is the current source of truth.
 
 - 2026-08-29 R4: closure review `/tmp/cwng-m2-review3-last.txt` was read completely (250 lines); all three fail-wrong paths are present at `a8cf4694d` and reopen the mission.
 - 2026-08-29 R4: the R3 prior-CWNG-ETag proxy decision was wrong. A CWNG ETag is affirmative possession of CWNG's set, so every ever-authoritative GET remains local; `If-None-Match` never produces 304.
@@ -80,6 +93,14 @@ Commit the verified R4 correction atop exact base `a8cf4694dc711577fe527c4c9a61f
 - 2026-08-29: final spec/runbook audit added capture-derived W1 opaque evidence in `c407da24fe`: a complete set records `absent` only when attachments prove it, records `present` when observed, and never downgrades durable prior `present` evidence.
 
 ## Evidence classification
+
+- OBSERVED R5: exact delivery base is `f5db7afead28485afc5991dac94549744cacd789`; review4's GET `{A}` → local PATCH `{B}` → dual-query failure sequence reproduced the stale-snapshot subset before correction.
+- OBSERVED R5: the named M2 pipeline suite passes 36/36 serially. It proves snapshot revision/digest equality, PATCH revision advancement before exact 204, stale-snapshot rejection after PATCH, live `{A,B}` preservation when snapshot commit fails, no-snapshot upgrade fallback, and 204 withholding when the authority commit fails.
+- OBSERVED R5: existing #1923 authority passes 17/17 and the authenticated Kobo two-way API passes 28/28 serially (81/81 required focused tests total).
+- OBSERVED R5: adjacent Stage-0, sync-schema, privacy/purge, and scope-migration suites pass 67/67 serially; PATCH spool/containment/clock suites pass 89/89; the exchange-capture local GET/PATCH pair passes 2/2 after explicitly mocking the new authority-commit seam.
+- OBSERVED R5: final-tree full unit suite collected 7,629 tests: 7,506 passed, 106 skipped, and 17 failed in 221.57s. The 17 are the known managed-sandbox infrastructure set: 10 loopback socket-bind denials and 7 `ps` execution denials; no application assertion failed.
+- OBSERVED R5: scoped Ruff across every changed small implementation/test file passes, fatal-error Ruff across the two touched legacy runtime files passes, Python compilation and `git diff --check` pass.
+- ASSUMED R5: per the manager decision, a post-PATCH dual live-read failure with no revision-matched snapshot uses terminal 503. Review4 explicitly regards 503 as insufficient and instead requires a new durable fallback before PATCH 204; that stronger behavior is not claimed.
 
 - OBSERVED R4: exact delivery base is `a8cf4694dc711577fe527c4c9a61fd6f266940ba`; all three closure-review fail-wrong paths reproduced before correction.
 - OBSERVED R4: the named M2 pipeline suite passes 33/33 serially, including prior-CWNG-ETag local 200 plus paired PATCH, exact snapshot replay after both live queries fail, nonempty snapshot replay on readable-membership failure, explicit no-snapshot terminal 503, and the inverse-conflict quarantine/recovery sequence.

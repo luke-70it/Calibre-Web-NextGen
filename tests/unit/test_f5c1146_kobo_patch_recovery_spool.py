@@ -153,6 +153,10 @@ def _app(monkeypatch, *, dispatch):
         rs, "_owned_patch_is_local_authority", lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(
+        "cps.services.kobo_annotation_authority.advance_authoritative_patch_revision",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
         "cps.services.annotation_sync.dispatch_annotation_sync", dispatch,
     )
     monkeypatch.setattr(

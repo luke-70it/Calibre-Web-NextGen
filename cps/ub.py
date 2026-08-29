@@ -1417,6 +1417,8 @@ class KoboAnnotationBookState(Base):
     last_served_body_sha256 = Column(String(64), nullable=True)
     last_served_etag = Column(Text, nullable=True)
     last_served_annotation_count = Column(Integer, nullable=True)
+    last_served_authority_revision = Column(Integer, nullable=True)
+    last_served_set_digest = Column(String(64), nullable=True)
     last_served_at = Column(DateTime, nullable=True)
     etag_kind = Column(String(24), nullable=True)
     upstream_seed_etag = Column(Text, nullable=True)
@@ -3768,6 +3770,16 @@ def migrate_kobo_annotation_seed_pipeline(engine, _session):
                 "kobo_annotation_book_state",
                 "last_served_annotation_count",
                 "last_served_annotation_count INTEGER",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_authority_revision",
+                "last_served_authority_revision INTEGER",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_set_digest",
+                "last_served_set_digest VARCHAR(64)",
             ),
             (
                 "kobo_annotation_book_state",

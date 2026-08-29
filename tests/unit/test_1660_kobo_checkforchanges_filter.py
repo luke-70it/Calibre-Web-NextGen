@@ -25,8 +25,13 @@ def app():
 @pytest.fixture(autouse=True)
 def _pre_1923_patch_tests_use_seeded_authority(monkeypatch):
     """Keep this module focused on capture/refusal, not the Stage-0 gate."""
+    from cps.services import kobo_annotation_authority
     monkeypatch.setattr(
         rs, "_owned_patch_is_local_authority", lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        kobo_annotation_authority, "advance_authoritative_patch_revision",
+        lambda *_args, **_kwargs: True,
     )
 
 

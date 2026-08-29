@@ -7,7 +7,6 @@ from __future__ import annotations
 import gzip
 import importlib
 import json
-import os
 import stat
 import threading
 from types import SimpleNamespace
@@ -539,6 +538,18 @@ def test_owned_annotations_capture_records_local_answer_without_upstream_leg(
     monkeypatch.setattr(
         "cps.services.kobo_annotation_authority.local_get_is_eligible",
         lambda **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "cps.services.kobo_annotation_authority.ever_authoritative",
+        lambda *_args, **_kwargs: "never_authoritative",
+    )
+    monkeypatch.setattr(
+        "cps.services.kobo_annotation_authority.mark_authoritative_oversize",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        "cps.services.kobo_annotation_authority.advance_authoritative_patch_revision",
+        lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(
         rs, "proxy_to_kobo_reading_services",

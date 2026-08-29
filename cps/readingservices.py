@@ -1175,6 +1175,20 @@ def handle_annotations(entitlement_id):
                 getattr(current_user, "id", None), book.id,
             )
     if book is not None and _owned_patch_is_local_authority(book, entitlement_id):
+        from cps.services.kobo_annotation_authority import (
+            advance_authoritative_patch_revision,
+        )
+        if not advance_authoritative_patch_revision(
+            current_user.id, book.id, log=log,
+        ):
+            log.critical(
+                "Kobo local PATCH persisted but authority revision could not "
+                "advance; withholding 204 user_id=%s book_id=%s",
+                getattr(current_user, "id", None), book.id,
+            )
+            return make_response(jsonify({
+                "error": "Annotation authority temporarily unavailable",
+            }), 503)
         return _owned_annotation_patch_ack(capture_session, book, entitlement_id)
     return _proxy_annotation_request(capture_session, book, entitlement_id)
 

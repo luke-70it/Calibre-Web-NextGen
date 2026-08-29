@@ -1105,6 +1105,8 @@ def test_dual_live_query_failure_serves_exact_last_complete_snapshot(
     session.refresh(state)
     assert gzip.decompress(state.last_served_body_gzip) == first_body
     assert state.last_served_body_sha256 == hashlib.sha256(first_body).hexdigest()
+    assert state.last_served_authority_revision == state.authority_revision
+    assert state.last_served_set_digest == state.set_digest
 
     def fail_query(*_args, **_kwargs):
         raise RuntimeError("simulated live membership read failure")
@@ -1123,7 +1125,7 @@ def test_dual_live_query_failure_serves_exact_last_complete_snapshot(
     ] == ["must-survive"]
 
 
-def test_readable_membership_failure_after_authority_replays_nonempty_snapshot(
+def test_readable_membership_failure_rejects_snapshot_after_authority_revision_moves(
     app, session, monkeypatch,
 ):
     _book(monkeypatch)
@@ -1145,21 +1147,23 @@ def test_readable_membership_failure_after_authority_replays_nonempty_snapshot(
     _accepted_capture_with_page(
         session, state, DEVICE_A, [_wire_annotation("captured-but-missing")],
     )
+    # Production acceptance advances the book revision. The helper constructs
+    # already-accepted evidence directly, so mirror that mutation boundary.
+    state.authority_revision += 1
+    state.set_digest = None
+    state.current_etag = None
     session.commit()
 
     with _request(app):
         g.annotation_origin_device_id = DEVICE_A
         recovered = rs.handle_annotations.__wrapped__(OWNED)
 
-    assert recovered.status_code == 200
-    assert recovered.get_data() == first.get_data()
+    assert recovered.status_code == 503
+    assert recovered.get_data() != first.get_data()
     assert recovered.get_data() != b'{"annotations":[],"nextPageOffsetToken":null}'
-    assert [
-        row["id"] for row in json.loads(recovered.get_data())["annotations"]
-    ] == ["server-complete"]
 
 
-def test_authoritative_live_query_failure_without_snapshot_uses_terminal_503_not_empty_200(
+def test_upgraded_pre_r4_authoritative_row_without_snapshot_first_get_failure_is_terminal_503(
     app, session, monkeypatch,
 ):
     _book(monkeypatch)
@@ -1185,6 +1189,147 @@ def test_authoritative_live_query_failure_without_snapshot_uses_terminal_503_not
 
     assert response.status_code == 503
     assert response.get_data() != b'{"annotations":[],"nextPageOffsetToken":null}'
+
+
+def test_get_a_patch_b_then_dual_failure_never_replays_pre_patch_snapshot_a(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    state = _state(session, status="authoritative", ever=True, content_id=OWNED)
+    state.authority_revision = 4
+    session.flush()
+    _accepted_routing_capture(session, state, DEVICE_A)
+    session.add(_annotation_row("A"))
+    session.commit()
+    monkeypatch.setattr(rs, "_stage_patch_for_recovery", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        rs, "proxy_to_kobo_reading_services",
+        lambda **_k: pytest.fail("ever-authoritative fallback contacted Kobo"),
+    )
+
+    with _request(app):
+        g.annotation_origin_device_id = DEVICE_A
+        first = rs.handle_annotations.__wrapped__(OWNED)
+    session.refresh(state)
+    snapshot_revision = state.last_served_authority_revision
+    snapshot_digest = state.last_served_set_digest
+    assert [row["id"] for row in json.loads(first.get_data())["annotations"]] == ["A"]
+    assert snapshot_revision == state.authority_revision
+    assert snapshot_digest == state.set_digest
+
+    with app.test_request_context(
+        f"/api/v3/content/{OWNED}/annotations",
+        method="PATCH",
+        json={"updatedAnnotations": [_wire_annotation("B")]},
+    ):
+        g.annotation_origin_device_id = DEVICE_A
+        patched = rs.handle_annotations.__wrapped__(OWNED)
+    session.refresh(state)
+    assert patched.status_code == 204
+    assert patched.get_data() == b""
+    assert patched.headers["Content-Type"] == "text/html"
+    assert patched.headers["Content-Length"] == "0"
+    assert {row.annotation_id for row in session.query(ub.Annotation).filter_by(
+        hidden=False,
+    )} == {"A", "B"}
+    assert state.authority_revision == snapshot_revision + 1
+    assert state.set_digest is None
+    assert state.current_etag is None
+    assert state.last_served_authority_revision == snapshot_revision
+    assert state.last_served_set_digest == snapshot_digest
+
+    def fail_query(*_args, **_kwargs):
+        raise RuntimeError("simulated post-PATCH dual live-read failure")
+
+    monkeypatch.setattr(authority, "_annotation_rows", fail_query)
+    monkeypatch.setattr(authority, "_simple_annotation_rows", fail_query)
+    with _request(app):
+        g.annotation_origin_device_id = DEVICE_A
+        fallback = rs.handle_annotations.__wrapped__(OWNED)
+
+    assert fallback.status_code == 503
+    assert fallback.get_data() != first.get_data()
+
+
+def test_live_render_a_b_with_snapshot_commit_failure_never_returns_old_a(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    state = _state(session, status="authoritative", ever=True, content_id=OWNED)
+    state.authority_revision = 4
+    session.flush()
+    _accepted_routing_capture(session, state, DEVICE_A)
+    session.add(_annotation_row("A"))
+    session.commit()
+    monkeypatch.setattr(rs, "_stage_patch_for_recovery", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        rs, "proxy_to_kobo_reading_services",
+        lambda **_k: pytest.fail("ever-authoritative render contacted Kobo"),
+    )
+
+    with _request(app):
+        g.annotation_origin_device_id = DEVICE_A
+        first = rs.handle_annotations.__wrapped__(OWNED)
+    with app.test_request_context(
+        f"/api/v3/content/{OWNED}/annotations",
+        method="PATCH",
+        json={"updatedAnnotations": [_wire_annotation("B")]},
+    ):
+        g.annotation_origin_device_id = DEVICE_A
+        patched = rs.handle_annotations.__wrapped__(OWNED)
+
+    def fail_snapshot_commit(**_kwargs):
+        raise RuntimeError("simulated SQLite snapshot commit failure")
+
+    monkeypatch.setattr(authority, "_commit_complete_render", fail_snapshot_commit)
+    with _request(app):
+        g.annotation_origin_device_id = DEVICE_A
+        rendered = rs.handle_annotations.__wrapped__(OWNED)
+
+    assert patched.status_code == 204
+    assert rendered.status_code == 200
+    assert rendered.get_data() != first.get_data()
+    assert {row["id"] for row in json.loads(rendered.get_data())["annotations"]} == {
+        "A", "B",
+    }
+    session.refresh(state)
+    assert state.authority_revision > state.last_served_authority_revision
+    assert state.set_digest is None
+
+
+def test_local_patch_withholds_204_when_authority_revision_commit_fails(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    state = _state(session, status="authoritative", ever=True, content_id=OWNED)
+    session.flush()
+    _accepted_routing_capture(session, state, DEVICE_A)
+    session.commit()
+    monkeypatch.setattr(rs, "_stage_patch_for_recovery", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        authority, "advance_authoritative_patch_revision", lambda *_a, **_k: False,
+    )
+    monkeypatch.setattr(
+        rs, "proxy_to_kobo_reading_services",
+        lambda **_k: pytest.fail("failed local authority commit proxied PATCH"),
+    )
+
+    with app.test_request_context(
+        f"/api/v3/content/{OWNED}/annotations",
+        method="PATCH",
+        json={"updatedAnnotations": [_wire_annotation("persisted-before-failure")]},
+    ):
+        g.annotation_origin_device_id = DEVICE_A
+        response = rs.handle_annotations.__wrapped__(OWNED)
+
+    assert response.status_code == 503
+    assert response.status_code != 204
+    assert session.query(ub.Annotation).filter_by(
+        annotation_id="persisted-before-failure",
+    ).one()
 
 
 def test_corrupt_authoritative_capture_rebuilds_live_proof_never_503_and_recovers(
@@ -1575,6 +1720,8 @@ def test_additive_migration_is_idempotent_and_backfills_safety_history(tmp_path)
         "last_served_body_sha256",
         "last_served_etag",
         "last_served_annotation_count",
+        "last_served_authority_revision",
+        "last_served_set_digest",
         "last_served_at",
     ):
         assert columns["kobo_annotation_book_state"].count(column_name) == 1

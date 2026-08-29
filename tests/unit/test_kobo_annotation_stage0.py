@@ -37,8 +37,17 @@ OLD_ANNOTATION_COLUMNS = (
 def _stage0_route_tests_assume_completed_seed(monkeypatch):
     """Stage-0 route tests predate and are orthogonal to the authority gate."""
     import cps.readingservices as readingservices
+    from cps.services import kobo_annotation_authority
+    monkeypatch.setattr(
+        readingservices, "current_user",
+        SimpleNamespace(id=7, name="stage0-reader", is_authenticated=True),
+    )
     monkeypatch.setattr(
         readingservices, "_owned_patch_is_local_authority",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        kobo_annotation_authority, "advance_authoritative_patch_revision",
         lambda *_args, **_kwargs: True,
     )
 
