@@ -905,6 +905,66 @@ def container_name(cwa_container) -> str:
     return "cwa-test-container"
 
 
+@pytest.fixture(scope="session")
+def koreader_sync_enabled(container_name):
+    """Turn on KOReader sync in the container under test, and put it back after.
+
+    KOReader sync ships OFF. While it is off, ``_require_kosync_enabled`` answers
+    **503** on every /kosync endpoint before any handler runs -- so a suite that
+    does not enable it first is not testing authentication, validation or
+    progress at all. It is measuring one branch that returns 503, forty-one
+    times.
+
+    That is not a hypothetical: when the API-client fixture was repaired and
+    these tests could finally execute, all 41 of them failed on ``assert 503``,
+    which looks like a product outage and is really a missing precondition.
+
+    The setting lives in cwa.db rather than the Flask config, and it is read
+    fresh on each request, so writing it is enough -- no restart. The write goes
+    directly to the database on purpose: the /cwa-settings form POST rebuilds
+    every boolean from the submitted fields, so saving through it would silently
+    switch off everything this fixture did not think to include.
+    """
+    import json
+    import subprocess
+
+    def _set(value):
+        script = (
+            "import sqlite3;"
+            "c=sqlite3.connect('/config/cwa.db');"
+            f"c.execute('UPDATE cwa_settings SET koreader_sync_enabled=?', ({value},));"
+            "c.commit();"
+            "print(list(c.execute('SELECT koreader_sync_enabled FROM cwa_settings'))[0][0])"
+        )
+        result = subprocess.run(
+            ["docker", "exec", container_name, "python3", "-c", script],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+        if result.returncode != 0:
+            pytest.skip(
+                "could not reach cwa.db in the container to enable KOReader "
+                f"sync: {result.stderr[-400:]}"
+            )
+        return result.stdout.strip()
+
+    previous = subprocess.run(
+        ["docker", "exec", container_name, "python3", "-c",
+         "import sqlite3;print(list(sqlite3.connect('/config/cwa.db')"
+         ".execute('SELECT koreader_sync_enabled FROM cwa_settings'))[0][0])"],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    was_enabled = previous.stdout.strip() == "1" if previous.returncode == 0 else None
+
+    assert _set(1) == "1", "KOReader sync did not stay enabled after the write"
+    try:
+        yield
+    finally:
+        # Leave the container as we found it; other tests in the same session
+        # should not silently inherit a setting this one turned on.
+        if was_enabled is False:
+            _set(0)
+
+
 class CWAApiClient:
     """An authenticated client that is BOTH a mapping and an HTTP client.
 
