@@ -170,11 +170,6 @@ is for things you can see or feel when running the app.
   check after that release is tagged.** The guard now considers only releases
   contained in the branch under test, while retaining the committed release
   ledger as a strict fallback when Git tag reachability is unavailable.
-- **Book and format deletion no longer reports success when cleanup fails.** A
-  failed delete now produces an error, while a book whose database row was
-  removed but whose files remain returns and displays an explicit warning
-  instead of an empty success response.
-
 - **Cover thumbnails load faster, and the gap widens the bigger your library
   gets.** Every cover request searched the whole thumbnail table instead of
   going straight to the row it wanted, and the book grid asked for each cover
