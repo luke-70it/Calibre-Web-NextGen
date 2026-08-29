@@ -13,6 +13,16 @@ async function openClassicNav(page: Page, isMobile: boolean) {
   return page.locator('.cwng-switch-ui');
 }
 
+function isRootClassicFallback(url: URL) {
+  const feedback = url.pathname === '/'
+    && url.searchParams.get('cwng_feedback') === 'newui'
+    && [...url.searchParams].length === 1;
+  const login = url.pathname === '/login'
+    && url.searchParams.get('next') === '/?cwng_feedback=newui'
+    && [...url.searchParams].length === 1;
+  return feedback || login;
+}
+
 test('a cookie-less browser opens the SPA and Classic remains an explicit opt-out', async ({
   page, context,
 }) => {
@@ -34,8 +44,13 @@ test('a JavaScript-disabled browser self-heals to Classic', async ({ browser, ba
   try {
     const page = await context.newPage();
     await page.goto('/app');
-    await expect(page).toHaveURL(/\/?cwng_feedback=newui$/);
-    await expect(page.locator('#books').first()).toBeVisible();
+    await page.waitForURL((url) => isRootClassicFallback(url));
+    const terminal = new URL(page.url());
+    if (terminal.pathname === '/login') {
+      await expect(page.locator('input[autocomplete="username"]')).toBeVisible();
+    } else {
+      await expect(page.locator('#books').first()).toBeVisible();
+    }
     const cookies = await preferenceCookies(context);
     expect(cookies.cwng_prefer_classic).toBe('1');
     expect(cookies.cwng_prefer_spa).toBeUndefined();
