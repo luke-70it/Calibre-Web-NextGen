@@ -646,11 +646,10 @@ def _mark_custom_read_column(book_id: int) -> None:
     from ... import calibre_db, db  # lazy: calibre_db instance + reflected cc_classes
     cfg = config.config_read_column
     try:
-        # get_book, not get_filtered_book: kosync auths via headers, so flask-login's
-        # current_user is the ANONYMOUS user here — get_filtered_book would apply the
-        # anonymous content/language/tag restrictions (and the restricted-column error
-        # path even calls flash()), silently filtering the book to None and dropping
-        # the marker. The syncing user's access was already established by the sync flow.
+        # This is a book-level metadata marker write after an authenticated progress
+        # update, not a content read. Keep the raw lookup so a later visibility change
+        # cannot silently discard the already-reported finished state. Byte-serving
+        # paths must instead re-authorize with get_filtered_book(..., user=user).
         book = calibre_db.get_book(book_id)
         if book is None:
             log.error("kosync read-status: book %s not found in calibre database", book_id)
@@ -1552,12 +1551,24 @@ def download_device_delivery(delivery_id):
             )
 
         from ... import calibre_db
-        book = calibre_db.get_book(row.book_id)
+        # A claim can outlive library membership or content restrictions. Recheck
+        # the header-authenticated user at the last point before bytes leave; an
+        # unqualified lookup would filter against flask-login's anonymous user.
+        book = calibre_db.get_filtered_book(
+            row.book_id,
+            allow_show_archived=True,
+            allow_show_hidden=True,
+            user=user,
+        )
+        if book is None:
+            return _delivery_file_unavailable(
+                row, "Delivery is no longer available",
+            )
         data = (
             calibre_db.get_book_format(row.book_id, row.format)
             if row.format else None
         )
-        if book is None or data is None:
+        if data is None:
             return _delivery_file_unavailable(
                 row, f"{row.format or 'Requested'} format is no longer available",
             )
@@ -2056,6 +2067,9 @@ def update_progress():
 
                 # Push to Hardcover
                 from ... import calibre_db
+                # Hardcover receives the authenticated progress marker rather than
+                # book bytes. Preserve that write even if visibility changes after
+                # the progress event; delivery endpoints re-authorize separately.
                 book = calibre_db.get_book(book_id)
 
                 if user is not None:
