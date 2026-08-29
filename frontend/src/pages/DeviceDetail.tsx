@@ -60,7 +60,14 @@ interface PositionRow {
   server_modified_at: string;
 }
 
-interface PositionsPayload { positions: PositionRow[]; total: number }
+interface PositionsPayload {
+  positions: PositionRow[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
+const POSITION_PAGE_SIZE = 100;
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'highlight', label: 'Highlights' },
@@ -119,18 +126,24 @@ function PositionList({ data, loading, error }: {
   const positions = data?.positions ?? [];
   if (!positions.length) return <p>{t('No reading positions from this device yet.')}</p>;
   return (
-    <ul className={styles.positionList} role="list">
-      {positions.map((position) => (
-        <li key={position.book_id}>
-          <Link href={`/book/${position.book_id}`}>
-            {position.book.title || t('Book {id}', { id: position.book_id })}
-          </Link>
-          <span>{position.progress_percent == null
-            ? t('Position recorded')
-            : t('{percent}% read', { percent: Math.round(position.progress_percent) })}</span>
-        </li>
-      ))}
-    </ul>
+    <>
+      <p role="status">{t('Page {page} of {pages}', {
+        page: Math.floor((data?.offset ?? 0) / (data?.limit ?? POSITION_PAGE_SIZE)) + 1,
+        pages: Math.max(1, Math.ceil((data?.total ?? 0) / (data?.limit ?? POSITION_PAGE_SIZE))),
+      })}</p>
+      <ul className={styles.positionList} role="list">
+        {positions.map((position) => (
+          <li key={position.book_id}>
+            <Link href={`/book/${position.book_id}`}>
+              {position.book.title || t('Book {id}', { id: position.book_id })}
+            </Link>
+            <span>{position.progress_percent == null
+              ? t('Position recorded')
+              : t('{percent}% read', { percent: Math.round(position.progress_percent) })}</span>
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }
 
@@ -139,22 +152,21 @@ export function DeviceDetail({ publicId }: { publicId: string }) {
   const [tab, setTab] = useState<Tab>('highlight');
   const [role, setRole] = useState<'origin' | 'assigned'>('origin');
   const [page, setPage] = useState(1);
+  const [positionOffset, setPositionOffset] = useState(0);
   const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const registry = useQuery<{ devices: Device[] }>({
     queryKey: ['annotation-devices'],
     queryFn: () => apiGet('/api/annotations/devices'),
   });
-  const device = useMemo(
-    () => registry.data?.devices.find((candidate) => candidate.public_id === publicId),
-    [publicId, registry.data],
-  );
   const summary = useQuery<SummaryPayload>({
     queryKey: ['device-summary', publicId],
     queryFn: () => apiGet(`/api/annotations/devices/${publicId}/summary`),
   });
   const positions = useQuery<PositionsPayload>({
-    queryKey: ['device-positions', publicId],
-    queryFn: () => apiGet(`/api/annotations/devices/${publicId}/positions`),
+    queryKey: ['device-positions', publicId, positionOffset],
+    queryFn: () => apiGet(
+      `/api/annotations/devices/${publicId}/positions?limit=${POSITION_PAGE_SIZE}&offset=${positionOffset}`,
+    ),
   });
   const annotations = useQuery<AnnotationPayload>({
     queryKey: ['device-annotations', publicId, tab, role, page],
@@ -163,6 +175,11 @@ export function DeviceDetail({ publicId }: { publicId: string }) {
     ),
     enabled: tab !== 'inventory',
   });
+  const device = useMemo(
+    () => registry.data?.devices.find((candidate) => candidate.public_id === publicId)
+      || annotations.data?.device,
+    [annotations.data, publicId, registry.data],
+  );
 
   const selectTab = (next: Tab, focus = false) => {
     setTab(next);
@@ -181,8 +198,8 @@ export function DeviceDetail({ publicId }: { publicId: string }) {
     selectTab(TABS[next].id, true);
   };
 
-  if (registry.isLoading) return <SpinnerCentered size={40} />;
-  if (registry.error || !device) {
+  if (registry.isLoading || (annotations.isLoading && !device)) return <SpinnerCentered size={40} />;
+  if (!device) {
     return (
       <main className={styles.container}>
         <h1>{t('E-reader not found')}</h1>
@@ -273,6 +290,23 @@ export function DeviceDetail({ publicId }: { publicId: string }) {
       <section className={styles.positions} aria-labelledby="device-positions-heading">
         <h2 id="device-positions-heading">{t('Reading positions')}</h2>
         <PositionList data={positions.data} loading={positions.isLoading} error={positions.error} />
+        {(positions.data?.total ?? 0) > POSITION_PAGE_SIZE && (
+          <nav className={styles.pagination} aria-label={t('Reading positions')}>
+            <button type="button" disabled={positionOffset === 0}
+              onClick={() => setPositionOffset(Math.max(0, positionOffset - POSITION_PAGE_SIZE))}>
+              {t('Previous')}
+            </button>
+            <span>{t('Page {page} of {pages}', {
+              page: Math.floor(positionOffset / POSITION_PAGE_SIZE) + 1,
+              pages: Math.ceil((positions.data?.total ?? 0) / POSITION_PAGE_SIZE),
+            })}</span>
+            <button type="button"
+              disabled={positionOffset + POSITION_PAGE_SIZE >= (positions.data?.total ?? 0)}
+              onClick={() => setPositionOffset(positionOffset + POSITION_PAGE_SIZE)}>
+              {t('Next')}
+            </button>
+          </nav>
+        )}
       </section>
     </main>
   );

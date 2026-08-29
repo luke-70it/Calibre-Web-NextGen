@@ -11,6 +11,9 @@ import { DeviceInventory, type Device } from '../components/DeviceInventory';
 import styles from './Devices.module.css';
 
 interface Counts { origin_count: number; assigned_count: number }
+interface DevicePage { devices: Device[]; limit: number; offset: number; total: number }
+
+const DEVICE_PAGE_SIZE = 100;
 
 function relativeWhen(value: string | null): string {
   if (!value) return '—';
@@ -77,9 +80,13 @@ export function Devices() {
   const [expandedInventory, setExpandedInventory] = useState<string | null>(null);
   const [removing, setRemoving] = useState<{ device: Device; counts: Counts } | null>(null);
   const [undoDevice, setUndoDevice] = useState<Device | null>(null);
+  const [deviceOffset, setDeviceOffset] = useState(0);
   const invokerRef = useRef<HTMLButtonElement | null>(null);
-  const { data, isLoading, error } = useQuery<{ devices: Device[] }>({
-    queryKey: ['annotation-devices'], queryFn: () => apiGet('/api/annotations/devices?active=true'),
+  const { data, isLoading, error } = useQuery<DevicePage>({
+    queryKey: ['annotation-devices', deviceOffset],
+    queryFn: () => apiGet(
+      `/api/annotations/devices?active=true&limit=${DEVICE_PAGE_SIZE}&offset=${deviceOffset}`,
+    ),
   });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['annotation-devices'] });
   const rename = useMutation({
@@ -118,8 +125,13 @@ export function Devices() {
           <a href={apiUrl('/me')}>{t('Set up Kobo sync')}</a>
         </section>
       ) : (
-        <ul className={styles.list} role="list">
-          {devices.map((device) => (
+        <>
+          <p role="status">{t('Page {page} of {pages}', {
+            page: Math.floor(deviceOffset / DEVICE_PAGE_SIZE) + 1,
+            pages: Math.max(1, Math.ceil((data?.total ?? 0) / DEVICE_PAGE_SIZE)),
+          })}</p>
+          <ul className={styles.list} role="list">
+            {devices.map((device) => (
             <li key={device.public_id} className={styles.card}>
               <div className={styles.cardMain}>
                 {editing === device.public_id ? (
@@ -165,8 +177,31 @@ export function Devices() {
                 </div>}
               </div>
             </li>
-          ))}
-        </ul>
+            ))}
+          </ul>
+          {(data?.total ?? 0) > DEVICE_PAGE_SIZE && (
+            <nav className={styles.pagination} aria-label={t('E-readers')}>
+              <button
+                type="button"
+                disabled={deviceOffset === 0}
+                onClick={() => setDeviceOffset(Math.max(0, deviceOffset - DEVICE_PAGE_SIZE))}
+              >
+                {t('Previous')}
+              </button>
+              <span>{t('Page {page} of {pages}', {
+                page: Math.floor(deviceOffset / DEVICE_PAGE_SIZE) + 1,
+                pages: Math.ceil((data?.total ?? 0) / DEVICE_PAGE_SIZE),
+              })}</span>
+              <button
+                type="button"
+                disabled={deviceOffset + DEVICE_PAGE_SIZE >= (data?.total ?? 0)}
+                onClick={() => setDeviceOffset(deviceOffset + DEVICE_PAGE_SIZE)}
+              >
+                {t('Next')}
+              </button>
+            </nav>
+          )}
+        </>
       )}
       <section className={styles.setup}>
         <h2>{t('Kobo setup')}</h2>

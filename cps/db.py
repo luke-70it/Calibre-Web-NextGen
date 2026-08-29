@@ -16,7 +16,6 @@ from weakref import WeakSet, WeakKeyDictionary
 from uuid import uuid4
 
 import sqlite3
-from sqlite3 import OperationalError as sqliteOperationalError
 from sqlalchemy import create_engine, event
 from sqlalchemy import Table, Column, ForeignKey, CheckConstraint
 from sqlalchemy import String, Integer, Boolean, TIMESTAMP, Float
@@ -30,7 +29,7 @@ try:
 except ImportError:
     from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.pool import StaticPool
-from sqlalchemy.sql.expression import and_, true, false, text, func, or_, select
+from sqlalchemy.sql.expression import and_, true, false, text, func, literal, or_, select, union_all
 try:
     # Scope key for the session registry, see _make_session_factory. greenlet is
     # a pinned dependency (pyproject.toml) and a hard dependency of gevent;
@@ -1513,6 +1512,111 @@ class CalibreDB:
                     user=user,
                 ))
                 .first())
+
+    def get_filtered_book_ids_for_users(self, users, visibility_state):
+        """Resolve several users' current filtered views in one metadata query.
+
+        ``common_filters`` intentionally performs app-database lookups for one
+        user.  A cross-user board must not repeat those lookups per account, so
+        its caller supplies the archived/hidden/membership rows prefetched once
+        per table.  The predicates below are the same policy expressed against
+        that immutable request snapshot; the metadata query is one UNION ALL
+        execution and returns one comma-delimited scalar per owner, not one row
+        per visible book.
+        """
+        self.ensure_session()
+        users = list(users)
+        if not users:
+            return {}
+        if has_request_context():
+            g._common_filters_user_specific = True
+
+        branches = []
+        for filter_user in users:
+            user_id = int(filter_user.id)
+            state = visibility_state.get(user_id, {})
+            archived_ids = tuple(state.get("archived", ()))
+            hidden_ids = (
+                () if filter_user.is_anonymous
+                else tuple(state.get("hidden", ()))
+            )
+            membership_ids = tuple(state.get("membership", ()))
+
+            language = filter_user.filter_language()
+            language_filter = (
+                true() if language == "all"
+                else Books.languages.any(Languages.lang_code == language)
+            )
+            denied_tags = filter_user.list_denied_tags()
+            allowed_tags = filter_user.list_allowed_tags()
+            denied_tags_filter = (
+                false() if denied_tags == [""]
+                else Books.tags.any(Tags.name.in_(denied_tags))
+            )
+            allowed_tags_filter = (
+                true() if allowed_tags == [""]
+                else Books.tags.any(Tags.name.in_(allowed_tags))
+            )
+
+            if self.config.config_restricted_column:
+                try:
+                    column = getattr(
+                        Books,
+                        "custom_column_" + str(self.config.config_restricted_column),
+                    )
+                    values = cc_classes[self.config.config_restricted_column]
+                    allowed_values = filter_user.list_allowed_column_values()
+                    denied_values = filter_user.list_denied_column_values()
+                    allowed_column_filter = (
+                        true() if allowed_values == [""]
+                        else column.any(values.value.in_(allowed_values))
+                    )
+                    denied_column_filter = (
+                        false() if denied_values == [""]
+                        else column.any(values.value.in_(denied_values))
+                    )
+                except (KeyError, AttributeError, IndexError):
+                    # Match ``common_filters``' fail-closed custom-column
+                    # behavior without flashing once per owner on an admin GET.
+                    allowed_column_filter = false()
+                    denied_column_filter = true()
+                    log.error(
+                        "Custom Column No.%s does not exist in calibre database",
+                        self.config.config_restricted_column,
+                    )
+            else:
+                allowed_column_filter = true()
+                denied_column_filter = false()
+
+            membership_filter = true()
+            if bool(getattr(filter_user, "has_own_library", False)):
+                membership_filter = Books.id.in_(membership_ids)
+
+            branches.append(select(
+                literal(user_id).label("user_id"),
+                Books.id.label("book_id"),
+            ).where(and_(
+                language_filter,
+                allowed_tags_filter,
+                ~denied_tags_filter,
+                allowed_column_filter,
+                ~denied_column_filter,
+                Books.id.notin_(archived_ids),
+                Books.id.notin_(hidden_ids),
+                membership_filter,
+            )))
+
+        visible = union_all(*branches).subquery("device_visible_books")
+        rows = self.session.execute(select(
+            visible.c.user_id,
+            func.group_concat(visible.c.book_id, ",").label("book_ids"),
+        ).group_by(visible.c.user_id)).all()
+        result = {int(user.id): frozenset() for user in users}
+        for user_id, raw_ids in rows:
+            result[int(user_id)] = frozenset(
+                int(value) for value in str(raw_ids or "").split(",") if value
+            )
+        return result
 
     def get_book_read_archived(
         self,

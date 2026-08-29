@@ -63,10 +63,11 @@ export function DeviceInventory({ device }: { device: Device }) {
   const t = useT();
   const announce = useAnnouncer();
   const [requested, setRequested] = useState<Set<number>>(() => new Set());
+  const [offset, setOffset] = useState(0);
   const { data, isLoading, error } = useQuery<InventoryPayload>({
-    queryKey: ['device-inventory', device.public_id],
+    queryKey: ['device-inventory', device.public_id, offset],
     queryFn: () => apiGet(
-      `/api/annotations/devices/${device.public_id}/inventory?limit=${DEVICE_INVENTORY_WINDOW}&offset=0`,
+      `/api/annotations/devices/${device.public_id}/inventory?limit=${DEVICE_INVENTORY_WINDOW}&offset=${offset}`,
     ),
   });
   const deletion = useMutation({
@@ -130,6 +131,23 @@ export function DeviceInventory({ device }: { device: Device }) {
             </li>
           ))}
         </ul>
+      )}
+      {!isLoading && !error && (data?.total ?? 0) > DEVICE_INVENTORY_WINDOW && (
+        <nav className={styles.pagination} aria-label={t('Device library')}>
+          <button type="button" disabled={offset === 0}
+            onClick={() => setOffset(Math.max(0, offset - DEVICE_INVENTORY_WINDOW))}>
+            {t('Previous')}
+          </button>
+          <span>{t('Page {page} of {pages}', {
+            page: Math.floor(offset / DEVICE_INVENTORY_WINDOW) + 1,
+            pages: Math.ceil((data?.total ?? 0) / DEVICE_INVENTORY_WINDOW),
+          })}</span>
+          <button type="button"
+            disabled={offset + DEVICE_INVENTORY_WINDOW >= (data?.total ?? 0)}
+            onClick={() => setOffset(offset + DEVICE_INVENTORY_WINDOW)}>
+            {t('Next')}
+          </button>
+        </nav>
       )}
     </>
   );

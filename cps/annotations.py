@@ -44,7 +44,7 @@ from typing import Optional
 
 from flask import Blueprint, Response, abort, g, jsonify, request, url_for
 from flask_babel import gettext as _
-from sqlalchemy import func
+from sqlalchemy import and_, case, false, func, literal, or_, select, union_all
 from sqlalchemy.exc import SQLAlchemyError
 
 from . import calibre_db, logger, ub
@@ -81,6 +81,12 @@ MAX_UPLOAD_BYTES = MAX_KOBO_DATABASE_UPLOAD_BYTES
 # default bounded even when a caller omits pagination entirely.
 DEFAULT_DEVICE_INVENTORY_LIMIT = 200
 MAX_DEVICE_INVENTORY_LIMIT = 200
+DEFAULT_DEVICE_LIST_LIMIT = 100
+MAX_DEVICE_LIST_LIMIT = 200
+DEFAULT_DEVICE_POSITION_LIMIT = 100
+MAX_DEVICE_POSITION_LIMIT = 200
+DEFAULT_ADMIN_DEVICE_LIMIT = 50
+MAX_ADMIN_DEVICE_LIMIT = 200
 
 # Device-detail annotations deliberately expose a fixed page size.  The client
 # can choose the page, but cannot turn a user-facing read into an unbounded
@@ -110,25 +116,25 @@ def _database_error_response(operation):
     return jsonify({"error": "database_error"}), 500
 
 
-def _device_inventory_pagination():
-    """Parse the inventory endpoint's strict offset pagination contract."""
+def _offset_pagination(*, default_limit, max_limit):
+    """Parse the shared strict limit/offset collection contract."""
     raw_limit = request.args.get("limit")
     raw_offset = request.args.get("offset")
     try:
-        limit = DEFAULT_DEVICE_INVENTORY_LIMIT if raw_limit is None else int(raw_limit)
+        limit = default_limit if raw_limit is None else int(raw_limit)
     except (TypeError, ValueError):
         return None, jsonify({
             "error": "invalid_pagination",
             "field": "limit",
-            "message": f"limit must be an integer between 1 and {MAX_DEVICE_INVENTORY_LIMIT}",
-            "max_limit": MAX_DEVICE_INVENTORY_LIMIT,
+            "message": f"limit must be an integer between 1 and {max_limit}",
+            "max_limit": max_limit,
         }), 400
-    if not 1 <= limit <= MAX_DEVICE_INVENTORY_LIMIT:
+    if not 1 <= limit <= max_limit:
         return None, jsonify({
             "error": "invalid_pagination",
             "field": "limit",
-            "message": f"limit must be an integer between 1 and {MAX_DEVICE_INVENTORY_LIMIT}",
-            "max_limit": MAX_DEVICE_INVENTORY_LIMIT,
+            "message": f"limit must be an integer between 1 and {max_limit}",
+            "max_limit": max_limit,
         }), 400
     try:
         offset = 0 if raw_offset is None else int(raw_offset)
@@ -145,6 +151,13 @@ def _device_inventory_pagination():
             "message": "offset must be a non-negative integer",
         }), 400
     return (limit, offset), None, None
+
+
+def _device_inventory_pagination():
+    return _offset_pagination(
+        default_limit=DEFAULT_DEVICE_INVENTORY_LIMIT,
+        max_limit=MAX_DEVICE_INVENTORY_LIMIT,
+    )
 
 
 def _owned_device(public_id, user_id, session):
@@ -167,7 +180,8 @@ def _empty_authority_rollup():
 
 def _device_json(device, annotation_count=0, inventory_report=None, storage_snapshot=None,
                  annotation_counts=None, authority_rollup=None, seeded_books=0,
-                 unseeded_books=0):
+                 unseeded_books=0, inventory_count=None, books_with_position=0,
+                 last_position_at=None):
     annotation_counts = annotation_counts or {}
     return {
         "public_id": device.public_id,
@@ -183,7 +197,10 @@ def _device_json(device, annotation_count=0, inventory_report=None, storage_snap
         "highlights": int(annotation_counts.get("highlight", 0)),
         "notes": int(annotation_counts.get("note", 0)),
         "dogears": int(annotation_counts.get("dogear", 0)),
-        "inventory_count": int(inventory_report.item_count) if inventory_report else 0,
+        "inventory_count": int(
+            inventory_count if inventory_count is not None
+            else inventory_report.item_count if inventory_report else 0
+        ),
         "inventory_observed": (
             inventory_report.observed_at.isoformat()
             if inventory_report and inventory_report.observed_at else None
@@ -196,6 +213,11 @@ def _device_json(device, annotation_count=0, inventory_report=None, storage_snap
         ),
         "seeded_books": int(seeded_books),
         "unseeded_books": int(unseeded_books),
+        "books_with_position": int(books_with_position),
+        "last_position_at": (
+            last_position_at.isoformat()
+            if hasattr(last_position_at, "isoformat") else last_position_at
+        ),
         "authority": authority_rollup or _empty_authority_rollup(),
         "can_receive_books": device.kind in ("kobo", "koreader"),
         "active": bool(device.active),
@@ -209,10 +231,8 @@ def _device_owner(device, session):
 def _visible_books_for_owner(owner, book_ids):
     """Resolve a live, owner-filtered metadata view for a device-scoped read."""
     if owner is None:
-        # Test-only compatibility for pure app.db fixtures which predate the
-        # device-owner filtering invariant. A persisted Device always has an
-        # owner in production (the FK is non-null and user deletion cascades).
-        return {int(book_id): None for book_id in book_ids}
+        log.error("annotations: device owner unavailable; filtered book view denied")
+        return {}
     books = {}
     for book_id in sorted({int(value) for value in book_ids if value is not None}):
         book = calibre_db.get_filtered_book(book_id, user=owner)
@@ -221,66 +241,90 @@ def _visible_books_for_owner(owner, book_ids):
     return books
 
 
+def _owner_visibility_state(session, owner_ids):
+    """Prefetch owner restrictions once per app table for a request."""
+    owner_ids = tuple(sorted({int(owner_id) for owner_id in owner_ids}))
+    state = {
+        owner_id: {"archived": set(), "hidden": set(), "membership": set()}
+        for owner_id in owner_ids
+    }
+    if not owner_ids:
+        return state
+    for user_id, book_id in session.query(
+            ub.ArchivedBook.user_id, ub.ArchivedBook.book_id).filter(
+                ub.ArchivedBook.user_id.in_(owner_ids),
+                ub.ArchivedBook.is_archived.is_(True),
+            ).all():
+        state[int(user_id)]["archived"].add(int(book_id))
+    for user_id, book_id in session.query(
+            ub.UserHiddenBook.user_id, ub.UserHiddenBook.book_id).filter(
+                ub.UserHiddenBook.user_id.in_(owner_ids),
+            ).all():
+        state[int(user_id)]["hidden"].add(int(book_id))
+    for user_id, book_id in session.query(
+            ub.UserLibraryBook.user_id, ub.UserLibraryBook.book_id).filter(
+                ub.UserLibraryBook.user_id.in_(owner_ids),
+            ).all():
+        state[int(user_id)]["membership"].add(int(book_id))
+    return state
+
+
+def _visible_book_scopes_for_owners(owners, session):
+    """Resolve all supplied owners' live filtered book IDs in one metadata query."""
+    owners = [owner for owner in owners if owner is not None]
+    if not owners:
+        log.error("annotations: no device owners available; filtered views denied")
+        return {}
+    visibility_state = _owner_visibility_state(session, (owner.id for owner in owners))
+    resolved = calibre_db.get_filtered_book_ids_for_users(owners, visibility_state)
+    return {
+        int(owner.id): frozenset(resolved.get(int(owner.id), ()))
+        for owner in owners
+    }
+
+
+def _visible_book_scope_for_owner(owner, session):
+    if owner is None:
+        log.error("annotations: device owner unavailable; filtered scope denied")
+        return frozenset()
+    return _visible_book_scopes_for_owners([owner], session).get(
+        int(owner.id), frozenset(),
+    )
+
+
+def _book_in_scope(column, visible_ids):
+    """Return a compact SQL predicate for a request-snapshot visibility set."""
+    if not visible_ids:
+        return false()
+    values = func.json_each(json.dumps(sorted(visible_ids))).table_valued("value").alias()
+    return column.in_(select(values.c.value))
+
+
+def _owner_book_in_scope(owner_column, book_column, scopes):
+    clauses = [
+        and_(owner_column == owner_id, _book_in_scope(book_column, visible_ids))
+        for owner_id, visible_ids in scopes.items()
+    ]
+    return or_(*clauses) if clauses else false()
+
+
+def _device_book_in_scope(device_column, book_column, devices, scopes):
+    clauses = [
+        and_(
+            device_column == device.id,
+            _book_in_scope(book_column, scopes.get(int(device.user_id), frozenset())),
+        )
+        for device in devices
+    ]
+    return or_(*clauses) if clauses else false()
+
+
 def _annotation_class_counts(rows):
     counts = {kind: 0 for kind in DEVICE_ANNOTATION_TYPES}
     for row in rows:
         if row.annotation_type in counts:
             counts[row.annotation_type] += 1
     return counts
-
-
-def _authority_snapshot(*, owner, session):
-    """Resolve one owner's live authority rows and active-device coverage once."""
-    if owner is None:
-        return _empty_authority_rollup(), [], {}
-    states = session.query(ub.KoboAnnotationBookState).filter(
-        ub.KoboAnnotationBookState.user_id == owner.id,
-    ).all()
-    visible = _visible_books_for_owner(owner, (state.book_id for state in states))
-    states = [state for state in states if state.book_id in visible]
-    rollup = _empty_authority_rollup()
-    for state in states:
-        if state.authority_status in rollup:
-            rollup[state.authority_status] += 1
-
-    active_kobo_ids = {
-        row[0] for row in session.query(ub.Device.id).filter(
-            ub.Device.user_id == owner.id,
-            ub.Device.kind == "kobo",
-            ub.Device.active.is_(True),
-        ).all()
-    }
-    state_ids = [state.id for state in states]
-    accepted_by_state = {}
-    if state_ids and active_kobo_ids:
-        captures = session.query(
-            ub.KoboAnnotationSeedCapture.book_state_id,
-            ub.KoboAnnotationSeedCapture.device_id,
-        ).filter(
-            ub.KoboAnnotationSeedCapture.book_state_id.in_(state_ids),
-            ub.KoboAnnotationSeedCapture.device_id.in_(active_kobo_ids),
-            ub.KoboAnnotationSeedCapture.result == "accepted",
-            ub.KoboAnnotationSeedCapture.completed_at.isnot(None),
-        ).distinct().all()
-        for state_id, device_id in captures:
-            accepted_by_state.setdefault(state_id, set()).add(device_id)
-    for state in states:
-        accepted = accepted_by_state.get(state.id, set())
-        if accepted and active_kobo_ids - accepted:
-            rollup["books_partially_seeded"] += 1
-
-    return rollup, states, accepted_by_state
-
-
-def _authority_context(*, owner, session, device=None, snapshot=None):
-    """Return filtered authority status and per-device seed coverage counts."""
-    rollup, states, accepted_by_state = snapshot or _authority_snapshot(
-        owner=owner, session=session,
-    )
-    if device is None or device.kind != "kobo":
-        return rollup, 0, 0
-    seeded = sum(device.id in accepted_by_state.get(state.id, set()) for state in states)
-    return rollup, seeded, len(states) - seeded
 
 
 def _device_annotation_row(row, books, device_public_ids):
@@ -308,72 +352,262 @@ def _device_annotation_row(row, books, device_public_ids):
     }
 
 
-def list_annotation_devices(*, user_id, session, active_only=False):
-    """List devices with owner-filtered annotation and authority aggregates."""
-    query = session.query(ub.Device).filter(ub.Device.user_id == user_id)
-    if active_only:
-        query = query.filter(ub.Device.active.is_(True))
-    devices = query.order_by(ub.Device.display_name, ub.Device.id).all()
-    device_ids = [device.id for device in devices]
-    owner = session.query(ub.User).filter(ub.User.id == user_id).first()
+def _aggregate_device_rows(*, devices, owners_by_id, scopes, session):
+    """Build bounded device cards with one grouped execution per data family."""
+    if not devices:
+        return []
+    device_ids = tuple(device.id for device in devices)
+    owner_ids = tuple(sorted(owners_by_id))
+    device_id_set = set(device_ids)
 
-    annotation_rows = session.query(ub.Annotation).filter(
-        ub.Annotation.user_id == user_id,
-        ub.Annotation.hidden.isnot(True),
-    ).all()
-    visible = _visible_books_for_owner(owner, (row.book_id for row in annotation_rows))
-    annotation_rows = [row for row in annotation_rows if row.book_id in visible]
     assigned_counts = {device_id: 0 for device_id in device_ids}
-    origin_rows = {device_id: [] for device_id in device_ids}
-    for row in annotation_rows:
-        if row.assigned_device_id in assigned_counts:
-            assigned_counts[row.assigned_device_id] += 1
-        if row.origin_device_id in origin_rows:
-            origin_rows[row.origin_device_id].append(row)
+    origin_counts = {
+        device_id: {kind: 0 for kind in DEVICE_ANNOTATION_TYPES}
+        for device_id in device_ids
+    }
+    annotation_groups = session.query(
+        ub.Annotation.origin_device_id,
+        ub.Annotation.assigned_device_id,
+        ub.Annotation.annotation_type,
+        func.count(ub.Annotation.id),
+    ).filter(
+        ub.Annotation.hidden.isnot(True),
+        or_(
+            ub.Annotation.origin_device_id.in_(device_ids),
+            ub.Annotation.assigned_device_id.in_(device_ids),
+        ),
+        _owner_book_in_scope(
+            ub.Annotation.user_id, ub.Annotation.book_id, scopes,
+        ),
+    ).group_by(
+        ub.Annotation.origin_device_id,
+        ub.Annotation.assigned_device_id,
+        ub.Annotation.annotation_type,
+    ).all()
+    for origin_id, assigned_id, annotation_type, count in annotation_groups:
+        if assigned_id in assigned_counts:
+            assigned_counts[assigned_id] += int(count)
+        if origin_id in origin_counts and annotation_type in DEVICE_ANNOTATION_TYPES:
+            origin_counts[origin_id][annotation_type] += int(count)
 
-    reports = {}
-    storage = {}
-    if device_ids:
-        latest_ids = (
-            session.query(func.max(ub.DeviceInventoryReport.id))
-            .filter(ub.DeviceInventoryReport.device_id.in_(device_ids))
-            .group_by(ub.DeviceInventoryReport.device_id)
-        )
-        reports = {
-            report.device_id: report
-            for report in session.query(ub.DeviceInventoryReport).filter(
-                ub.DeviceInventoryReport.id.in_(latest_ids)
-            ).all()
-        }
-        latest_storage_ids = (
-            session.query(func.max(ub.DeviceStorageSnapshot.id))
-            .filter(ub.DeviceStorageSnapshot.device_id.in_(device_ids))
-            .group_by(ub.DeviceStorageSnapshot.device_id)
-        )
-        storage = {
-            snapshot.device_id: snapshot
-            for snapshot in session.query(ub.DeviceStorageSnapshot).filter(
-                ub.DeviceStorageSnapshot.id.in_(latest_storage_ids)
-            ).all()
-        }
-    authority_snapshot = _authority_snapshot(owner=owner, session=session)
-    authority = authority_snapshot[0]
+    position_counts = {}
+    for device_id, book_count, last_position in session.query(
+            ub.DeviceReadingPosition.device_id,
+            func.count(func.distinct(ub.DeviceReadingPosition.book_id)),
+            func.max(ub.DeviceReadingPosition.server_modified_at),
+        ).filter(
+            ub.DeviceReadingPosition.device_id.in_(device_ids),
+            _device_book_in_scope(
+                ub.DeviceReadingPosition.device_id,
+                ub.DeviceReadingPosition.book_id,
+                devices,
+                scopes,
+            ),
+        ).group_by(ub.DeviceReadingPosition.device_id).all():
+        position_counts[device_id] = (int(book_count), last_position)
+
+    authority_by_owner = {
+        owner_id: _empty_authority_rollup() for owner_id in owner_ids
+    }
+    total_authority_by_owner = {owner_id: 0 for owner_id in owner_ids}
+    seeded_by_device = {device_id: 0 for device_id in device_ids}
+
+    authority_status = select(
+        literal("authority").label("metric"),
+        ub.KoboAnnotationBookState.user_id.label("metric_key"),
+        ub.KoboAnnotationBookState.authority_status.label("detail"),
+        func.count(ub.KoboAnnotationBookState.id).label("value"),
+    ).where(
+        ub.KoboAnnotationBookState.user_id.in_(owner_ids),
+        _owner_book_in_scope(
+            ub.KoboAnnotationBookState.user_id,
+            ub.KoboAnnotationBookState.book_id,
+            scopes,
+        ),
+    ).group_by(
+        ub.KoboAnnotationBookState.user_id,
+        ub.KoboAnnotationBookState.authority_status,
+    )
+
+    active_counts = select(
+        ub.Device.user_id.label("owner_id"),
+        func.count(ub.Device.id).label("active_count"),
+    ).where(
+        ub.Device.user_id.in_(owner_ids),
+        ub.Device.kind == "kobo",
+        ub.Device.active.is_(True),
+    ).group_by(ub.Device.user_id).subquery("active_kobo_counts")
+
+    accepted_per_state = select(
+        ub.KoboAnnotationBookState.id.label("state_id"),
+        ub.KoboAnnotationBookState.user_id.label("owner_id"),
+        func.count(func.distinct(ub.KoboAnnotationSeedCapture.device_id)).label(
+            "accepted_count",
+        ),
+    ).select_from(ub.KoboAnnotationBookState).join(
+        ub.KoboAnnotationSeedCapture,
+        ub.KoboAnnotationSeedCapture.book_state_id == ub.KoboAnnotationBookState.id,
+    ).join(
+        ub.Device,
+        ub.Device.id == ub.KoboAnnotationSeedCapture.device_id,
+    ).where(
+        ub.KoboAnnotationBookState.user_id.in_(owner_ids),
+        ub.Device.kind == "kobo",
+        ub.Device.active.is_(True),
+        ub.KoboAnnotationSeedCapture.result == "accepted",
+        ub.KoboAnnotationSeedCapture.completed_at.isnot(None),
+        _owner_book_in_scope(
+            ub.KoboAnnotationBookState.user_id,
+            ub.KoboAnnotationBookState.book_id,
+            scopes,
+        ),
+    ).group_by(
+        ub.KoboAnnotationBookState.id,
+        ub.KoboAnnotationBookState.user_id,
+    ).subquery("accepted_seed_coverage")
+
+    partial_coverage = select(
+        literal("partial").label("metric"),
+        accepted_per_state.c.owner_id.label("metric_key"),
+        literal(None).label("detail"),
+        func.count(accepted_per_state.c.state_id).label("value"),
+    ).select_from(accepted_per_state).join(
+        active_counts,
+        active_counts.c.owner_id == accepted_per_state.c.owner_id,
+    ).where(
+        accepted_per_state.c.accepted_count > 0,
+        accepted_per_state.c.accepted_count < active_counts.c.active_count,
+    ).group_by(accepted_per_state.c.owner_id)
+
+    seeded_devices = select(
+        literal("seeded").label("metric"),
+        ub.KoboAnnotationSeedCapture.device_id.label("metric_key"),
+        literal(None).label("detail"),
+        func.count(func.distinct(ub.KoboAnnotationBookState.id)).label("value"),
+    ).select_from(ub.KoboAnnotationSeedCapture).join(
+        ub.KoboAnnotationBookState,
+        ub.KoboAnnotationBookState.id == ub.KoboAnnotationSeedCapture.book_state_id,
+    ).join(
+        ub.Device,
+        ub.Device.id == ub.KoboAnnotationSeedCapture.device_id,
+    ).where(
+        ub.KoboAnnotationSeedCapture.device_id.in_(device_ids),
+        ub.Device.active.is_(True),
+        ub.Device.kind == "kobo",
+        ub.KoboAnnotationSeedCapture.result == "accepted",
+        ub.KoboAnnotationSeedCapture.completed_at.isnot(None),
+        _owner_book_in_scope(
+            ub.KoboAnnotationBookState.user_id,
+            ub.KoboAnnotationBookState.book_id,
+            scopes,
+        ),
+    ).group_by(ub.KoboAnnotationSeedCapture.device_id)
+
+    authority_metrics = session.execute(union_all(
+        authority_status, partial_coverage, seeded_devices,
+    )).all()
+    for metric, metric_key, detail, value in authority_metrics:
+        metric_key = int(metric_key)
+        value = int(value)
+        if metric == "authority" and detail in AUTHORITY_STATUSES:
+            authority_by_owner[metric_key][detail] = value
+            total_authority_by_owner[metric_key] += value
+        elif metric == "partial":
+            authority_by_owner[metric_key]["books_partially_seeded"] = value
+        elif metric == "seeded" and metric_key in device_id_set:
+            seeded_by_device[metric_key] = value
+
+    latest_report_ids = session.query(
+        func.max(ub.DeviceInventoryReport.id),
+    ).filter(
+        ub.DeviceInventoryReport.device_id.in_(device_ids),
+    ).group_by(ub.DeviceInventoryReport.device_id)
+    reports = {
+        report.device_id: report
+        for report in session.query(ub.DeviceInventoryReport).filter(
+            ub.DeviceInventoryReport.id.in_(latest_report_ids),
+        ).all()
+    }
+    report_ids = tuple(report.id for report in reports.values())
+    inventory_counts = {device_id: 0 for device_id in device_ids}
+    if report_ids:
+        for device_id, count in session.query(
+                ub.DeviceInventoryItem.device_id,
+                func.count(ub.DeviceInventoryItem.id),
+            ).filter(
+                ub.DeviceInventoryItem.device_id.in_(device_ids),
+                ub.DeviceInventoryItem.last_report_id.in_(report_ids),
+                ub.DeviceInventoryItem.book_id.isnot(None),
+                _device_book_in_scope(
+                    ub.DeviceInventoryItem.device_id,
+                    ub.DeviceInventoryItem.book_id,
+                    devices,
+                    scopes,
+                ),
+            ).group_by(ub.DeviceInventoryItem.device_id).all():
+            inventory_counts[device_id] = int(count)
+
+    latest_storage_ids = session.query(
+        func.max(ub.DeviceStorageSnapshot.id),
+    ).filter(
+        ub.DeviceStorageSnapshot.device_id.in_(device_ids),
+    ).group_by(ub.DeviceStorageSnapshot.device_id)
+    storage = {
+        snapshot.device_id: snapshot
+        for snapshot in session.query(ub.DeviceStorageSnapshot).filter(
+            ub.DeviceStorageSnapshot.id.in_(latest_storage_ids),
+        ).all()
+    }
+
     rows = []
     for device in devices:
-        _rollup, seeded, unseeded = _authority_context(
-            owner=owner, session=session, device=device, snapshot=authority_snapshot,
+        owner_id = int(device.user_id)
+        seeded = (
+            seeded_by_device[device.id]
+            if device.kind == "kobo" and device.active else 0
         )
+        unseeded = (
+            max(total_authority_by_owner.get(owner_id, 0) - seeded, 0)
+            if device.kind == "kobo" and device.active else 0
+        )
+        books_with_position, last_position = position_counts.get(device.id, (0, None))
         rows.append(_device_json(
             device,
             assigned_counts.get(device.id, 0),
             reports.get(device.id),
             storage.get(device.id),
-            annotation_counts=_annotation_class_counts(origin_rows.get(device.id, [])),
-            authority_rollup=authority,
+            annotation_counts=origin_counts.get(device.id),
+            authority_rollup=authority_by_owner.get(owner_id),
             seeded_books=seeded,
             unseeded_books=unseeded,
+            inventory_count=inventory_counts.get(device.id, 0),
+            books_with_position=books_with_position,
+            last_position_at=last_position,
         ))
     return rows
+
+
+def list_annotation_devices(*, user_id, session, active_only=False,
+                            limit=DEFAULT_DEVICE_LIST_LIMIT, offset=0,
+                            return_total=False):
+    """List one bounded page with SQL-aggregated, owner-filtered counts."""
+    query = session.query(ub.Device).filter(ub.Device.user_id == user_id)
+    if active_only:
+        query = query.filter(ub.Device.active.is_(True))
+    total = query.count()
+    devices = query.order_by(ub.Device.display_name, ub.Device.id).offset(
+        offset,
+    ).limit(min(limit, MAX_DEVICE_LIST_LIMIT)).all()
+    owner = session.query(ub.User).filter(ub.User.id == user_id).first()
+    owners_by_id = {} if owner is None else {int(owner.id): owner}
+    scopes = _visible_book_scopes_for_owners(owners_by_id.values(), session)
+    rows = _aggregate_device_rows(
+        devices=devices,
+        owners_by_id=owners_by_id,
+        scopes=scopes,
+        session=session,
+    )
+    return (rows, total) if return_total else rows
 
 
 def rename_annotation_device(public_id, *, user_id, label, session, commit):
@@ -393,13 +627,24 @@ def device_annotation_counts(public_id, *, user_id, session):
     device = _owned_device(public_id, user_id, session)
     if device is None:
         return None
-    origin = session.query(func.count(ub.Annotation.id)).filter(
-        ub.Annotation.user_id == user_id, ub.Annotation.origin_device_id == device.id,
-    ).scalar()
-    assigned = session.query(func.count(ub.Annotation.id)).filter(
-        ub.Annotation.user_id == user_id, ub.Annotation.assigned_device_id == device.id,
-    ).scalar()
-    return device, {"origin_count": int(origin), "assigned_count": int(assigned)}
+    owner = _device_owner(device, session)
+    visible_ids = _visible_book_scope_for_owner(owner, session)
+    origin, assigned = session.query(
+        func.sum(case((ub.Annotation.origin_device_id == device.id, 1), else_=0)),
+        func.sum(case((ub.Annotation.assigned_device_id == device.id, 1), else_=0)),
+    ).filter(
+        ub.Annotation.user_id == user_id,
+        ub.Annotation.hidden.isnot(True),
+        _book_in_scope(ub.Annotation.book_id, visible_ids),
+        or_(
+            ub.Annotation.origin_device_id == device.id,
+            ub.Annotation.assigned_device_id == device.id,
+        ),
+    ).one()
+    return device, {
+        "origin_count": int(origin or 0),
+        "assigned_count": int(assigned or 0),
+    }
 
 
 def soft_delete_annotation_device(public_id, *, user_id, session, commit):
@@ -409,7 +654,7 @@ def soft_delete_annotation_device(public_id, *, user_id, session, commit):
     device, counts = found
     assigned = session.query(ub.Annotation).filter(
         ub.Annotation.user_id == user_id, ub.Annotation.assigned_device_id == device.id,
-    ).all()
+    ).yield_per(200)
     for annotation in assigned:
         snapshot = session.query(ub.DeviceRetiredAssignment).filter_by(
             device_id=device.id, annotation_id=annotation.id,
@@ -432,15 +677,33 @@ def restore_annotation_device(public_id, *, user_id, session, commit):
         return None
     restored = 0
     conflicts = 0
-    snapshots = session.query(ub.DeviceRetiredAssignment).filter_by(device_id=device.id).all()
-    for snapshot in snapshots:
-        annotation = session.query(ub.Annotation).filter_by(id=snapshot.annotation_id, user_id=user_id).first()
+    owner = _device_owner(device, session)
+    visible_ids = _visible_book_scope_for_owner(owner, session)
+    snapshots = session.query(
+        ub.DeviceRetiredAssignment,
+        ub.Annotation,
+        ub.AnnotationDeviceState,
+    ).join(
+        ub.Annotation,
+        and_(
+            ub.Annotation.id == ub.DeviceRetiredAssignment.annotation_id,
+            ub.Annotation.user_id == user_id,
+        ),
+    ).outerjoin(
+        ub.AnnotationDeviceState,
+        and_(
+            ub.AnnotationDeviceState.annotation_id == ub.Annotation.id,
+            ub.AnnotationDeviceState.device_id == device.id,
+        ),
+    ).filter(
+        ub.DeviceRetiredAssignment.device_id == device.id,
+        ub.Annotation.hidden.isnot(True),
+        _book_in_scope(ub.Annotation.book_id, visible_ids),
+    ).yield_per(200)
+    for snapshot, annotation, state in snapshots:
         if annotation is not None and annotation.assigned_device_id is None:
             annotation.assigned_device_id = device.id
             annotation.routing_revision = (annotation.routing_revision or 0) + 1
-            state = session.query(ub.AnnotationDeviceState).filter_by(
-                annotation_id=annotation.id, device_id=device.id,
-            ).first()
             if state is None:
                 state = ub.AnnotationDeviceState(annotation_id=annotation.id, device_id=device.id)
                 session.add(state)
@@ -459,12 +722,25 @@ def restore_annotation_device(public_id, *, user_id, session, commit):
 def annotation_devices_list():
     active_only = request.args.get("active", "").lower() == "true"
     try:
-        devices = list_annotation_devices(
+        pagination, error_response, error_status = _offset_pagination(
+            default_limit=DEFAULT_DEVICE_LIST_LIMIT,
+            max_limit=MAX_DEVICE_LIST_LIMIT,
+        )
+        if error_response is not None:
+            return error_response, error_status
+        limit, offset = pagination
+        devices, total = list_annotation_devices(
             user_id=current_user.id, session=ub.session, active_only=active_only,
+            limit=limit, offset=offset, return_total=True,
         )
     except (RuntimeError, SQLAlchemyError):
         return _database_error_response("device list")
-    return jsonify({"devices": devices})
+    return jsonify({
+        "devices": devices,
+        "limit": limit,
+        "offset": offset,
+        "total": total,
+    })
 
 
 def _device_annotation_filters():
@@ -551,28 +827,47 @@ def annotation_device_annotations(public_id):
             query = query.filter(
                 ub.Annotation.annotation_type == filters["annotation_type"],
             )
-        candidates = query.order_by(
+        visible_ids = _visible_book_scope_for_owner(owner, ub.session)
+        query = query.filter(_book_in_scope(ub.Annotation.book_id, visible_ids))
+        facet_rows = query.with_entities(
+            ub.Annotation.annotation_type,
+            func.count(ub.Annotation.id),
+        ).group_by(ub.Annotation.annotation_type).all()
+        annotation_counts = {kind: 0 for kind in DEVICE_ANNOTATION_TYPES}
+        for annotation_type, count in facet_rows:
+            if annotation_type in annotation_counts:
+                annotation_counts[annotation_type] = int(count)
+        total = sum(int(count) for _annotation_type, count in facet_rows)
+        offset = (filters["page"] - 1) * DEVICE_ANNOTATION_PAGE_SIZE
+        rows = query.order_by(
             ub.Annotation.server_modified_at.desc(),
             ub.Annotation.created_at.desc(),
             ub.Annotation.id.desc(),
-        ).all()
-        books = _visible_books_for_owner(owner, (row.book_id for row in candidates))
-        candidates = [row for row in candidates if row.book_id in books]
-        total = len(candidates)
-        offset = (filters["page"] - 1) * DEVICE_ANNOTATION_PAGE_SIZE
-        rows = candidates[offset:offset + DEVICE_ANNOTATION_PAGE_SIZE]
-        device_public_ids, devices = _annotation_device_payload(device.user_id, ub.session)
-        rollup, seeded, unseeded = _authority_context(
-            owner=owner, session=ub.session, device=device,
+        ).offset(offset).limit(DEVICE_ANNOTATION_PAGE_SIZE).all()
+        books = _visible_books_for_owner(owner, (row.book_id for row in rows))
+        rows = [row for row in rows if row.book_id in books]
+        referenced_device_ids = {device.id}
+        for row in rows:
+            if row.origin_device_id is not None:
+                referenced_device_ids.add(row.origin_device_id)
+            if row.assigned_device_id is not None:
+                referenced_device_ids.add(row.assigned_device_id)
+        device_public_ids, devices = _annotation_device_payload(
+            device.user_id, ub.session, device_ids=referenced_device_ids,
         )
+        device_payload = _aggregate_device_rows(
+            devices=[device],
+            owners_by_id={} if owner is None else {int(owner.id): owner},
+            scopes={} if owner is None else {int(owner.id): visible_ids},
+            session=ub.session,
+        )[0]
+        device_payload.update({
+            "highlights": annotation_counts["highlight"],
+            "notes": annotation_counts["note"],
+            "dogears": annotation_counts["dogear"],
+        })
         return jsonify({
-            "device": _device_json(
-                device,
-                annotation_counts=_annotation_class_counts(candidates),
-                authority_rollup=rollup,
-                seeded_books=seeded,
-                unseeded_books=unseeded,
-            ),
+            "device": device_payload,
             "annotations": [
                 _device_annotation_row(row, books, device_public_ids) for row in rows
             ],
@@ -605,36 +900,21 @@ def annotation_device_summary(public_id):
         if device is None:
             abort(404)
         owner = _device_owner(device, ub.session)
-        annotations = ub.session.query(ub.Annotation).filter(
-            ub.Annotation.user_id == device.user_id,
-            ub.Annotation.origin_device_id == device.id,
-            ub.Annotation.hidden.isnot(True),
-        ).all()
-        positions = ub.session.query(ub.DeviceReadingPosition).filter(
-            ub.DeviceReadingPosition.device_id == device.id,
-        ).all()
-        visible = _visible_books_for_owner(
-            owner,
-            [row.book_id for row in annotations] + [row.book_id for row in positions],
-        )
-        annotations = [row for row in annotations if row.book_id in visible]
-        positions = [row for row in positions if row.book_id in visible]
-        counts = _annotation_class_counts(annotations)
-        _rollup, seeded, unseeded = _authority_context(
-            owner=owner, session=ub.session, device=device,
-        )
-        last_position = max(
-            (row.server_modified_at for row in positions if row.server_modified_at),
-            default=None,
-        )
+        visible_ids = _visible_book_scope_for_owner(owner, ub.session)
+        aggregate = _aggregate_device_rows(
+            devices=[device],
+            owners_by_id={} if owner is None else {int(owner.id): owner},
+            scopes={} if owner is None else {int(owner.id): visible_ids},
+            session=ub.session,
+        )[0]
         return jsonify({
-            "highlights": counts["highlight"],
-            "notes": counts["note"],
-            "dogears": counts["dogear"],
-            "books_with_position": len({row.book_id for row in positions}),
-            "last_position_at": last_position.isoformat() if last_position else None,
-            "seeded_books": seeded,
-            "unseeded_books": unseeded,
+            "highlights": aggregate["highlights"],
+            "notes": aggregate["notes"],
+            "dogears": aggregate["dogears"],
+            "books_with_position": aggregate["books_with_position"],
+            "last_position_at": aggregate["last_position_at"],
+            "seeded_books": aggregate["seeded_books"],
+            "unseeded_books": aggregate["unseeded_books"],
         })
     except SQLAlchemyError:
         return _database_error_response("device summary")
@@ -650,15 +930,26 @@ def annotation_device_positions(public_id):
         device = _owned_device(public_id, current_user.id, ub.session)
         if device is None:
             abort(404)
+        pagination, error_response, error_status = _offset_pagination(
+            default_limit=DEFAULT_DEVICE_POSITION_LIMIT,
+            max_limit=MAX_DEVICE_POSITION_LIMIT,
+        )
+        if error_response is not None:
+            return error_response, error_status
+        limit, offset = pagination
         owner = _device_owner(device, ub.session)
-        candidates = ub.session.query(ub.DeviceReadingPosition).filter(
+        visible_ids = _visible_book_scope_for_owner(owner, ub.session)
+        query = ub.session.query(ub.DeviceReadingPosition).filter(
             ub.DeviceReadingPosition.device_id == device.id,
-        ).order_by(
+            _book_in_scope(ub.DeviceReadingPosition.book_id, visible_ids),
+        )
+        total = query.count()
+        rows = query.order_by(
             ub.DeviceReadingPosition.server_modified_at.desc(),
             ub.DeviceReadingPosition.book_id,
-        ).all()
-        books = _visible_books_for_owner(owner, (row.book_id for row in candidates))
-        rows = [row for row in candidates if row.book_id in books]
+        ).offset(offset).limit(limit).all()
+        books = _visible_books_for_owner(owner, (row.book_id for row in rows))
+        rows = [row for row in rows if row.book_id in books]
         return jsonify({
             "device": _device_json(device),
             "positions": [{
@@ -683,7 +974,9 @@ def annotation_device_positions(public_id):
                 str(book_id): {"id": book_id, "title": getattr(book, "title", None)}
                 for book_id, book in books.items()
             },
-            "total": len(rows),
+            "limit": limit,
+            "offset": offset,
+            "total": total,
         })
     except SQLAlchemyError:
         return _database_error_response("device positions")
@@ -694,17 +987,44 @@ def annotation_device_positions(public_id):
 def annotation_admin_devices():
     """Return the cross-user device board without opaque identity material."""
     try:
-        owners = ub.session.query(ub.User).order_by(ub.User.name, ub.User.id).all()
-        rows = []
-        for owner in owners:
-            for device in list_annotation_devices(
-                    user_id=owner.id, session=ub.session, active_only=False):
-                rows.append({
-                    **device,
-                    "user": {"id": owner.id, "name": owner.name},
-                })
-        return jsonify({"devices": rows})
-    except SQLAlchemyError:
+        pagination, error_response, error_status = _offset_pagination(
+            default_limit=DEFAULT_ADMIN_DEVICE_LIMIT,
+            max_limit=MAX_ADMIN_DEVICE_LIMIT,
+        )
+        if error_response is not None:
+            return error_response, error_status
+        limit, offset = pagination
+        total = ub.session.query(func.count(ub.Device.id)).scalar() or 0
+        page = ub.session.query(ub.Device, ub.User).join(
+            ub.User, ub.User.id == ub.Device.user_id,
+        ).order_by(
+            ub.User.name, ub.User.id, ub.Device.display_name, ub.Device.id,
+        ).offset(offset).limit(limit).all()
+        devices = [device for device, _owner in page]
+        owners_by_id = {
+            int(owner.id): owner for _device, owner in page
+        }
+        scopes = _visible_book_scopes_for_owners(owners_by_id.values(), ub.session)
+        aggregates = _aggregate_device_rows(
+            devices=devices,
+            owners_by_id=owners_by_id,
+            scopes=scopes,
+            session=ub.session,
+        )
+        rows = [{
+            **aggregate,
+            "user": {
+                "id": owners_by_id[int(device.user_id)].id,
+                "name": owners_by_id[int(device.user_id)].name,
+            },
+        } for device, aggregate in zip(devices, aggregates)]
+        return jsonify({
+            "devices": rows,
+            "limit": limit,
+            "offset": offset,
+            "total": int(total),
+        })
+    except (RuntimeError, SQLAlchemyError):
         return _database_error_response("admin device board")
 
 
@@ -720,6 +1040,8 @@ def annotation_device_inventory(public_id):
         if error_response is not None:
             return error_response, error_status
         limit, offset = pagination
+        owner = _device_owner(device, ub.session)
+        visible_ids = _visible_book_scope_for_owner(owner, ub.session)
         report = (
             ub.session.query(ub.DeviceInventoryReport)
             .filter_by(device_id=device.id)
@@ -737,7 +1059,9 @@ def annotation_device_inventory(public_id):
                 # Both halves are load-bearing: the storage snapshot (Phase 3)
                 # and the pagination envelope (F3). A caller paging this endpoint
                 # gets the same shape whether or not a report exists.
-                "device": _device_json(device, storage_snapshot=storage),
+                "device": _device_json(
+                    device, storage_snapshot=storage, inventory_count=0,
+                ),
                 "observed_at": None,
                 "books": [],
                 "limit": limit,
@@ -747,6 +1071,10 @@ def annotation_device_inventory(public_id):
         items_query = (
             ub.session.query(ub.DeviceInventoryItem)
             .filter_by(device_id=device.id, last_report_id=report.id)
+            .filter(
+                ub.DeviceInventoryItem.book_id.isnot(None),
+                _book_in_scope(ub.DeviceInventoryItem.book_id, visible_ids),
+            )
         )
         total = items_query.count()
         items = []
@@ -758,9 +1086,12 @@ def annotation_device_inventory(public_id):
                 .limit(limit)
                 .all()
             )
+        books = _visible_books_for_owner(owner, (item.book_id for item in items))
+        items = [item for item in items if item.book_id in books]
         return jsonify({
             "device": _device_json(
                 device, inventory_report=report, storage_snapshot=storage,
+                inventory_count=total,
             ),
             "observed_at": report.observed_at.isoformat() if report.observed_at else None,
             "books": [{
@@ -787,6 +1118,30 @@ def annotation_device_inventory(public_id):
 def annotation_device_inventory_delete(public_id, item_id):
     """Queue deletion of one exact observed path; omissions cannot reach here."""
     try:
+        item_and_device = ub.session.query(
+            ub.DeviceInventoryItem, ub.Device,
+        ).join(
+            ub.Device, ub.Device.id == ub.DeviceInventoryItem.device_id,
+        ).filter(
+            ub.Device.public_id == public_id,
+            ub.Device.user_id == current_user.id,
+            ub.Device.active.is_(True),
+            ub.DeviceInventoryItem.id == item_id,
+        ).one_or_none()
+        if item_and_device is None:
+            raise device_capabilities.CapabilityValidationError()
+        item, device = item_and_device
+        owner = _device_owner(device, ub.session)
+        if (
+            owner is None
+            or item.book_id is None
+            or calibre_db.get_filtered_book(item.book_id, user=owner) is None
+        ):
+            if owner is None:
+                log.error(
+                    "annotations: inventory deletion denied; device owner unavailable",
+                )
+            raise device_capabilities.CapabilityValidationError()
         deletion = device_capabilities.queue_named_deletion(
             session=ub.session, user_id=current_user.id,
             device_public_id=public_id, inventory_item_id=item_id,
@@ -1591,9 +1946,14 @@ def _data_json_row(r, cfi, pdf_quad, device_public_ids=None, anchor_status=None)
     }
 
 
-def _annotation_device_payload(user_id, session):
-    """Return the internal→public lookup and one rename-stable device map."""
-    devices = session.query(ub.Device).filter(ub.Device.user_id == user_id).all()
+def _annotation_device_payload(user_id, session, device_ids=None):
+    """Return a bounded internal→public lookup for referenced devices only."""
+    if device_ids is not None and not device_ids:
+        return {}, {}
+    query = session.query(ub.Device).filter(ub.Device.user_id == user_id)
+    if device_ids is not None:
+        query = query.filter(ub.Device.id.in_(tuple(device_ids)))
+    devices = query.order_by(ub.Device.id).limit(MAX_DEVICE_LIST_LIMIT).all()
     public_ids = {device.id: device.public_id for device in devices}
     payload = {
         device.public_id: {
@@ -1619,7 +1979,15 @@ def annotations_data(book_id):
     """
     book = _resolve_book_or_404(book_id)
     rows = _load_user_annotations(current_user.id, book_id)
-    device_public_ids, devices = _annotation_device_payload(current_user.id, ub.session)
+    referenced_device_ids = {
+        device_id
+        for row in rows
+        for device_id in (row.origin_device_id, row.assigned_device_id)
+        if device_id is not None
+    }
+    device_public_ids, devices = _annotation_device_payload(
+        current_user.id, ub.session, device_ids=referenced_device_ids,
+    )
     out = []
     for r in rows:
         # CFI computation only applies to EPUB-origin rows. For PDF/comic
@@ -2121,7 +2489,15 @@ def annotations_create(book_id):
     # Resolve the device map, or the row we just attributed answers
     # origin_device_id: null and the reader renders "Unknown device" for the
     # one highlight the user just watched itself be created.
-    device_public_ids, _ = _annotation_device_payload(current_user.id, ub.session)
+    device_public_ids, _ = _annotation_device_payload(
+        current_user.id,
+        ub.session,
+        device_ids={
+            device_id
+            for device_id in (row.origin_device_id, row.assigned_device_id)
+            if device_id is not None
+        },
+    )
     return jsonify(_data_json_row(row, row.cfi_range, None, device_public_ids)), 201
 
 
@@ -2169,7 +2545,15 @@ def annotations_edit(book_id, annotation_id):
     # Same map data.json uses, so BOTH device fields resolve here. Without it
     # only assigned_device_id was patched back in below and origin_device_id
     # answered null on a row that has one.
-    device_public_ids, _ = _annotation_device_payload(current_user.id, ub.session)
+    device_public_ids, _ = _annotation_device_payload(
+        current_user.id,
+        ub.session,
+        device_ids={
+            device_id
+            for device_id in (row.origin_device_id, row.assigned_device_id)
+            if device_id is not None
+        },
+    )
     response = _data_json_row(row, row.cfi_range, None, device_public_ids)
     response.update({"routing_revision": row.routing_revision})
     return jsonify(response), 200

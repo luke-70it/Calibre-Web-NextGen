@@ -18,8 +18,8 @@ const device = {
 
 async function stubDeviceDetail(page: Page) {
   const annotationRequests: URL[] = [];
-  await page.route('**/api/annotations/devices', (route) => route.fulfill({
-    json: { devices: [device] },
+  await page.route('**/api/annotations/devices?*', (route) => route.fulfill({
+    json: { devices: [device], limit: 100, offset: 0, total: 1 },
   }));
   await page.route('**/api/annotations/devices/device-1/summary', (route) => route.fulfill({
     json: {
@@ -27,9 +27,9 @@ async function stubDeviceDetail(page: Page) {
       last_position_at: '2026-08-29T12:00:00', seeded_books: 1, unseeded_books: 1,
     },
   }));
-  await page.route('**/api/annotations/devices/device-1/positions', (route) => route.fulfill({
+  await page.route('**/api/annotations/devices/device-1/positions?*', (route) => route.fulfill({
     json: {
-      total: 1,
+      limit: 100, offset: 0, total: 1,
       positions: [{
         book_id: 5, book: { id: 5, title: 'A Test Book' }, progress_percent: 42,
         location_type: 'cfi', location_value: 'epubcfi(/6/2)',
@@ -101,6 +101,7 @@ test('device detail exposes typed tabs, assignment view, inventory, and position
 test('admin device board reuses the device summaries', async ({ page }) => {
   await page.route('**/api/admin/devices', (route) => route.fulfill({ json: {
     devices: [{ ...device, user: { id: 7, name: 'e2e' } }],
+    limit: 50, offset: 0, total: 1,
   } }));
   await page.goto('/app/admin/devices');
   await expect(page.getByRole('heading', { name: 'Device administration' })).toBeVisible();
