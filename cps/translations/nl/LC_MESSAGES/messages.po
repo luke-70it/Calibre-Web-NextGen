@@ -14276,3 +14276,27 @@ msgstr "Apparaatbibliotheek bekijken"
 
 msgid "{n} books in latest inventory"
 msgstr "{n} boeken in de nieuwste inventaris"
+
+msgid "Book queued for this device"
+msgstr "Boek in de wachtrij geplaatst voor dit apparaat"
+
+msgid "Choose a device"
+msgstr "Kies een apparaat"
+
+msgid "Collects on the device's next sync."
+msgstr "Het apparaat haalt dit op bij de volgende synchronisatie."
+
+msgid "Could not queue this book for the device."
+msgstr "Kan dit boek niet in de wachtrij voor het apparaat plaatsen."
+
+msgid "Queueing…"
+msgstr "In wachtrij plaatsen…"
+
+msgid "Send to device"
+msgstr "Naar apparaat verzenden"
+
+msgid "This book is already on that device"
+msgstr "Dit boek staat al op dat apparaat"
+
+msgid "This book is already queued for this device"
+msgstr "Dit boek staat al in de wachtrij voor dit apparaat"

@@ -51,6 +51,44 @@
             ],
             "expected_status" : [200, 400, 401, 409, 413, 503]
         },
+        "claim_delivery" : {
+            "path" : "/syncs/deliveries/claim",
+            "method" : "POST",
+            "required_params" : [
+                "device",
+                "device_id"
+            ],
+            "payload" : [
+                "device",
+                "device_id"
+            ],
+            "expected_status" : [200, 400, 401, 403, 409, 413, 503]
+        },
+        "complete_delivery" : {
+            "path" : "/syncs/deliveries/complete",
+            "method" : "PUT",
+            "required_params" : [
+                "device",
+                "device_id",
+                "delivery_id",
+                "claim_token",
+                "lpath",
+                "checksum",
+                "size",
+                "mtime"
+            ],
+            "payload" : [
+                "device",
+                "device_id",
+                "delivery_id",
+                "claim_token",
+                "lpath",
+                "checksum",
+                "size",
+                "mtime"
+            ],
+            "expected_status" : [200, 400, 401, 409, 413, 503]
+        },
         "pull_annotations" : {
             "path" : "/syncs/annotations/:document",
             "method" : "GET",
