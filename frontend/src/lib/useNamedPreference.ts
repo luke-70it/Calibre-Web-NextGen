@@ -56,7 +56,6 @@ export function useNamedPreference(
       { [name]: storedAtMount.current },
       {
         onError: () => {
-          adoptionAttempted.current = false;
           options.onError?.();
         },
       },

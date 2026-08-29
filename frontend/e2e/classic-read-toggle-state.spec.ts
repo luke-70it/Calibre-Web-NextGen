@@ -25,8 +25,8 @@ test('Classic catalog and detail checkboxes stay state-consistent before and aft
   // preference cookie while preserving the authenticated session so direct
   // Classic routes remain Classic for this matrix cell.
   await page.context().addCookies([{
-    name: 'cwng_prefer_spa',
-    value: '0',
+    name: 'cwng_prefer_classic',
+    value: '1',
     url: new URL(page.url()).origin,
   }]);
 

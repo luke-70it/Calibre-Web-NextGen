@@ -55,8 +55,9 @@ test('Discover adopts local hidden state once and follows the account across bro
     await browserB.addCookies(await context.cookies());
     const pageB = await browserB.newPage();
     await pageB.goto('/app');
-    expect(await pageB.evaluate(() => localStorage.getItem('cwng_discover_hidden_v1'))).toBe('1');
     await expect(pageB.getByTestId('discover-section')).toHaveCount(0);
+    await expect.poll(() => pageB.evaluate(() =>
+      localStorage.getItem('cwng_discover_hidden_v1'))).toBe('1');
 
     // The gear checkbox writes false and makes the section visible.
     await pageB.getByTestId('catalog-view-settings').click();
@@ -65,8 +66,9 @@ test('Discover adopts local hidden state once and follows the account across bro
     const showSaved = pageB.waitForResponse((response) =>
       response.url().includes('/api/v1/account/preferences')
       && response.request().method() === 'POST');
-    await showDiscover.check();
+    await showDiscover.click();
     expect((await showSaved).ok()).toBeTruthy();
+    await expect(showDiscover).toBeChecked();
     await expect(pageB.getByTestId('discover-section')).toBeVisible();
 
     // Browser A sees Browser B's choice after local storage is removed.
@@ -96,7 +98,8 @@ test('Discover adopts local hidden state once and follows the account across bro
     expect(login.ok(), await login.text()).toBeTruthy();
     await pageB.goto('/app');
     await expect(pageB.getByTestId('discover-section')).toHaveCount(0);
-    expect(await pageB.evaluate(() => localStorage.getItem('cwng_discover_hidden_v1'))).toBe('1');
+    await expect.poll(() => pageB.evaluate(() =>
+      localStorage.getItem('cwng_discover_hidden_v1'))).toBe('1');
   } finally {
     await browserB.close();
   }
