@@ -20,19 +20,35 @@ def session():
     db.close()
 
 
-def _device(session, *, user_id=7, label="Reader", active=True):
+def _user(session, *, user_id=7, name=None, role=0):
     from cps import ub
-    row = ub.Device(user_id=user_id, kind="kobo", display_name=label, active=active,
+    row = ub.User(
+        id=user_id, name=name or f"User {user_id}", role=role,
+        email=f"user-{user_id}@example.invalid",
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def _device(session, *, user_id=7, label="Reader", active=True, kind="kobo"):
+    from cps import ub
+    row = ub.Device(user_id=user_id, kind=kind, display_name=label, active=active,
                     created_by="auto")
     session.add(row)
     session.flush()
     return row
 
 
-def _annotation(session, annotation_id, *, user_id=7, origin=None, assigned=None):
+def _annotation(session, annotation_id, *, user_id=7, book_id=5, origin=None,
+                assigned=None, annotation_type=None, hidden=False):
     from cps import ub
-    row = ub.Annotation(user_id=user_id, book_id=5, annotation_id=annotation_id,
-                        source="kobo", origin_device_id=origin, assigned_device_id=assigned)
+    row = ub.Annotation(
+        user_id=user_id, book_id=book_id, annotation_id=annotation_id,
+        source="kobo", origin_device_id=origin, assigned_device_id=assigned,
+        annotation_type=annotation_type, hidden=hidden,
+        highlighted_text=f"Text {annotation_id}",
+    )
     session.add(row)
     session.flush()
     return row
@@ -527,3 +543,296 @@ def test_device_list_uses_latest_inventory_report_without_deleting_history(sessi
     assert listed["inventory_count"] == 1
     assert listed["inventory_observed"] == latest.observed_at.isoformat()
     assert session.query(ub.DeviceInventoryItem).count() == 2
+
+
+def _allow_books(monkeypatch, annotations, *, hidden=()):
+    hidden = set(hidden)
+    calls = []
+
+    def resolve(book_id, **kwargs):
+        owner = kwargs.get("user")
+        calls.append((book_id, getattr(owner, "id", None), kwargs))
+        if book_id in hidden:
+            return None
+        return SimpleNamespace(id=book_id, title=f"Book {book_id}")
+
+    monkeypatch.setattr(annotations.calibre_db, "get_filtered_book", resolve)
+    return calls
+
+
+@pytest.mark.unit
+def test_device_annotations_default_to_origin_and_assigned_toggle_has_facets_and_maps(
+        session, monkeypatch):
+    from cps import annotations, ub
+
+    _user(session)
+    origin = _device(session, label="Origin")
+    other = _device(session, label="Other")
+    _annotation(session, "origin-highlight", origin=origin.id, assigned=other.id,
+                annotation_type="highlight")
+    _annotation(session, "assigned-note", origin=other.id, assigned=origin.id,
+                annotation_type="note")
+    _annotation(session, "hidden-dogear", origin=origin.id, assigned=origin.id,
+                annotation_type="dogear", hidden=True)
+    _annotation(session, "filtered-book", book_id=99, origin=origin.id,
+                assigned=origin.id, annotation_type="highlight")
+    _annotation(session, "legacy-null", origin=None, assigned=None,
+                annotation_type="highlight")
+    session.commit()
+    calls = _allow_books(monkeypatch, annotations, hidden={99})
+    monkeypatch.setattr(annotations, "current_user", SimpleNamespace(id=7))
+    monkeypatch.setattr(ub, "session", session)
+    app = Flask(__name__)
+
+    with app.test_request_context(
+            f"/api/annotations/devices/{origin.public_id}/annotations"):
+        origin_payload = annotations.annotation_device_annotations.__wrapped__(
+            origin.public_id,
+        ).get_json()
+    with app.test_request_context(
+            f"/api/annotations/devices/{origin.public_id}/annotations"
+            "?assigned=true&type=note&page=1"):
+        assigned_payload = annotations.annotation_device_annotations.__wrapped__(
+            origin.public_id,
+        ).get_json()
+
+    assert [row["annotation_id"] for row in origin_payload["annotations"]] == [
+        "origin-highlight",
+    ]
+    assert origin_payload["annotations"][0]["annotation_type"] == "highlight"
+    assert origin_payload["annotations"][0]["book"]["title"] == "Book 5"
+    assert origin_payload["role"] == "origin"
+    assert set(origin_payload["devices"]) == {origin.public_id, other.public_id}
+    assert [row["annotation_id"] for row in assigned_payload["annotations"]] == [
+        "assigned-note",
+    ]
+    assert assigned_payload["role"] == "assigned"
+    assert assigned_payload["type"] == "note"
+    assert calls and all(user_id == 7 for _book_id, user_id, _kwargs in calls)
+    assert all(set(kwargs) == {"user"} for _book_id, _user_id, kwargs in calls)
+
+
+@pytest.mark.unit
+def test_device_annotations_pagination_is_fixed_and_page_number_is_capped(
+        session, monkeypatch):
+    from cps import annotations, ub
+
+    _user(session)
+    device = _device(session)
+    for index in range(51):
+        _annotation(
+            session, f"row-{index:02d}", origin=device.id,
+            annotation_type="highlight",
+        )
+    session.commit()
+    _allow_books(monkeypatch, annotations)
+    monkeypatch.setattr(annotations, "current_user", SimpleNamespace(id=7))
+    monkeypatch.setattr(ub, "session", session)
+    app = Flask(__name__)
+
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/annotations?page=1"):
+        first = annotations.annotation_device_annotations.__wrapped__(device.public_id).get_json()
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/annotations?page=2"):
+        second = annotations.annotation_device_annotations.__wrapped__(device.public_id).get_json()
+
+    assert len(first["annotations"]) == annotations.DEVICE_ANNOTATION_PAGE_SIZE == 50
+    assert first["total"] == 51 and first["pages"] == 2
+    assert len(second["annotations"]) == 1 and second["page"] == 2
+
+    for value in ("0", "10001", "nope"):
+        with app.test_request_context(
+                f"/api/annotations/devices/{device.public_id}/annotations?page={value}"):
+            response, status = annotations.annotation_device_annotations.__wrapped__(
+                device.public_id,
+            )
+        assert status == 400
+        assert response.get_json()["error"] == "invalid_pagination"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("route_name", [
+    "annotation_device_annotations",
+    "annotation_device_summary",
+    "annotation_device_positions",
+])
+def test_device_detail_routes_hide_cross_user_device_ids_with_404(
+        session, monkeypatch, route_name):
+    from cps import annotations, ub
+    from werkzeug.exceptions import NotFound
+
+    _user(session)
+    _user(session, user_id=8)
+    foreign = _device(session, user_id=8)
+    session.commit()
+    monkeypatch.setattr(annotations, "current_user", SimpleNamespace(id=7))
+    monkeypatch.setattr(ub, "session", session)
+    app = Flask(__name__)
+    with app.test_request_context(
+            f"/api/annotations/devices/{foreign.public_id}/{route_name}"):
+        with pytest.raises(NotFound):
+            getattr(annotations, route_name).__wrapped__(foreign.public_id)
+
+
+@pytest.mark.unit
+def test_device_summary_counts_only_visible_origin_rows_positions_and_seed_coverage(
+        session, monkeypatch):
+    from datetime import datetime, timezone
+    from cps import annotations, ub
+
+    owner = _user(session)
+    device = _device(session, label="First")
+    second = _device(session, label="Second")
+    _annotation(session, "h", book_id=5, origin=device.id, annotation_type="highlight")
+    _annotation(session, "n", book_id=5, origin=device.id, annotation_type="note")
+    _annotation(session, "d", book_id=6, origin=device.id, annotation_type="dogear")
+    _annotation(session, "forbidden", book_id=99, origin=device.id,
+                annotation_type="highlight")
+    now = datetime.now(timezone.utc)
+    session.add_all([
+        ub.DeviceReadingPosition(
+            device_id=device.id, book_id=5, progress_percent=25,
+            server_modified_at=now,
+        ),
+        ub.DeviceReadingPosition(
+            device_id=device.id, book_id=99, progress_percent=90,
+            server_modified_at=now,
+        ),
+    ])
+    seeded = ub.KoboAnnotationBookState(
+        user_id=owner.id, book_id=5, content_id="book-5",
+        authority_status="authoritative",
+    )
+    unseeded = ub.KoboAnnotationBookState(
+        user_id=owner.id, book_id=6, content_id="book-6",
+        authority_status="unseeded",
+    )
+    session.add_all([seeded, unseeded])
+    session.flush()
+    session.add(ub.KoboAnnotationSeedCapture(
+        book_state_id=seeded.id, device_id=device.id, result="accepted",
+        completed_at=now,
+    ))
+    session.commit()
+    _allow_books(monkeypatch, annotations, hidden={99})
+    monkeypatch.setattr(annotations, "current_user", SimpleNamespace(id=7))
+    monkeypatch.setattr(ub, "session", session)
+    app = Flask(__name__)
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/summary"):
+        payload = annotations.annotation_device_summary.__wrapped__(device.public_id).get_json()
+
+    assert payload == {
+        "highlights": 1,
+        "notes": 1,
+        "dogears": 1,
+        "books_with_position": 1,
+        "last_position_at": now.replace(tzinfo=None).isoformat(),
+        "seeded_books": 1,
+        "unseeded_books": 1,
+    }
+    listed = {
+        row["public_id"]: row
+        for row in annotations.list_annotation_devices(user_id=7, session=session)
+    }
+    assert listed[device.public_id]["authority"] == {
+        "unseeded": 1,
+        "seeding": 0,
+        "authoritative": 1,
+        "quarantined": 0,
+        "disabled": 0,
+        "books_partially_seeded": 1,
+    }
+    assert listed[second.public_id]["seeded_books"] == 0
+
+
+@pytest.mark.unit
+def test_device_positions_return_per_book_rows_from_the_owner_filtered_view(
+        session, monkeypatch):
+    from datetime import datetime, timezone
+    from cps import annotations, ub
+
+    _user(session)
+    device = _device(session)
+    now = datetime.now(timezone.utc)
+    session.add_all([
+        ub.DeviceReadingPosition(
+            device_id=device.id, book_id=5, location_source="cfi",
+            location_type="cfi", location_value="epubcfi(/6/2)", cfi="epubcfi(/6/2)",
+            progress_percent=12.5, content_source_progress_percent=10,
+            client_modified_at=now, server_modified_at=now, rehydrate_needed=True,
+        ),
+        ub.DeviceReadingPosition(
+            device_id=device.id, book_id=99, progress_percent=80,
+            server_modified_at=now,
+        ),
+    ])
+    session.commit()
+    _allow_books(monkeypatch, annotations, hidden={99})
+    monkeypatch.setattr(annotations, "current_user", SimpleNamespace(id=7))
+    monkeypatch.setattr(ub, "session", session)
+    app = Flask(__name__)
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/positions"):
+        payload = annotations.annotation_device_positions.__wrapped__(device.public_id).get_json()
+
+    assert payload["total"] == 1
+    assert payload["positions"] == [{
+        "book_id": 5,
+        "book": {"id": 5, "title": "Book 5"},
+        "location_source": "cfi",
+        "location_type": "cfi",
+        "location_value": "epubcfi(/6/2)",
+        "progress_percent": 12.5,
+        "content_source_progress_percent": 10.0,
+        "cfi": "epubcfi(/6/2)",
+        "client_modified_at": now.replace(tzinfo=None).isoformat(),
+        "server_modified_at": now.replace(tzinfo=None).isoformat(),
+        "rehydrate_needed": True,
+    }]
+
+
+@pytest.mark.unit
+def test_admin_device_board_is_gated_filtered_and_never_invents_null_origin_device(
+        session, monkeypatch):
+    from cps import admin, annotations, ub
+    from werkzeug.exceptions import Forbidden
+
+    first_user = _user(session, user_id=7, name="First")
+    second_user = _user(session, user_id=8, name="Second")
+    first = _device(session, user_id=7, label="Browser", kind="webreader")
+    second = _device(session, user_id=8, label="Kobo")
+    _annotation(session, "first", user_id=7, origin=first.id,
+                annotation_type="highlight")
+    _annotation(session, "second", user_id=8, origin=second.id,
+                annotation_type="note")
+    _annotation(session, "null-origin", user_id=7, origin=None,
+                annotation_type="dogear")
+    session.commit()
+    calls = _allow_books(monkeypatch, annotations)
+    monkeypatch.setattr(ub, "session", session)
+    app = Flask(__name__)
+
+    monkeypatch.setattr(admin, "current_user", SimpleNamespace(role_admin=lambda: False))
+    with app.test_request_context("/api/admin/devices"):
+        with pytest.raises(Forbidden):
+            annotations.annotation_admin_devices()
+
+    monkeypatch.setattr(admin, "current_user", SimpleNamespace(role_admin=lambda: True))
+    with app.test_request_context("/api/admin/devices"):
+        payload = annotations.annotation_admin_devices().get_json()
+
+    assert [(row["user"]["name"], row["label"]) for row in payload["devices"]] == [
+        (first_user.name, "Browser"),
+        (second_user.name, "Kobo"),
+    ]
+    board = {row["public_id"]: row for row in payload["devices"]}
+    assert board[first.public_id]["highlights"] == 1
+    assert board[first.public_id]["dogears"] == 0
+    assert board[first.public_id]["kind_label"] == "Web reader"
+    assert board[second.public_id]["notes"] == 1
+    serialized = str(payload).lower()
+    assert "fingerprint" not in serialized
+    assert "installation_id" not in serialized
+    assert {user_id for _book_id, user_id, _kwargs in calls} == {7, 8}
