@@ -7,6 +7,27 @@ async function csrfHeaders(page: import('@playwright/test').Page) {
   return { 'X-CSRFToken': payload.csrf_token };
 }
 
+async function installReadNowObserver(page: import('@playwright/test').Page) {
+  await page.addInitScript(() => {
+    const observed = window as typeof window & { __readNowMounted?: boolean };
+    const start = () => {
+      const mark = () => {
+        if ([...document.querySelectorAll('a')]
+          .some((link) => link.textContent?.trim() === 'Read now')) {
+          observed.__readNowMounted = true;
+        }
+      };
+      mark();
+      new MutationObserver(mark).observe(document.body, { childList: true, subtree: true });
+    };
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', start, { once: true });
+    } else {
+      start();
+    }
+  });
+}
+
 test('Discover adopts local hidden state once and follows the account across browsers', async ({
   secondaryUser, browser, baseURL,
 }) => {
@@ -105,27 +126,134 @@ test('Discover adopts local hidden state once and follows the account across bro
   }
 });
 
-test('guest Discover stays local and never posts an account preference', async ({ page }) => {
+test('hidden books and card actions adopt local state and follow the account', async ({
+  secondaryUser, browser, baseURL,
+}) => {
+  const { page, context } = secondaryUser;
+  await expect(page.getByText('Read now', { exact: true }).first()).toBeVisible();
+
+  const adopted = new Set<string>();
+  page.on('request', (request) => {
+    if (request.method() !== 'POST'
+        || !request.url().includes('/api/v1/account/preferences')) return;
+    const payload = request.postDataJSON() as { preferences?: Record<string, boolean> };
+    for (const name of Object.keys(payload.preferences ?? {})) adopted.add(name);
+  });
+  await installReadNowObserver(page);
+  await page.evaluate(() => {
+    localStorage.setItem('cwng_show_hidden_books_v1', '1');
+    localStorage.setItem('cwng:card-actions-hidden-v1', '1');
+  });
+  await page.reload();
+
+  await expect.poll(() => [...adopted].sort()).toEqual([
+    'card_actions_hidden', 'show_hidden_books',
+  ]);
+  await expect(page.getByText('Read now', { exact: true })).toHaveCount(0);
+  expect(await page.evaluate(() =>
+    (window as typeof window & { __readNowMounted?: boolean }).__readNowMounted ?? false,
+  )).toBe(false);
+
+  await page.getByTestId('catalog-view-settings').click();
+  await expect(page.getByTestId('show-hidden-books')).toBeChecked();
+  await expect(page.getByTestId('show-card-actions')).not.toBeChecked();
+  const adoptedMe = await page.request.get('/api/v1/auth/me').then((r) => r.json()) as {
+    preferences: Record<string, boolean | null>;
+  };
+  expect(adoptedMe.preferences.show_hidden_books).toBe(true);
+  expect(adoptedMe.preferences.card_actions_hidden).toBe(true);
+
+  const browserB = await browser.newContext({ baseURL });
+  try {
+    await browserB.addCookies(await context.cookies());
+    const pageB = await browserB.newPage();
+    await installReadNowObserver(pageB);
+    await pageB.goto('/app');
+    await pageB.getByTestId('catalog-view-settings').click();
+    const showHidden = pageB.getByTestId('show-hidden-books');
+    const showCardActions = pageB.getByTestId('show-card-actions');
+    await expect(showHidden).toBeChecked();
+    await expect(showCardActions).not.toBeChecked();
+    await expect(pageB.getByText('Read now', { exact: true })).toHaveCount(0);
+    expect(await pageB.evaluate(() =>
+      (window as typeof window & { __readNowMounted?: boolean }).__readNowMounted ?? false,
+    )).toBe(false);
+    await expect.poll(() => pageB.evaluate(() => ({
+      showHidden: localStorage.getItem('cwng_show_hidden_books_v1'),
+      cardActions: localStorage.getItem('cwng:card-actions-hidden-v1'),
+    }))).toEqual({ showHidden: '1', cardActions: '1' });
+
+    const hiddenSaved = pageB.waitForResponse((response) =>
+      response.url().includes('/api/v1/account/preferences')
+      && response.request().method() === 'POST');
+    await showHidden.click();
+    expect((await hiddenSaved).ok()).toBeTruthy();
+    await expect(showHidden).not.toBeChecked();
+
+    const actionsSaved = pageB.waitForResponse((response) =>
+      response.url().includes('/api/v1/account/preferences')
+      && response.request().method() === 'POST');
+    await showCardActions.click();
+    expect((await actionsSaved).ok()).toBeTruthy();
+    await expect(showCardActions).toBeChecked();
+    await expect(pageB.getByText('Read now', { exact: true }).first()).toBeVisible();
+
+    await page.evaluate(() => {
+      localStorage.removeItem('cwng_show_hidden_books_v1');
+      localStorage.removeItem('cwng:card-actions-hidden-v1');
+    });
+    await page.reload();
+    await page.getByTestId('catalog-view-settings').click();
+    await expect(page.getByTestId('show-hidden-books')).not.toBeChecked();
+    await expect(page.getByTestId('show-card-actions')).toBeChecked();
+  } finally {
+    await browserB.close();
+  }
+});
+
+test('guest catalog preferences stay local and never post', async ({ page }) => {
   let preferencePosts = 0;
   page.on('request', (request) => {
     if (request.method() === 'POST' && request.url().includes('/api/v1/account/preferences')) {
       preferencePosts += 1;
     }
   });
-  await page.addInitScript(() => localStorage.setItem('cwng_discover_hidden_v1', '1'));
+  await page.addInitScript(() => {
+    localStorage.setItem('cwng_discover_hidden_v1', '1');
+    localStorage.setItem('cwng_show_hidden_books_v1', '1');
+    localStorage.setItem('cwng:card-actions-hidden-v1', '1');
+  });
   await page.route('**/api/v1/auth/me', async (route) => {
     const response = await route.fetch();
     const me = await response.json();
     me.role = { ...(me.role ?? {}), anonymous: true };
-    me.preferences = { discover_hidden: null };
+    me.preferences = {
+      discover_hidden: null,
+      show_hidden_books: null,
+      card_actions_hidden: null,
+    };
     await route.fulfill({ response, json: me });
   });
 
+  const hiddenBooksRequest = page.waitForRequest((request) => {
+    const url = new URL(request.url());
+    return url.pathname === '/api/v1/books' && url.searchParams.get('show_hidden') === '1';
+  });
   await page.goto('/app');
+  await hiddenBooksRequest;
   await expect(page.getByTestId('discover-section')).toHaveCount(0);
   await page.getByTestId('catalog-view-settings').click();
+  // Guests keep the existing catalog UI: hidden-book visibility is honored
+  // from storage, but the account-only checkbox is not offered.
+  await expect(page.getByTestId('show-hidden-books')).toHaveCount(0);
+  await expect(page.getByTestId('show-card-actions')).not.toBeChecked();
   await page.getByTestId('show-discover-section').check();
+  await page.getByTestId('show-card-actions').check();
   await expect(page.getByTestId('discover-section')).toBeVisible();
-  expect(await page.evaluate(() => localStorage.getItem('cwng_discover_hidden_v1'))).toBe('0');
+  expect(await page.evaluate(() => ({
+    discover: localStorage.getItem('cwng_discover_hidden_v1'),
+    showHidden: localStorage.getItem('cwng_show_hidden_books_v1'),
+    cardActions: localStorage.getItem('cwng:card-actions-hidden-v1'),
+  }))).toEqual({ discover: '0', showHidden: '1', cardActions: '0' });
   await expect.poll(() => preferencePosts).toBe(0);
 });

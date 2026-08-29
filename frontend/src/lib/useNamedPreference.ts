@@ -11,7 +11,7 @@ function readStoredBool(key: string): boolean | null {
   }
 }
 
-interface NamedPreferenceOptions {
+export interface NamedPreferenceOptions {
   onError?: () => void;
 }
 

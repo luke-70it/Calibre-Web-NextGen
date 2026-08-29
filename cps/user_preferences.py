@@ -9,6 +9,8 @@ one line here, then a client hook call where the control lives.
 
 NAMED_BOOLEAN_PREFERENCE_PATHS = {
     "discover_hidden": ("preferences", "discover_hidden"),
+    "show_hidden_books": ("preferences", "show_hidden_books"),
+    "card_actions_hidden": ("preferences", "card_actions_hidden"),
 }
 
 

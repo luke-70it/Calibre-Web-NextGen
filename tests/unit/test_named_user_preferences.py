@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Named per-user boolean preferences stored in User.view_settings.
 
-The facility is deliberately generic, but this pass registers only
-``discover_hidden``. A null value in /me means "not adopted yet"; true/false is
-authoritative server state.
+A null value in /me means "not adopted yet"; true/false is authoritative
+server state for all catalog-wide account preferences.
 """
 import inspect
 import json
@@ -19,6 +18,11 @@ pytestmark = pytest.mark.unit
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _FRONTEND = _ROOT / "frontend" / "src"
+_UNSET_PREFERENCES = {
+    "discover_hidden": None,
+    "show_hidden_books": None,
+    "card_actions_hidden": None,
+}
 
 
 def _serializable_user(view_settings):
@@ -41,12 +45,19 @@ def _serializable_user(view_settings):
 def test_me_serializes_named_preference_and_unset_state():
     from cps.api.serializers import serialize_user
 
-    assert serialize_user(_serializable_user({}))["preferences"] == {
-        "discover_hidden": None,
-    }
+    assert serialize_user(_serializable_user({}))["preferences"] == \
+        _UNSET_PREFERENCES
     assert serialize_user(_serializable_user({
-        "preferences": {"discover_hidden": True},
-    }))["preferences"] == {"discover_hidden": True}
+        "preferences": {
+            "discover_hidden": True,
+            "show_hidden_books": False,
+            "card_actions_hidden": True,
+        },
+    }))["preferences"] == {
+        "discover_hidden": True,
+        "show_hidden_books": False,
+        "card_actions_hidden": True,
+    }
 
 
 def test_me_ignores_malformed_stored_preference():
@@ -55,7 +66,7 @@ def test_me_ignores_malformed_stored_preference():
     payload = serialize_user(_serializable_user({
         "preferences": {"discover_hidden": "yes"},
     }))
-    assert payload["preferences"]["discover_hidden"] is None
+    assert payload["preferences"] == _UNSET_PREFERENCES
 
 
 class _FakeUser:
@@ -102,15 +113,32 @@ def _json(response):
     return json.loads(response.get_data(as_text=True))
 
 
-def test_endpoint_persists_known_boolean_and_returns_state():
+@pytest.mark.parametrize("name", _UNSET_PREFERENCES)
+def test_endpoint_persists_each_known_boolean_and_returns_state(name):
     user = _FakeUser()
-    response, session = _call({"preferences": {"discover_hidden": True}}, user)
+    response, session = _call({"preferences": {name: True}}, user)
 
     assert _status(response) == 200
-    assert user.view_settings == {"preferences": {"discover_hidden": True}}
-    assert _json(response) == {"preferences": {"discover_hidden": True}}
+    assert user.view_settings == {"preferences": {name: True}}
+    expected = {**_UNSET_PREFERENCES, name: True}
+    assert _json(response) == {"preferences": expected}
     session.commit.assert_called_once_with()
     session.rollback.assert_not_called()
+
+
+def test_endpoint_updates_multiple_preferences_in_one_transaction():
+    user = _FakeUser()
+    updates = {
+        "discover_hidden": True,
+        "show_hidden_books": True,
+        "card_actions_hidden": False,
+    }
+    response, session = _call({"preferences": updates}, user)
+
+    assert _status(response) == 200
+    assert user.view_settings == {"preferences": updates}
+    assert _json(response) == {"preferences": updates}
+    session.commit.assert_called_once_with()
 
 
 @pytest.mark.parametrize("body", [
@@ -151,16 +179,24 @@ def test_endpoint_rejects_guest_without_writing():
     session.commit.assert_not_called()
 
 
-def test_frontend_uses_generic_named_preference_hook_for_discover():
+def test_frontend_uses_generic_named_preference_hook_for_catalog_preferences():
     hook = _FRONTEND / "lib" / "useNamedPreference.ts"
+    card_hook = _FRONTEND / "lib" / "useCardActionsHidden.ts"
     assert hook.is_file()
     hook_src = hook.read_text(encoding="utf-8")
+    card_hook_src = card_hook.read_text(encoding="utf-8")
     catalog_src = (_FRONTEND / "pages" / "Catalog.tsx").read_text(encoding="utf-8")
     queries_src = (_FRONTEND / "lib" / "queries.ts").read_text(encoding="utf-8")
 
     assert "useNamedPreference" in catalog_src
-    assert "discover_hidden" in catalog_src
-    assert "cwng_discover_hidden_v1" in catalog_src
+    for token in (
+        "discover_hidden", "cwng_discover_hidden_v1",
+        "show_hidden_books", "cwng_show_hidden_books_v1",
+    ):
+        assert token in catalog_src
+    assert "useNamedPreference" in card_hook_src
+    assert "card_actions_hidden" in card_hook_src
+    assert "CARD_ACTIONS_HIDDEN_KEY" in card_hook_src
     assert "/account/preferences" in queries_src
     assert "role?.anonymous" in hook_src
     assert "localStorage" in hook_src

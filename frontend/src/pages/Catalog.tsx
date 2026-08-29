@@ -15,7 +15,6 @@ import type { EntityKind, ReadFilter, DiscoveryView } from '../lib/queries';
 import { apiPost, apiGet, ApiError, type Book, type AdvancedSearchParams } from '../lib/api';
 import { formatAuthors } from '../lib/authors';
 import { saveCatalog, loadCatalog } from '../lib/scrollCache';
-import { usePersistentBool } from '../lib/usePersistentBool';
 import { useNamedPreference } from '../lib/useNamedPreference';
 import { usePersistentChoice } from '../lib/usePersistentChoice';
 import { useCardActionsHidden } from '../lib/useCardActionsHidden';
@@ -314,17 +313,21 @@ export function Catalog({ entityKind, entityId, view, defaultFilter }: CatalogPr
   const removalImpact = useMyLibraryRemovalImpact();
   const removeFromLibrary = useRemoveFromMyLibrary();
 
-  // Discover follows a signed-in account. Guests stay local-only; an existing
-  // local value is adopted once when an account has no server value yet.
-  const discoverPreferenceError = useCallback(
+  // Catalog-wide choices follow a signed-in account. Guests stay local-only;
+  // an existing local value is adopted once when the account has no value yet.
+  const catalogPreferenceError = useCallback(
     () => announce(t('Could not save.'), { assertive: true }), [announce, t]);
   const [discoverHidden, setDiscoverHidden, discoverPreferenceSaving] = useNamedPreference(
     'discover_hidden', 'cwng_discover_hidden_v1', false,
-    { onError: discoverPreferenceError },
+    { onError: catalogPreferenceError },
   );
-  const [showHidden, setShowHidden] = usePersistentBool('cwng_show_hidden_books_v1', false);
+  const [showHidden, setShowHidden, showHiddenPreferenceSaving] = useNamedPreference(
+    'show_hidden_books', 'cwng_show_hidden_books_v1', false,
+    { onError: catalogPreferenceError },
+  );
   // #1054: let a user drop the per-card Read/edit row to calm the grid down.
-  const [cardActionsHidden, setCardActionsHidden] = useCardActionsHidden();
+  const [cardActionsHidden, setCardActionsHidden, cardActionsPreferenceSaving]
+    = useCardActionsHidden({ onError: catalogPreferenceError });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [density, setDensity] = usePersistentChoice(
     'cwng:catalog-density-v1', ['comfortable', 'compact', 'dense'] as const, 'compact');
@@ -904,6 +907,7 @@ export function Catalog({ entityKind, entityId, view, defaultFilter }: CatalogPr
                       data-testid="show-hidden-books"
                       className={styles.settingsCheck}
                       checked={showHidden}
+                      disabled={showHiddenPreferenceSaving}
                       onChange={(e) => setShowHidden(e.target.checked)}
                     />
                     <span>{t('Show hidden books')}</span>
@@ -915,6 +919,7 @@ export function Catalog({ entityKind, entityId, view, defaultFilter }: CatalogPr
                     data-testid="show-card-actions"
                     className={styles.settingsCheck}
                     checked={!cardActionsHidden}
+                    disabled={cardActionsPreferenceSaving}
                     onChange={(e) => setCardActionsHidden(!e.target.checked)}
                   />
                   <span>{t('Show Read now and edit buttons')}</span>
