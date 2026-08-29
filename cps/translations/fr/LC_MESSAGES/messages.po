@@ -14782,3 +14782,18 @@ msgstr "Ce livre se trouve déjà sur cet appareil"
 
 msgid "This book is already queued for this device"
 msgstr "Ce livre est déjà en file d’attente pour cet appareil"
+
+msgid "Could not request deletion from this device."
+msgstr "Impossible de demander la suppression sur cet appareil."
+
+msgid "Delete from device"
+msgstr "Supprimer de l’appareil"
+
+msgid "Delete {path} from {name} on its next sync?"
+msgstr "Supprimer {path} de {name} lors de sa prochaine synchronisation ?"
+
+msgid "Deletion requested"
+msgstr "Suppression demandée"
+
+msgid "{free} free of {total}"
+msgstr "{free} libres sur {total}"

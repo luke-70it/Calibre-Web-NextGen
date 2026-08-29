@@ -5,6 +5,7 @@
 -- checksum, download and durable-settings operations.
 
 local Delivery = {}
+local STORAGE_HEADROOM = 128 * 1024
 
 local function join(root, name)
     return root:gsub("/+$", "") .. "/" .. name
@@ -63,6 +64,16 @@ function Delivery.install(delivery, root, opts)
             mtime = math.floor(attributes.modification or os.time()),
             reused = true,
         }
+    end
+
+    -- This is the authoritative fit check: it runs immediately before the
+    -- downloader opens its temporary file. Server measurements are useful for
+    -- queue/claim admission, but disk space can change after either response.
+    if type(opts.available_space) == "function" and type(delivery.size) == "number" then
+        local available = tonumber(opts.available_space(root))
+        if available == nil or available < delivery.size + STORAGE_HEADROOM then
+            return nil, "insufficient storage", available
+        end
     end
 
     local downloaded, content_length, response_checksum, reason = opts.download(temp_path)

@@ -144,6 +144,50 @@ def test_book_observed_in_inventory_is_never_queued_or_claimed(delivery_session)
     ) is None
 
 
+def test_queue_refuses_book_larger_than_latest_reported_free_space(delivery_session):
+    device = _device(delivery_session)
+    delivery_session.add(ub.DeviceStorageSnapshot(
+        device_id=device.id, free_bytes=900, total_bytes=10_000,
+    ))
+    delivery_session.flush()
+
+    result = _queue(delivery_session, device, _book(42, "EPUB"))
+
+    assert result.created is False
+    assert result.delivery is None
+    assert result.reason == "insufficient_storage"
+    assert delivery_session.query(ub.DeviceBookDelivery).count() == 0
+
+
+def test_claim_uses_fresh_space_and_device_refusal_requeues_without_new_token(
+        delivery_session):
+    device = _device(delivery_session)
+    queued = _queue(delivery_session, device, _book(42, "EPUB")).delivery
+    token = queued.claim_token
+
+    assert device_delivery.claim_next_delivery(
+        session=delivery_session, user_id=1, device_id=device.id,
+        available_bytes=999,
+    ) is None
+    assert queued.state == device_delivery.QUEUED
+    assert queued.attempt_count == 0
+
+    claimed = device_delivery.claim_next_delivery(
+        session=delivery_session, user_id=1, device_id=device.id,
+        available_bytes=10_000,
+    )
+    refused = device_delivery.refuse_delivery(
+        session=delivery_session, user_id=1, device_id=device.id,
+        delivery_id=claimed.id, claim_token=claimed.claim_token,
+        reason="insufficient_storage", available_bytes=500,
+    )
+
+    assert refused.state == device_delivery.QUEUED
+    assert refused.claim_token == token
+    assert refused.claim_expires_at is None
+    assert refused.failure_reason == "insufficient_storage (500 bytes available)"
+
+
 def test_abandoned_claim_becomes_reclaimable_after_the_lease(delivery_session):
     device = _device(delivery_session)
     queued = _queue(delivery_session, device, _book(42, "EPUB")).delivery

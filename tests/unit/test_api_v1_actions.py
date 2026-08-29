@@ -299,3 +299,24 @@ def test_device_send_inventory_hit_is_an_idempotent_success():
         "state": "already_on_device",
         "message": "This book is already on that device",
     }
+
+
+@pytest.mark.unit
+def test_device_send_reports_latest_known_insufficient_storage_without_crashing():
+    from cps.api import actions as mod
+    from cps.services import device_delivery
+    result = device_delivery.QueueResult(
+        delivery=None, created=False, reason="insufficient_storage",
+    )
+    mock_ub = MagicMock()
+    with _ctx("/api/v1/books/5/device-deliveries", body={"device": "public-device"}):
+        with patch.object(mod, "current_user", _user()), \
+             patch.object(mod, "ub", mock_ub), \
+             patch.object(mod.calibre_db, "get_filtered_book", return_value=SimpleNamespace(id=5)), \
+             patch.object(mod.device_delivery, "queue_book_for_device", return_value=result):
+            resp = inspect.unwrap(mod.queue_book_for_device)(5)
+
+    assert resp[1] == 409
+    body = _body(resp)
+    assert body["error"]["code"] == "insufficient_storage"
+    assert "space" in body["error"]["message"].lower()

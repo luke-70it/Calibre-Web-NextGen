@@ -60,10 +60,13 @@ def delivery_protocol(tmp_path, monkeypatch):
     engine.dispose()
 
 
-def _claim(client, *, device_id="first-runtime-device", device="First reader"):
+def _claim(client, *, device_id="first-runtime-device", device="First reader",
+           free_space=10_000, total_space=20_000):
     return client.post("/kosync/syncs/deliveries/claim", json={
         "device": device,
         "device_id": device_id,
+        "free_space": free_space,
+        "total_space": total_space,
     })
 
 
@@ -228,8 +231,53 @@ def test_claim_rejects_unexpected_fields(delivery_protocol):
     response = client.post("/kosync/syncs/deliveries/claim", json={
         "device": "First reader",
         "device_id": "first-runtime-device",
+        "free_space": 10_000,
+        "total_space": 20_000,
         "unexpected": "not part of the wire contract",
     })
 
     assert response.status_code == 400
     assert response.get_json()["error"] == "invalid_delivery"
+
+
+def test_claim_records_fresh_space_and_does_not_lease_an_oversized_book(
+        delivery_protocol):
+    client, session, _user, _device, _module = delivery_protocol
+
+    response = _claim(client, free_space=100, total_space=20_000)
+
+    assert response.status_code == 200
+    assert response.get_json() == {
+        "delivery": None,
+        "refusal": {
+            "reason": "insufficient_storage",
+            "required_bytes": 1234,
+            "available_bytes": 100,
+        },
+    }
+    assert session.query(ub.DeviceBookDelivery).one().state == device_delivery.QUEUED
+    assert session.query(ub.DeviceStorageSnapshot).order_by(
+        ub.DeviceStorageSnapshot.id.desc(),
+    ).first().free_bytes == 100
+
+
+def test_device_side_space_refusal_releases_claim_for_a_later_retry(
+        delivery_protocol):
+    client, session, _user, _device, _module = delivery_protocol
+    delivery = _claim(client).get_json()["delivery"]
+
+    response = client.put("/kosync/syncs/deliveries/refuse", json={
+        "device": "First reader",
+        "device_id": "first-runtime-device",
+        "delivery_id": delivery["id"],
+        "claim_token": delivery["claim_token"],
+        "reason": "insufficient_storage",
+        "free_space": 50,
+        "total_space": 20_000,
+    })
+
+    assert response.status_code == 200
+    assert response.get_json() == {"requeued": True, "delivery_id": delivery["id"]}
+    row = session.query(ub.DeviceBookDelivery).one()
+    assert row.state == device_delivery.QUEUED
+    assert row.claim_token == delivery["claim_token"]

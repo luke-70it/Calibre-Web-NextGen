@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from .. import ub
+from . import device_capabilities
 
 
 QUEUED = "queued"
@@ -137,6 +138,13 @@ def queue_book_for_device(*, session, user_id: int, device_public_id: str, book,
         session.flush()
         return QueueResult(delivery, existing is None, reason)
 
+    selected_size = int(selected.uncompressed_size)
+    storage = device_capabilities.latest_storage(
+        session=session, device_id=device.id,
+    )
+    if storage is not None and selected_size > storage.free_bytes:
+        return QueueResult(None, False, "insufficient_storage")
+
     delivery = existing or ub.DeviceBookDelivery(
         device_id=device.id, book_id=int(book.id), queued_at=now,
     )
@@ -145,7 +153,7 @@ def queue_book_for_device(*, session, user_id: int, device_public_id: str, book,
     delivery.state = QUEUED
     delivery.format = str(selected.format).upper()
     delivery.filename = _delivery_filename(book.id, selected)
-    delivery.expected_size = int(selected.uncompressed_size)
+    delivery.expected_size = selected_size
     delivery.expected_checksum = None
     delivery.claimed_at = None
     delivery.claim_expires_at = None
@@ -173,7 +181,7 @@ def _owned_delivery_query(session, *, user_id, device_id):
 
 
 def claim_next_delivery(*, session, user_id: int, device_id: int, now=None,
-                        claim_ttl=CLAIM_TTL):
+                        claim_ttl=CLAIM_TTL, available_bytes=None):
     """Return the stable active claim, or lease the oldest reclaimable row."""
     now = _utc_now(now)
     rows = _owned_delivery_query(
@@ -193,6 +201,13 @@ def claim_next_delivery(*, session, user_id: int, device_id: int, now=None,
             and (row.claim_expires_at is None or _aware(row.claim_expires_at) <= now)
         )
         if row.state != QUEUED and not expired:
+            continue
+
+        if (available_bytes is not None and row.expected_size is not None
+                and row.expected_size > available_bytes):
+            row.failure_reason = (
+                f"insufficient_storage ({available_bytes} bytes available)"
+            )
             continue
 
         # An inventory may have arrived after the browser queued this row. Its
@@ -217,6 +232,31 @@ def claim_next_delivery(*, session, user_id: int, device_id: int, now=None,
 
     session.flush()
     return None
+
+
+def refuse_delivery(*, session, user_id: int, device_id: int, delivery_id: int,
+                    claim_token: str, reason: str, available_bytes=None):
+    """Release a claim after a clean device-side preflight refusal."""
+    row = _owned_delivery_query(
+        session, user_id=user_id, device_id=device_id,
+    ).filter(ub.DeviceBookDelivery.id == delivery_id).one_or_none()
+    if row is None or not secrets.compare_digest(row.claim_token or "", claim_token or ""):
+        raise DeliveryValidationError("Delivery claim is not valid for this device")
+    if row.state != CLAIMED:
+        raise DeliveryValidationError("Delivery is not currently claimed")
+    if reason != "insufficient_storage":
+        raise DeliveryValidationError("Invalid delivery refusal reason")
+    if available_bytes is not None and (
+            isinstance(available_bytes, bool) or not isinstance(available_bytes, int)
+            or available_bytes < 0):
+        raise DeliveryValidationError("Invalid available storage")
+    row.state = QUEUED
+    row.claimed_at = None
+    row.claim_expires_at = None
+    suffix = "" if available_bytes is None else f" ({available_bytes} bytes available)"
+    row.failure_reason = reason + suffix
+    session.flush()
+    return row
 
 
 def get_delivery_for_download(*, session, user_id: int, device_id: int,

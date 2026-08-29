@@ -256,7 +256,8 @@ function CWNGSyncClient:get_progress(
     socketutil:reset_timeout()
 end
 
-function CWNGSyncClient:report_inventory(username, password, device, device_id, inventory, callback)
+function CWNGSyncClient:report_inventory(
+        username, password, device, device_id, inventory, free_space, total_space, callback)
     self.client:reset_middlewares()
     self.client:enable("Format.JSON")
     self.client:enable("GinClient")
@@ -271,6 +272,8 @@ function CWNGSyncClient:report_inventory(username, password, device, device_id, 
                 device = device,
                 device_id = device_id,
                 inventory = inventory,
+                free_space = free_space,
+                total_space = total_space,
             })
         end)
         finish(callback, ok, res, "CWNGSyncClient:report_inventory")
@@ -281,7 +284,8 @@ function CWNGSyncClient:report_inventory(username, password, device, device_id, 
     socketutil:reset_timeout()
 end
 
-function CWNGSyncClient:claim_delivery(username, password, device, device_id, callback)
+function CWNGSyncClient:claim_delivery(
+        username, password, device, device_id, free_space, total_space, callback)
     self.client:reset_middlewares()
     self.client:enable("Format.JSON")
     self.client:enable("GinClient")
@@ -295,6 +299,8 @@ function CWNGSyncClient:claim_delivery(username, password, device, device_id, ca
             return self.client:claim_delivery({
                 device = device,
                 device_id = device_id,
+                free_space = free_space,
+                total_space = total_space,
             })
         end)
         finish(callback, ok, res, "CWNGSyncClient:claim_delivery")
@@ -303,6 +309,82 @@ function CWNGSyncClient:claim_delivery(username, password, device, device_id, ca
     coroutine.resume(co)
     if UIManager.looper then UIManager:setInputTimeout() end
     socketutil:reset_timeout()
+end
+
+local function jsonRequest(self, operation, username, password, callback, label)
+    self.client:reset_middlewares()
+    self.client:enable("Format.JSON")
+    self.client:enable("GinClient")
+    self.client:enable("CWNGSyncAuth", { username = username, password = password })
+    socketutil:set_timeout(INVENTORY_TIMEOUTS[1], INVENTORY_TIMEOUTS[2])
+    local co = coroutine.create(function()
+        local ok, res = pcall(operation)
+        finish(callback, ok, res, label)
+    end)
+    self.client:enable("AsyncHTTP", { thread = co })
+    coroutine.resume(co)
+    if UIManager.looper then UIManager:setInputTimeout() end
+    socketutil:reset_timeout()
+end
+
+function CWNGSyncClient:refuse_delivery(
+        username, password, device, device_id, delivery_id, claim_token, reason,
+        free_space, total_space, callback)
+    jsonRequest(self, function()
+        return self.client:refuse_delivery({
+            device = device,
+            device_id = device_id,
+            delivery_id = delivery_id,
+            claim_token = claim_token,
+            reason = reason,
+            free_space = free_space,
+            total_space = total_space,
+        })
+    end, username, password, callback, "CWNGSyncClient:refuse_delivery")
+end
+
+function CWNGSyncClient:claim_deletion(username, password, device, device_id, callback)
+    jsonRequest(self, function()
+        return self.client:claim_deletion({
+            device = device,
+            device_id = device_id,
+        })
+    end, username, password, callback, "CWNGSyncClient:claim_deletion")
+end
+
+function CWNGSyncClient:complete_deletion(
+        username, password, device, device_id, deletion_id, claim_token,
+        deleted, failure_reason, callback)
+    jsonRequest(self, function()
+        return self.client:complete_deletion({
+            device = device,
+            device_id = device_id,
+            deletion_id = deletion_id,
+            claim_token = claim_token,
+            deleted = deleted,
+            failure_reason = failure_reason,
+        })
+    end, username, password, callback, "CWNGSyncClient:complete_deletion")
+end
+
+function CWNGSyncClient:get_collections(username, password, device, device_id, callback)
+    jsonRequest(self, function()
+        return self.client:get_collections({
+            device = device,
+            device_id = device_id,
+        })
+    end, username, password, callback, "CWNGSyncClient:get_collections")
+end
+
+function CWNGSyncClient:complete_collections(
+        username, password, device, device_id, revision, callback)
+    jsonRequest(self, function()
+        return self.client:complete_collections({
+            device = device,
+            device_id = device_id,
+            revision = revision,
+        })
+    end, username, password, callback, "CWNGSyncClient:complete_collections")
 end
 
 function CWNGSyncClient:complete_delivery(

@@ -14300,3 +14300,18 @@ msgstr "Dit boek staat al op dat apparaat"
 
 msgid "This book is already queued for this device"
 msgstr "Dit boek staat al in de wachtrij voor dit apparaat"
+
+msgid "Could not request deletion from this device."
+msgstr "Verwijdering van dit apparaat kon niet worden aangevraagd."
+
+msgid "Delete from device"
+msgstr "Van apparaat verwijderen"
+
+msgid "Delete {path} from {name} on its next sync?"
+msgstr "{path} van {name} verwijderen bij de volgende synchronisatie?"
+
+msgid "Deletion requested"
+msgstr "Verwijdering aangevraagd"
+
+msgid "{free} free of {total}"
+msgstr "{free} vrij van {total}"
