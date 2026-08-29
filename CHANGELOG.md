@@ -800,22 +800,6 @@ is for things you can see or feel when running the app.
   being stored without a location.
 
 ## [v4.1.35] - 2026-08-15
-### Added
-
-- **The New UI's description box has formatting buttons and a preview again.**
-  Editing a book's description in the new interface meant typing raw HTML into a
-  plain text box: `<p>` and `<br>` showed through as literal tags, there was no
-  way to see how it would look without saving and navigating back, and pasting a
-  blurb from Goodreads or Amazon arrived as one unformatted run of text with its
-  paragraphs and bullet points gone. The classic interface has had a formatting
-  editor there all along, which is why several people said this was the one thing
-  keeping them on it. The description field now has bold, italic, headings,
-  bulleted and numbered lists, quote, code and links, pasting from a web page
-  keeps its structure while dropping the styling junk that comes with it, and an
-  "Edit HTML" toggle gives a source view with a live preview underneath for
-  anyone who prefers writing the tags. Thanks @mrdynamo for the report, and
-  @jsparrowio and @Gauva1n for detailing what each of you was losing (#919).
-
 ### Changed
 
 - **Running it outside Docker no longer means hunting down `cps.py`.** If you
