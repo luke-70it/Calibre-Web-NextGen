@@ -136,7 +136,8 @@ test('shows a visible error when bulk dismissal fails', async ({ page }) => {
   await page.goto('/app');
   await page.getByRole('button', { name: 'Dismiss permanently' }).click();
 
-  await expect(page.getByRole('alert')).toHaveText('Could not dismiss the notices. Please try again.');
+  const noticeBanner = page.locator('section[aria-labelledby="user-notice-title"]');
+  await expect(noticeBanner.getByRole('alert')).toHaveText('Could not dismiss the notices. Please try again.');
   await expect(page.getByText('Kobo book compatibility repaired')).toBeVisible();
 });
 
