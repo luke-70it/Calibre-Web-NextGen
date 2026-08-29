@@ -184,6 +184,9 @@ def test_capture_page_persists_reconciles_and_repairs_legacy_content_id(
     assert state.authority_revision == 1
     assert state.ever_authoritative is True
     assert state.seeded_at is not None
+    assert state.opaque_content_status == "absent"
+    assert state.opaque_content_source == "wire_attachments_verified"
+    assert state.opaque_content_checked_at is not None
     assert annotation.origin_device_id == DEVICE_A
     assert annotation.content_revision == 5
     assert materialization.provenance == "kobo_cloud_seed"

@@ -277,6 +277,17 @@ def _visible_count(user_id, book_id):
     )
 
 
+def _captured_opaque_content_status(annotations):
+    """Classify opaque attachment evidence from one complete upstream set."""
+    for annotation in annotations:
+        if "attachments" not in annotation:
+            continue
+        attachments = annotation.get("attachments")
+        if not isinstance(attachments, dict) or attachments:
+            return "present", "wire_attachments"
+    return "absent", "wire_attachments_verified"
+
+
 def _set_failure(capture_id, reason, *, quarantine, log):
     reason = reason if reason in _SAFE_FAILURE_REASONS else "seed_response_invalid"
     capture = ub.session.get(ub.KoboAnnotationSeedCapture, capture_id)
@@ -470,6 +481,16 @@ def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
     state.seeded_at = now
     state.quarantine_reason = None
     state.upstream_seed_etag = capture.upstream_etag
+    captured_opaque_status, captured_opaque_source = (
+        _captured_opaque_content_status(annotations)
+    )
+    # The durable guard/trigger owns the one-way `present` invariant. Avoid an
+    # attempted downgrade here as well so the intended state is explicit even
+    # on databases whose trigger installation is being diagnosed.
+    if state.opaque_content_status != "present":
+        state.opaque_content_status = captured_opaque_status
+        state.opaque_content_source = captured_opaque_source
+        state.opaque_content_checked_at = now
     capture.annotation_count = captured_count
     capture.page_count = len(pages)
     capture.completed_at = now
