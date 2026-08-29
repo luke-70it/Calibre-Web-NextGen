@@ -9,6 +9,7 @@ the asset URLs to <prefix>/static/app/… and injects window.__CWNG_PREFIX__ fro
 request.script_root (the same value url_for uses for the classic UI, set by
 ReverseProxied / ProxyFix upstream). Client side is source-pinned below.
 """
+import html
 import pathlib
 import re
 
@@ -94,6 +95,31 @@ def test_shell_injects_prefix_aware_no_js_and_legacy_fallbacks(
         % __import__("json").dumps(fallback)
     ) in body
     assert body.count("window.location.replace(") == 1
+
+
+@pytest.mark.unit
+def test_render_shell_escapes_hostile_prefix_without_mount_guard(tmp_path):
+    """HTML contexts stay safe even if a caller bypasses ``_mount_prefix``.
+
+    This deliberately invokes ``_render_shell`` directly: coupling the test to
+    the prefix regex would make it pass vacuously and leave that regex as the
+    sole defence against an attribute breakout.
+    """
+    import cps.spa as spa_mod
+
+    index_path = tmp_path / "index.html"
+    index_path.write_text(REALISTIC_INDEX)
+    hostile_prefix = '/"><script>alert(1)</script>'
+    fallback = hostile_prefix + "/?cwng_feedback=newui"
+
+    body = spa_mod._render_shell(
+        str(index_path), hostile_prefix).get_data(as_text=True)
+
+    assert (
+        '<noscript><meta http-equiv="refresh" content="0;url=%s">'
+        '</noscript>' % html.escape(fallback, quote=True)
+    ) in body
+    assert '<script>alert(1)</script>' not in body
 
 
 @pytest.mark.unit

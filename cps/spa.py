@@ -4,6 +4,7 @@
 import json
 import os
 import re
+from html import escape as html_escape
 from flask import Blueprint, request, Response, abort, current_app
 from werkzeug.datastructures import MIMEAccept
 from werkzeug.http import parse_accept_header
@@ -224,6 +225,16 @@ def spa_shell_url():
     return f"{_mount_prefix()}/app/"
 
 
+def _inline_script_json(value):
+    """JSON for an inline script without an HTML ``</script>`` breakout."""
+    return (
+        json.dumps(value)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
+
+
 def _render_shell(index_path, prefix):
     """Serve the built index.html adapted to the current mount prefix.
 
@@ -236,15 +247,18 @@ def _render_shell(index_path, prefix):
     than being stranded on the shell's empty root element."""
     with open(index_path, "r", encoding="utf-8") as fh:
         html = fh.read()
+    escaped_prefix = html_escape(prefix, quote=True)
     if prefix:
-        html = html.replace("/static/app/", prefix + "/static/app/")
+        html = html.replace(
+            "/static/app/", escaped_prefix + "/static/app/")
     # Inject, into <head>:
     #  * the favicon (#574 — the Vite shell ships none, so the new UI had a blank
     #    tab icon); reuse the app's existing /static/favicon.ico, prefix-aware.
     #  * self-healing Classic fallbacks for JavaScript-disabled and pre-module
     #    browsers. Modern module-capable browsers ignore both branches.
     #  * the mount prefix (even "") so the SPA reads an authoritative value rather
-    #    than guessing from the URL. json.dumps → safely-quoted JS string.
+    #    than guessing from the URL. Inline-script JSON additionally escapes HTML
+    #    delimiters because JSON string quoting alone does not neutralize </script>.
     #  * the running version, so the SPA can name its own build. The classic UI
     #    has always had this via the ``cwng_app_version`` context processor; the
     #    SPA had no way to learn it, which meant the single most useful field in
@@ -257,6 +271,8 @@ def _render_shell(index_path, prefix):
     #    already shows to every user regardless of role.
     static = prefix + "/static"
     classic_fallback = prefix + "/?cwng_feedback=newui"
+    escaped_static = html_escape(static, quote=True)
+    escaped_classic_fallback = html_escape(classic_fallback, quote=True)
     inject = (
         '<link rel="icon" href="%s/favicon.ico">'
         '<link rel="apple-touch-icon" sizes="180x180" href="%s/img/apple-touch-icon.png">'
@@ -264,12 +280,12 @@ def _render_shell(index_path, prefix):
         '<script nomodule>window.location.replace(%s);</script>'
         '<script>window.__CWNG_PREFIX__=%s;window.__CWNG_VERSION__=%s;</script>'
     ) % (
-        static,
-        static,
-        classic_fallback,
-        json.dumps(classic_fallback),
-        json.dumps(prefix),
-        json.dumps(constants.INSTALLED_VERSION),
+        escaped_static,
+        escaped_static,
+        escaped_classic_fallback,
+        _inline_script_json(classic_fallback),
+        _inline_script_json(prefix),
+        _inline_script_json(constants.INSTALLED_VERSION),
     )
     html = html.replace("</head>", inject + "</head>", 1)
     resp = Response(html, mimetype="text/html")
