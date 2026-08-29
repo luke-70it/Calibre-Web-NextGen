@@ -12,12 +12,14 @@ Updated: 2026-08-28  Phase: complete  Status: 10/10 outcomes observed
 - [x] Discover, Show hidden books, and per-card action-row preferences are server-authoritative for authenticated users, adopt existing local values once, work across browsers/logout/localStorage clearing, and stay local-only for anonymous users.
 - [x] The removed Classic nudge's #1310/#1311 regression suite now guards complete removal of its markup, class, CSS variable, and storage key; stale design documentation is gone.
 - [x] UI-routing changes in `cps/spa.py`, `cps/web.py`, and `cps/templates/layout.html` widen the frontend/E2E CI classifier; the base-commit fails-closed design remains intact.
-- [x] Objective-specific tests are demonstrated red on the origin/main base and green on the branch; touched Python suites, frontend build/typecheck, and touched e2e/a11y specs pass.
+- [x] Objective-specific tests are demonstrated red on the origin/main base and green on the branch; touched Python suites and frontend build/typecheck pass. The touched e2e spec did NOT pass on its first CI execution: the no-JS fallback's login branch asserted the SPA's login field, which cannot render with JavaScript disabled, so it could never have gone green on a login-required server. Corrected to Classic's own `input#username`; that branch had never been executed locally.
 - [x] Live local HTTP/browser flow, adjacent regression pass, changelog fragment, commits, and pushed final HEAD are recorded with OBSERVED/ASSUMED evidence.
 
 ## Now / next action
 
-Commit this completion record, push final HEAD, and hand off without opening a PR.
+PR #1956 is open, rebased onto main (155 of 221 concurrency modules re-measured), and awaiting its
+Test Suite run. Full unit lane on the rebased tree: 7869 passed, 92 skipped, 0 failed (the 216
+deselected are main's container-backed tests, now correctly outside the unit lane per #1986). E2E has veto over local green on this branch: it is the only gate that caught the no-JS redirect loop, and the only one that executed the corrected fallback assertion.
 
 ## How to build/run/verify
 
