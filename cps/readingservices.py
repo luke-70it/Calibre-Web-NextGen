@@ -19,17 +19,15 @@ import os
 import secrets
 import zipfile
 import re
-from datetime import datetime, timezone
 from functools import wraps
 from typing import TypedDict, NotRequired
-from flask import Blueprint, request, make_response, jsonify, abort, g, after_this_request
+from flask import Blueprint, request, make_response, jsonify, g, after_this_request
 from werkzeug.datastructures import Headers
 import requests
 from lxml import etree
 
 from . import logger, calibre_db, db, config, ub, csrf
-from .cw_login import current_user, login_required
-from .services import hardcover
+from .cw_login import current_user
 
 log = logger.create()
 
@@ -945,7 +943,10 @@ class KoboAnnotation(TypedDict):
     type: str  # "note" or "highlight"
 
 
-def _dispatch_kobo_annotation_deletes(annotation_sync, deleted, entitlement_id, book):
+def _dispatch_kobo_annotation_deletes(
+    annotation_sync, deleted, entitlement_id, book, *, commit=True,
+    deferred_effects=None,
+):
     if deleted is not None and not isinstance(deleted, list):
         log.warning(
             "Ignoring deletedAnnotationIds for entitlement %s: expected a list",
@@ -956,10 +957,80 @@ def _dispatch_kobo_annotation_deletes(annotation_sync, deleted, entitlement_id, 
         # Nickel can only name annotations Kobo created: CWNG has no annotation
         # writeback to Kobo. If F-3b565b implements writeback, this provenance
         # authority must be revisited.
+        kwargs = {
+            "book_id": book.id,
+            "deletable_sources": {"kobo"},
+        }
+        if not commit or deferred_effects is not None:
+            kwargs.update(commit=commit, deferred_effects=deferred_effects)
         return annotation_sync.dispatch_annotation_deletes(
-            deleted, current_user, book_id=book.id,
-            deletable_sources={"kobo"},
+            deleted, current_user, **kwargs,
         )
+    return True
+
+
+class _AtomicOwnedPatchRefused(RuntimeError):
+    """Abort an owned PATCH without allowing its SAVEPOINT to release."""
+
+
+def _persist_owned_patch_atomically(
+    annotation_sync, *, updated, deleted, deterministic_update_rejection,
+    book, entitlement_id, dispatch_kwargs,
+):
+    """Commit the complete owned PATCH and authority watermark exactly once."""
+    from cps.services.kobo_annotation_authority import (
+        advance_authoritative_patch_revision,
+        mark_authoritative_oversize,
+    )
+
+    effects = annotation_sync.new_deferred_dispatch_effects()
+    try:
+        # #1925 request-level discipline: begin_contained_nested() first forces
+        # a real SQLite outer transaction, so releasing this SAVEPOINT cannot
+        # make annotation rows durable ahead of the checked outer commit.
+        with ub.begin_contained_nested(ub.session):
+            if deterministic_update_rejection:
+                if not _dispatch_kobo_annotation_deletes(
+                    annotation_sync, deleted, entitlement_id, book,
+                    commit=False, deferred_effects=effects,
+                ):
+                    raise _AtomicOwnedPatchRefused("delete dispatch refused")
+            if updated:
+                persisted = annotation_sync.dispatch_annotation_sync(
+                    updated, book, current_user,
+                    commit=False, deferred_effects=effects, **dispatch_kwargs,
+                )
+                if persisted is False:
+                    raise _AtomicOwnedPatchRefused("update dispatch refused")
+            if not deterministic_update_rejection:
+                if not _dispatch_kobo_annotation_deletes(
+                    annotation_sync, deleted, entitlement_id, book,
+                    commit=False, deferred_effects=effects,
+                ):
+                    raise _AtomicOwnedPatchRefused("delete dispatch refused")
+            if not mark_authoritative_oversize(
+                current_user.id, book.id, log=log, commit=False,
+            ):
+                raise _AtomicOwnedPatchRefused("oversize classification refused")
+            if not advance_authoritative_patch_revision(
+                current_user.id, book.id, log=log, commit=False,
+            ):
+                raise _AtomicOwnedPatchRefused("authority watermark refused")
+            ub.session.flush()
+        if ub.session_commit() is False:
+            raise _AtomicOwnedPatchRefused("combined request commit failed")
+    except Exception:
+        if ub.session is not None:
+            ub.session.rollback()
+        log.exception(
+            "Kobo owned PATCH transaction rolled back user_id=%s book_id=%s",
+            getattr(current_user, "id", None), book.id,
+        )
+        return False
+
+    annotation_sync.finalize_deferred_dispatch_effects(
+        current_user, effects, book=book,
+    )
     return True
 
 
@@ -1074,18 +1145,17 @@ def handle_annotations(entitlement_id):
                 deterministic_update_rejection = (
                     bool(updated) and not isinstance(updated, list)
                 )
+                local_authority = _owned_patch_is_local_authority(
+                    book, entitlement_id,
+                )
                 # Falsy non-list spellings cannot contain an annotation. Treat
                 # them as an empty update set so a delete-carrying batch is not
                 # trapped in a permanent retry. A truthy non-list value may be
                 # a malformed annotation and still goes through the defensive
                 # dispatcher, whose False result is refused below.
-                if deterministic_update_rejection:
-                    _dispatch_kobo_annotation_deletes(
-                        annotation_sync, deleted, entitlement_id, book,
-                    )
+                raw_materializations = None
+                trace_id = None
                 if updated:
-                    raw_materializations = None
-                    trace_id = None
                     if isinstance(updated, list) and updated:
                         trace_id = secrets.token_hex(8)
                         try:
@@ -1111,25 +1181,28 @@ def handle_annotations(entitlement_id):
                                 user_id=getattr(current_user, "id", None), book_id=book.id,
                                 annotation_count=len(updated),
                             )
-                    dispatch_kwargs = {
-                        "origin_device_id": getattr(g, "annotation_origin_device_id", None),
-                    }
-                    if raw_materializations is not None:
-                        dispatch_kwargs.update(
-                            raw_materializations=raw_materializations,
-                            trace_id=trace_id,
-                        )
-                    persisted = annotation_sync.dispatch_annotation_sync(
-                        updated, book, current_user, **dispatch_kwargs,
+                dispatch_kwargs = {
+                    "origin_device_id": getattr(g, "annotation_origin_device_id", None),
+                }
+                if raw_materializations is not None:
+                    dispatch_kwargs.update(
+                        raw_materializations=raw_materializations,
+                        trace_id=trace_id,
                     )
-                    if persisted is False:
-                        # False means complete batch persistence is unproven,
-                        # not that zero rows reached SQLite. On this engine a
-                        # released SAVEPOINT can survive a later rollback, so
-                        # keep the raw body for replay/reconciliation either way.
+
+                if local_authority:
+                    if not _persist_owned_patch_atomically(
+                        annotation_sync,
+                        updated=updated,
+                        deleted=deleted,
+                        deterministic_update_rejection=deterministic_update_rejection,
+                        book=book,
+                        entitlement_id=entitlement_id,
+                        dispatch_kwargs=dispatch_kwargs,
+                    ):
                         log.error(
-                            "Kobo annotation PATCH was not fully persisted for "
-                            "user_id=%s book_id=%s; refusing to acknowledge it upstream",
+                            "Kobo annotation PATCH was not fully persisted with "
+                            "its authority watermark for user_id=%s book_id=%s",
                             getattr(current_user, "id", None), book.id,
                         )
                         patch_spool_outcome = "dispatch_refused"
@@ -1137,22 +1210,50 @@ def handle_annotations(entitlement_id):
                             jsonify({"error": "Annotation capture temporarily unavailable"}),
                             503,
                         )
-                if not deterministic_update_rejection:
-                    deletes_persisted = _dispatch_kobo_annotation_deletes(
-                        annotation_sync, deleted, entitlement_id, book,
-                    )
-                    if deletes_persisted is False:
-                        log.error(
-                            "Kobo annotation deletes were not fully persisted for "
-                            "user_id=%s book_id=%s; refusing to acknowledge them",
-                            getattr(current_user, "id", None), book.id,
+                else:
+                    if deterministic_update_rejection:
+                        _dispatch_kobo_annotation_deletes(
+                            annotation_sync, deleted, entitlement_id, book,
                         )
-                        patch_spool_outcome = "dispatch_refused"
-                        return make_response(
-                            jsonify({"error": "Annotation capture temporarily unavailable"}),
-                            503,
+                    if updated:
+                        persisted = annotation_sync.dispatch_annotation_sync(
+                            updated, book, current_user, **dispatch_kwargs,
                         )
+                        if persisted is False:
+                            # False means complete batch persistence is unproven,
+                            # not that zero rows reached SQLite. On this engine a
+                            # released SAVEPOINT can survive a later rollback, so
+                            # keep the raw body for replay/reconciliation either way.
+                            log.error(
+                                "Kobo annotation PATCH was not fully persisted for "
+                                "user_id=%s book_id=%s; refusing to acknowledge it upstream",
+                                getattr(current_user, "id", None), book.id,
+                            )
+                            patch_spool_outcome = "dispatch_refused"
+                            return make_response(
+                                jsonify({"error": "Annotation capture temporarily unavailable"}),
+                                503,
+                            )
+                    if not deterministic_update_rejection:
+                        deletes_persisted = _dispatch_kobo_annotation_deletes(
+                            annotation_sync, deleted, entitlement_id, book,
+                        )
+                        if deletes_persisted is False:
+                            log.error(
+                                "Kobo annotation deletes were not fully persisted for "
+                                "user_id=%s book_id=%s; refusing to acknowledge them",
+                                getattr(current_user, "id", None), book.id,
+                            )
+                            patch_spool_outcome = "dispatch_refused"
+                            return make_response(
+                                jsonify({"error": "Annotation capture temporarily unavailable"}),
+                                503,
+                            )
             patch_spool_outcome = "dispatch_completed"
+            if book is not None and local_authority:
+                return _owned_annotation_patch_ack(
+                    capture_session, book, entitlement_id,
+                )
         except Exception:
             log.exception("Error processing PATCH annotations")
             return make_response(
@@ -1160,36 +1261,6 @@ def handle_annotations(entitlement_id):
             )
         finally:
             _mark_patch_spool_outcome(patch_spool_ticket, patch_spool_outcome)
-    if book is not None:
-        try:
-            from cps.services.kobo_annotation_authority import (
-                mark_authoritative_oversize,
-            )
-            mark_authoritative_oversize(
-                current_user.id, book.id, log=log,
-            )
-        except Exception:
-            log.exception(
-                "Kobo authoritative oversize classification failed "
-                "user_id=%s book_id=%s",
-                getattr(current_user, "id", None), book.id,
-            )
-    if book is not None and _owned_patch_is_local_authority(book, entitlement_id):
-        from cps.services.kobo_annotation_authority import (
-            advance_authoritative_patch_revision,
-        )
-        if not advance_authoritative_patch_revision(
-            current_user.id, book.id, log=log,
-        ):
-            log.critical(
-                "Kobo local PATCH persisted but authority revision could not "
-                "advance; withholding 204 user_id=%s book_id=%s",
-                getattr(current_user, "id", None), book.id,
-            )
-            return make_response(jsonify({
-                "error": "Annotation authority temporarily unavailable",
-            }), 503)
-        return _owned_annotation_patch_ack(capture_session, book, entitlement_id)
     return _proxy_annotation_request(capture_session, book, entitlement_id)
 
 

@@ -1299,7 +1299,7 @@ def test_live_render_a_b_with_snapshot_commit_failure_never_returns_old_a(
     assert state.set_digest is None
 
 
-def test_local_patch_withholds_204_when_authority_revision_commit_fails(
+def test_annotation_durable_but_watermark_failed_is_impossible(
     app, session, monkeypatch,
 ):
     _book(monkeypatch)
@@ -1329,7 +1329,274 @@ def test_local_patch_withholds_204_when_authority_revision_commit_fails(
     assert response.status_code != 204
     assert session.query(ub.Annotation).filter_by(
         annotation_id="persisted-before-failure",
+    ).one_or_none() is None
+    session.refresh(state)
+    assert state.authority_revision == 0
+    assert state.set_digest is None
+
+
+def test_forced_combined_commit_failure_rolls_back_annotation_and_watermark(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    state = _state(session, status="authoritative", ever=True, content_id=OWNED)
+    state.authority_revision = 6
+    session.flush()
+    _accepted_routing_capture(session, state, DEVICE_A)
+    session.commit()
+    outcomes = []
+    ticket = SimpleNamespace(
+        spool_id="atomic-final-commit",
+        mark_dispatch_outcome=lambda status: outcomes.append(status) or True,
+    )
+    monkeypatch.setattr(rs, "_stage_patch_for_recovery", lambda *_a, **_k: ticket)
+
+    def fail_checked_commit():
+        session.rollback()
+        return False
+
+    monkeypatch.setattr(ub, "session_commit", fail_checked_commit)
+    with app.test_request_context(
+        f"/api/v3/content/{OWNED}/annotations",
+        method="PATCH",
+        json={"updatedAnnotations": [_wire_annotation("rolled-back-with-watermark")]},
+    ):
+        g.annotation_origin_device_id = DEVICE_A
+        response = rs.handle_annotations.__wrapped__(OWNED)
+
+    assert response.status_code == 503
+    assert outcomes == ["dispatch_refused"]
+    assert session.query(ub.Annotation).filter_by(
+        annotation_id="rolled-back-with-watermark",
+    ).one_or_none() is None
+    persisted_state = session.query(ub.KoboAnnotationBookState).filter_by(
+        user_id=USER_ID, book_id=BOOK_ID,
     ).one()
+    assert persisted_state.authority_revision == 6
+    assert persisted_state.set_digest is None
+
+
+def test_successful_mixed_owned_patch_uses_one_checked_request_commit(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    state = _state(session, status="authoritative", ever=True, content_id=OWNED)
+    state.authority_revision = 14
+    session.flush()
+    _accepted_routing_capture(session, state, DEVICE_A)
+    session.add(_annotation_row("A"))
+    session.commit()
+    monkeypatch.setattr(rs, "_stage_patch_for_recovery", lambda *_a, **_k: None)
+    commit_calls = []
+
+    def checked_commit():
+        commit_calls.append(True)
+        session.commit()
+        return True
+
+    monkeypatch.setattr(ub, "session_commit", checked_commit)
+    with app.test_request_context(
+        f"/api/v3/content/{OWNED}/annotations",
+        method="PATCH",
+        json={
+            "updatedAnnotations": [_wire_annotation("B")],
+            "deletedAnnotationIds": ["A"],
+        },
+    ):
+        g.annotation_origin_device_id = DEVICE_A
+        response = rs.handle_annotations.__wrapped__(OWNED)
+
+    assert response.status_code == 204
+    assert response.get_data() == b""
+    assert commit_calls == [True]
+    rows = {
+        row.annotation_id: row
+        for row in session.query(ub.Annotation).order_by(ub.Annotation.annotation_id)
+    }
+    assert set(rows) == {"A", "B"}
+    assert rows["A"].hidden is True
+    assert rows["B"].hidden is False
+    session.refresh(state)
+    assert state.authority_revision == 15
+    assert state.set_digest is None
+
+
+def test_reviewer_exact_snapshot_a_patch_b_watermark_failure_ordering_rolls_back(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    state = _state(session, status="authoritative", ever=True, content_id=OWNED)
+    state.authority_revision = 9
+    session.flush()
+    _accepted_routing_capture(session, state, DEVICE_A)
+    session.add(_annotation_row("A"))
+    session.commit()
+    outcomes = []
+    ticket = SimpleNamespace(
+        spool_id="atomic-review-ordering",
+        mark_dispatch_outcome=lambda status: outcomes.append(status) or True,
+    )
+    monkeypatch.setattr(rs, "_stage_patch_for_recovery", lambda *_a, **_k: ticket)
+    monkeypatch.setattr(
+        rs, "proxy_to_kobo_reading_services",
+        lambda **_k: pytest.fail("ever-authoritative request contacted Kobo"),
+    )
+
+    with _request(app):
+        g.annotation_origin_device_id = DEVICE_A
+        snapshot_a = rs.handle_annotations.__wrapped__(OWNED)
+    session.refresh(state)
+    snapshot_revision = state.authority_revision
+    snapshot_digest = state.set_digest
+    assert [row["id"] for row in json.loads(snapshot_a.get_data())["annotations"]] == ["A"]
+
+    monkeypatch.setattr(
+        authority, "advance_authoritative_patch_revision", lambda *_a, **_k: False,
+    )
+    with app.test_request_context(
+        f"/api/v3/content/{OWNED}/annotations",
+        method="PATCH",
+        json={"updatedAnnotations": [_wire_annotation("B")]},
+    ):
+        g.annotation_origin_device_id = DEVICE_A
+        refused = rs.handle_annotations.__wrapped__(OWNED)
+
+    assert refused.status_code == 503
+    assert outcomes == ["dispatch_refused"]
+    assert session.query(ub.Annotation).filter_by(annotation_id="B").one_or_none() is None
+    session.refresh(state)
+    assert state.authority_revision == snapshot_revision
+    assert state.set_digest == snapshot_digest
+
+    def fail_query(*_args, **_kwargs):
+        raise RuntimeError("simulated dual live-query failure after refused PATCH")
+
+    monkeypatch.setattr(authority, "_annotation_rows", fail_query)
+    monkeypatch.setattr(authority, "_simple_annotation_rows", fail_query)
+    with _request(app):
+        g.annotation_origin_device_id = DEVICE_A
+        fallback = rs.handle_annotations.__wrapped__(OWNED)
+
+    # The old bytes remain eligible only because B never became durable and
+    # Nickel received the established retryable PATCH failure, not a 204.
+    assert fallback.status_code == 200
+    assert fallback.get_data() == snapshot_a.get_data()
+    assert [row.annotation_id for row in session.query(ub.Annotation).filter_by(
+        hidden=False,
+    )] == ["A"]
+
+
+def test_partial_batch_persistence_never_leaves_revision_matched_stale_snapshot(
+    app, session, monkeypatch,
+):
+    from cps.services import annotation_sync
+
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    state = _state(session, status="authoritative", ever=True, content_id=OWNED)
+    state.authority_revision = 12
+    session.flush()
+    _accepted_routing_capture(session, state, DEVICE_A)
+    session.add(_annotation_row("A"))
+    session.commit()
+    outcomes = []
+    ticket = SimpleNamespace(
+        spool_id="atomic-partial-batch",
+        mark_dispatch_outcome=lambda status: outcomes.append(status) or True,
+    )
+    monkeypatch.setattr(rs, "_stage_patch_for_recovery", lambda *_a, **_k: ticket)
+
+    with _request(app):
+        g.annotation_origin_device_id = DEVICE_A
+        snapshot_a = rs.handle_annotations.__wrapped__(OWNED)
+    session.refresh(state)
+    snapshot_revision = state.authority_revision
+    snapshot_digest = state.set_digest
+
+    original_upsert = annotation_sync._upsert_annotation
+
+    def fail_second_member(db_session, payload, book, user, **kwargs):
+        if payload.get("id") == "C":
+            raise RuntimeError("forced second-member failure")
+        return original_upsert(db_session, payload, book, user, **kwargs)
+
+    monkeypatch.setattr(annotation_sync, "_upsert_annotation", fail_second_member)
+    with app.test_request_context(
+        f"/api/v3/content/{OWNED}/annotations",
+        method="PATCH",
+        json={"updatedAnnotations": [_wire_annotation("B"), _wire_annotation("C")]},
+    ):
+        g.annotation_origin_device_id = DEVICE_A
+        refused = rs.handle_annotations.__wrapped__(OWNED)
+
+    assert refused.status_code == 503
+    assert outcomes == ["dispatch_refused"]
+    assert session.query(ub.Annotation).filter(
+        ub.Annotation.annotation_id.in_(["B", "C"]),
+    ).count() == 0
+    session.refresh(state)
+    assert state.authority_revision == snapshot_revision
+    assert state.set_digest == snapshot_digest
+    assert state.last_served_authority_revision == snapshot_revision
+    assert state.last_served_set_digest == snapshot_digest
+    assert json.loads(snapshot_a.get_data())["annotations"][0]["id"] == "A"
+
+
+@pytest.mark.parametrize(
+    ("case", "payload"),
+    [
+        ("create", {"updatedAnnotations": [_wire_annotation("B")]}),
+        ("edit", {"updatedAnnotations": [_wire_annotation("A")]}),
+        ("delete", {"deletedAnnotationIds": ["A"]}),
+        ("batch_mix", {
+            "updatedAnnotations": [_wire_annotation("B")],
+            "deletedAnnotationIds": ["A"],
+        }),
+        ("delete_refusal_mix", {
+            "updatedAnnotations": [_wire_annotation("B")],
+            "deletedAnnotationIds": ["web-owned"],
+        }),
+    ],
+)
+def test_owned_patch_branch_sweep_rolls_back_mutation_and_watermark_together(
+    app, session, monkeypatch, case, payload,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    state = _state(session, status="authoritative", ever=True, content_id=OWNED)
+    state.authority_revision = 21
+    session.flush()
+    _accepted_routing_capture(session, state, DEVICE_A)
+    session.add_all([
+        _annotation_row("A", highlighted_text="original A"),
+        _annotation_row("web-owned", source="webreader", highlighted_text="web row"),
+    ])
+    session.commit()
+    monkeypatch.setattr(rs, "_stage_patch_for_recovery", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        authority, "advance_authoritative_patch_revision", lambda *_a, **_k: False,
+    )
+
+    with app.test_request_context(
+        f"/api/v3/content/{OWNED}/annotations", method="PATCH", json=payload,
+    ):
+        g.annotation_origin_device_id = DEVICE_A
+        response = rs.handle_annotations.__wrapped__(OWNED)
+
+    assert response.status_code == 503, case
+    rows = {
+        row.annotation_id: row
+        for row in session.query(ub.Annotation).order_by(ub.Annotation.annotation_id)
+    }
+    assert set(rows) == {"A", "web-owned"}, case
+    assert rows["A"].highlighted_text == "original A", case
+    assert rows["A"].hidden is False, case
+    assert rows["web-owned"].hidden is False, case
+    session.refresh(state)
+    assert state.authority_revision == 21, case
 
 
 def test_corrupt_authoritative_capture_rebuilds_live_proof_never_503_and_recovers(

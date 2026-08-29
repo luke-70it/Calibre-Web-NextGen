@@ -461,19 +461,30 @@ def sticky_render_page_limit(user_id, book_id, requested_limit):
     return max(1, base, visible_count)
 
 
-def mark_authoritative_oversize(user_id, book_id, *, log):
-    """Surface lossless post-authority growth without rejecting the PATCH."""
+def mark_authoritative_oversize(user_id, book_id, *, log, commit=True):
+    """Surface lossless post-authority growth without rejecting the PATCH.
+
+    ``commit=False`` stages the classification in the caller's transaction.
+    """
     try:
         state = _state_for_book(user_id, book_id)
-        if state is None or not state.ever_authoritative:
+        if state is None or not (
+            state.ever_authoritative
+            or state.authority_status == "authoritative"
+        ):
             return False
         visible_count = _visible_annotation_count(user_id, book_id)
         if visible_count > _LOCAL_PAGE_CAPACITY:
             state.quarantine_reason = "oversize_single_page"
         elif state.quarantine_reason == "oversize_single_page":
             state.quarantine_reason = None
+        if not commit:
+            ub.session.flush()
+            return True
         return ub.session_commit()
     except Exception:
+        if not commit:
+            raise
         _safe_rollback()
         log.exception(
             "Kobo authoritative oversize state update failed "
@@ -482,14 +493,13 @@ def mark_authoritative_oversize(user_id, book_id, *, log):
         return False
 
 
-def advance_authoritative_patch_revision(user_id, book_id, *, log):
+def advance_authoritative_patch_revision(user_id, book_id, *, log, commit=True):
     """Invalidate prior rendered bytes before acknowledging a local PATCH.
 
-    Annotation upserts/deletes have already reported durable persistence when
-    this boundary is called. The replacement-set generation must now move in
-    its own checked commit before Nickel receives 204. ``set_digest`` and the
-    current ETag are cleared because no complete post-PATCH body has yet been
-    rendered; the next successful GET will bind them to exact response bytes.
+    ``commit=False`` stages this mutation beside the annotation mutations in a
+    caller-owned request transaction. ``set_digest`` and the current ETag are
+    cleared because no complete post-PATCH body has yet been rendered; the next
+    successful GET will bind them to exact response bytes.
     """
     try:
         state = _state_for_book(user_id, book_id)
@@ -503,6 +513,9 @@ def advance_authoritative_patch_revision(user_id, book_id, *, log):
         state.current_etag = None
         state.etag_kind = None
         state.last_mutation_at = datetime.now(timezone.utc)
+        if not commit:
+            ub.session.flush()
+            return True
         committed = ub.session_commit()
         if committed is False:
             log.error(
@@ -511,6 +524,8 @@ def advance_authoritative_patch_revision(user_id, book_id, *, log):
             )
         return committed
     except Exception:
+        if not commit:
+            raise
         _safe_rollback()
         log.exception(
             "Kobo authoritative PATCH revision failed "

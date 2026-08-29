@@ -51,6 +51,31 @@ def _stage0_route_tests_assume_completed_seed(monkeypatch):
         lambda *_args, **_kwargs: True,
     )
 
+    def _dispatch_without_app_db(
+        annotation_sync, *, updated, deleted, deterministic_update_rejection,
+        book, entitlement_id, dispatch_kwargs,
+    ):
+        # Stage-0 route tests mock persistence and intentionally have no app DB.
+        # The request transaction itself is covered in test_1942_seed_pipeline.
+        if deterministic_update_rejection:
+            readingservices._dispatch_kobo_annotation_deletes(
+                annotation_sync, deleted, entitlement_id, book,
+            )
+        if updated and annotation_sync.dispatch_annotation_sync(
+            updated, book, readingservices.current_user, **dispatch_kwargs,
+        ) is False:
+            return False
+        if not deterministic_update_rejection:
+            if readingservices._dispatch_kobo_annotation_deletes(
+                annotation_sync, deleted, entitlement_id, book,
+            ) is False:
+                return False
+        return True
+
+    monkeypatch.setattr(
+        readingservices, "_persist_owned_patch_atomically", _dispatch_without_app_db,
+    )
+
 
 def _create_gate_tables(conn, *, user_gate=False, settings_gate=False):
     conn.execute(text(

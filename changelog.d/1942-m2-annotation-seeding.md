@@ -26,3 +26,7 @@
   Kobo PATCH advances and invalidates the rendered-set digest before its 204;
   stale snapshots are rejected, while a current complete live render is never
   replaced by older bytes if snapshot persistence fails.
+- **Owned Kobo PATCHes now commit annotation changes and their authority
+  watermark atomically.** Create, edit, delete, and mixed batches roll back as
+  one request on failure, remain retryable in the recovery spool, and cannot
+  leave an older snapshot eligible after partial persistence.
