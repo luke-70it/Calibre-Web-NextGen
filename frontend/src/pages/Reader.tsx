@@ -21,6 +21,7 @@ import {
   DEFAULT_HIT_CAP, MIN_QUERY_LENGTH, searchBook, type SearchHit,
 } from '../lib/reader/searchBook';
 import { chapterLabelForHref, splitSearchExcerpt } from '../lib/reader/searchUi';
+import { safeLocalStorageGet, safeLocalStorageSet } from '../lib/safeStorage';
 import styles from './Reader.module.css';
 
 // Highlight colors as ARIA/label keys (SC 1.4.1: a color must never be conveyed
@@ -171,7 +172,7 @@ const FONT_FAMILY: Record<ReaderSettings['font'], string> = {
 };
 
 function loadTheme(): ReaderTheme {
-  const v = localStorage.getItem(LS_THEME);
+  const v = safeLocalStorageGet(LS_THEME);
   if (v === 'light' || v === 'sepia' || v === 'dark' || v === 'black') return v;
   // First reader visit follows the already-resolved per-user app palette.
   // Thereafter the reader's explicit page-theme choice remains independent.
@@ -181,7 +182,7 @@ function loadTheme(): ReaderTheme {
   return 'dark';
 }
 function loadFont(): number {
-  const v = Number(localStorage.getItem(LS_FONT));
+  const v = Number(safeLocalStorageGet(LS_FONT));
   return v >= FONT_MIN && v <= FONT_MAX ? v : 100;
 }
 
@@ -1149,11 +1150,11 @@ export function Reader({ id }: { id: string }) {
   // Apply theme / font changes to a live rendition without rebuilding it, and
   // remember the preference across sessions.
   useEffect(() => {
-    localStorage.setItem(LS_THEME, theme);
+    safeLocalStorageSet(LS_THEME, theme);
     applyTheme(theme);
   }, [theme, applyTheme]);
   useEffect(() => {
-    localStorage.setItem(LS_FONT, String(fontPct));
+    safeLocalStorageSet(LS_FONT, String(fontPct));
     applyTypography();
   }, [fontPct, fontFamily, margin, lineHeight, applyTypography]);
 
