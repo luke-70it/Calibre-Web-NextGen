@@ -933,13 +933,15 @@ function CWNGSync:reportInventory(interactive, ensure_networking, on_complete)
         if interactive then
             UIManager:show(InfoMessage:new{ text = _("Please login before reporting this device's library.") })
         end
+        if on_complete then on_complete(false, nil, "missing credentials") end
         return
     end
     if not ensureServerConfigured(self.settings.server) then
+        if on_complete then on_complete(false, nil, "missing server") end
         return
     end
     if ensure_networking and NetworkMgr:willRerunWhenOnline(function()
-            self:reportInventory(interactive, ensure_networking)
+            self:reportInventory(interactive, ensure_networking, on_complete)
         end) then
         return
     end
@@ -970,7 +972,7 @@ function CWNGSync:reportInventory(interactive, ensure_networking, on_complete)
                         timeout = 4,
                     })
                 end
-                if on_complete then on_complete(body) end
+                if on_complete then on_complete(true, body) end
             else
                 logger.warn("CWNGSync: device inventory report failed", reason or "unknown error")
                 if interactive then
@@ -979,6 +981,7 @@ function CWNGSync:reportInventory(interactive, ensure_networking, on_complete)
                         timeout = 5,
                     })
                 end
+                if on_complete then on_complete(false, body, reason) end
             end
         end)
 end
@@ -1020,16 +1023,48 @@ end
 
 
 function CWNGSync:collectDeliveries(
-        interactive, ensure_networking, remaining, collected, inventory_ready)
+        interactive, ensure_networking, remaining, collected, inventory_ready,
+        collection_token)
+    local collection_owned
+    if collection_token ~= nil then
+        -- Only a continuation holding the live run's opaque token may recurse.
+        -- A delayed callback from an already-finished run is stale and must not
+        -- silently resurrect collection after ownership has been released.
+        collection_owned = self.delivery_collection_running == collection_token
+        if not collection_owned then return end
+    elseif self.delivery_collection_running ~= nil then
+        -- ReaderReady, NetworkConnected and the manual menu all enter without
+        -- a token.  While a run is in flight, those are overlapping external
+        -- triggers rather than continuations of the owner.
+        logger.dbg("CWNGSync: delivery collection already running")
+        return
+    else
+        collection_token = {}
+        self.delivery_collection_running = collection_token
+        collection_owned = true
+    end
+
+    local function releaseCollection()
+        if collection_owned and self.delivery_collection_running == collection_token then
+            self.delivery_collection_running = nil
+        end
+    end
+
     remaining = remaining or 20
     collected = collected or 0
     if not self.settings.username or not self.settings.password then
         if interactive then promptLogin() end
+        releaseCollection()
         return
     end
-    if not ensureServerConfigured(self.settings.server) then return end
+    if not ensureServerConfigured(self.settings.server) then
+        releaseCollection()
+        return
+    end
     if ensure_networking and NetworkMgr:willRerunWhenOnline(function()
-            self:collectDeliveries(interactive, ensure_networking)
+            self:collectDeliveries(
+                interactive, ensure_networking, remaining, collected,
+                inventory_ready, collection_token)
         end) then
         return
     end
@@ -1038,8 +1073,13 @@ function CWNGSync:collectDeliveries(
     -- for it to reach the server before claiming; launching both async calls
     -- together creates exactly the duplicate-delivery race inventory prevents.
     if not inventory_ready then
-        self:reportInventory(interactive, false, function()
-            self:collectDeliveries(interactive, false, remaining, collected, true)
+        self:reportInventory(interactive, false, function(inventory_ok)
+            if not inventory_ok then
+                releaseCollection()
+                return
+            end
+            self:collectDeliveries(
+                interactive, false, remaining, collected, true, collection_token)
         end)
         return
     end
@@ -1052,6 +1092,7 @@ function CWNGSync:collectDeliveries(
                 timeout = 5,
             })
         end
+        releaseCollection()
         return
     end
 
@@ -1074,6 +1115,7 @@ function CWNGSync:collectDeliveries(
                         timeout = 5,
                     })
                 end
+                releaseCollection()
                 return
             end
             local delivery = body.delivery
@@ -1086,6 +1128,7 @@ function CWNGSync:collectDeliveries(
                         timeout = 3,
                     })
                 end
+                releaseCollection()
                 return
             end
 
@@ -1120,6 +1163,7 @@ function CWNGSync:collectDeliveries(
                         timeout = 6,
                     })
                 end
+                releaseCollection()
                 return
             end
 
@@ -1146,6 +1190,7 @@ function CWNGSync:collectDeliveries(
                                 timeout = 6,
                             })
                         end
+                        releaseCollection()
                         return
                     end
                     self:clearDeliveryReceipt(delivery.id)
@@ -1153,13 +1198,17 @@ function CWNGSync:collectDeliveries(
                     if remaining > 1 then
                         UIManager:nextTick(function()
                             self:collectDeliveries(
-                                interactive, false, remaining - 1, collected + 1, true)
+                                interactive, false, remaining - 1, collected + 1,
+                                true, collection_token)
                         end)
-                    elseif interactive then
-                        UIManager:show(InfoMessage:new{
-                            text = T(_("Collected %1 queued books."), collected + 1),
-                            timeout = 4,
-                        })
+                    else
+                        if interactive then
+                            UIManager:show(InfoMessage:new{
+                                text = T(_("Collected %1 queued books."), collected + 1),
+                                timeout = 4,
+                            })
+                        end
+                        releaseCollection()
                     end
                 end)
         end)
