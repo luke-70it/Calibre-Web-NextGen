@@ -10,6 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libsdl2-2.0-0 xvfb x11vnc novnc websockify fluxbox x11-utils \
       ca-certificates fonts-dejavu-core xz-utils curl procps \
+      xdotool \
     && rm -rf /var/lib/apt/lists/*
 
 # Screen geometry defaults to the Kindle 11th-gen (2024) panel so layout bugs
