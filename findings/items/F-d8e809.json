@@ -6,6 +6,12 @@
   "refs": [],
   "severity": "correctness",
   "source": "audit",
-  "status": "open",
-  "title": "The identity firewall blocks forward-merging main, so a PR whose base moves can never satisfy the strict up-to-date rule"
+  "status": "resolved",
+  "title": "The identity firewall blocks forward-merging main, so a PR whose base moves can never satisfy the strict up-to-date rule",
+  "resolution": {
+    "commit": "",
+    "date": "2026-08-29",
+    "release": "",
+    "note": "FIXED by DISPATCHER 4 in ~/.config/git/hooks/pre-push while this finding was still in review: the fast-forward path now applies the same exclusion the non-fast-forward path already used, so the range becomes `$remote_sha..$local_sha --not --remotes` unconditionally. Verified by them against the exact range that had swept 5 upstream main commits - it now yields 0, and genuinely new commits are still checked on both author and committer. Merging origin/main into a topic branch works again, which restores CWNG AUTOPILOT CARE's merge-don't-rebase guidance as a viable path. The hook is outside this repo, so there is no commit here to cite; a backup was kept and GM16, which owns that file, will review. Recorded for the record: the force-push I used on fix/locale-read-path-boundary-v2 was the only compliant route while this stood, and DISPATCHER 4 confirmed it needs no reverting. Cost before the fix: PRs #1978, #1990 and #1992 abandoned, each needing a human to close."
+  }
 }
