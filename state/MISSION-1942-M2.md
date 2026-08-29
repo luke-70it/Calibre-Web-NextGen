@@ -36,6 +36,7 @@ Mission complete. Hardware verification remains the post-merge Clara step owned 
 - 2026-08-29: the all-devices calculation intentionally means active `kind='kobo'` devices. Browser devices cannot originate the Kobo annotations GET that supplies a capture; this matches the M2 instruction to capture each other active Kobo on its next GET.
 - 2026-08-29: no M3-M5 or entitlement-replay code was changed; hardware verification remains post-merge.
 - 2026-08-29: implementation committed as `ae36f43bac2ce11fc3b4a210fefe6ed157e1df4c` with the exact `new-usemame` identity. Push was attempted and blocked by managed DNS (`github.com` could not resolve), so delivery uses a verified complete-history bundle. The sandbox cannot write the requested parent-directory spelling; the final artifact is `1942-m2.bundle` in this writable worktree root.
+- 2026-08-29: final spec/runbook audit added capture-derived W1 opaque evidence in `c407da24fe`: a complete set records `absent` only when attachments prove it, records `present` when observed, and never downgrades durable prior `present` evidence.
 
 ## Evidence classification
 
@@ -45,6 +46,6 @@ Mission complete. Hardware verification remains the post-merge Clara step owned 
 - OBSERVED: M3 briefing is stale (2026-06-12) and records zero unresolved escalations at its last update.
 - OBSERVED: focused final verification passed 27/27 (`test_1942_seed_pipeline.py`, #1923, and raw materialization regression).
 - OBSERVED: adjacent schema/route/persistence verification passed 98/98 before the final focused run; production migration replay and classifier follow-ups passed 3/3.
-- OBSERVED: final full unit suite: 7,479 passed, 106 skipped, 17 failed in 222.84s. All 17 failures are sandbox infrastructure: 10 loopback socket-bind denials and 7 `ps` execution denials; no application assertion remains failed.
+- OBSERVED: final full unit suite: 7,479 passed, 106 skipped, 17 failed in 220.03s. All 17 failures are sandbox infrastructure: 10 loopback socket-bind denials and 7 `ps` execution denials; no application assertion remains failed.
 - OBSERVED: Python compilation, focused Ruff on the new service/tests and adjacent small modules, and `git diff --check` pass.
 - ASSUMED: no additional private Git Manager directive conflicts with the direct operator brief; hydration was unavailable because the secrets broker was not running.
