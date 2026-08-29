@@ -42,7 +42,7 @@ test('Sign out preserves the reverse-proxy sub-path', async ({ page }) => {
 test('admin hybrid links keep their intended UI and reverse-proxy prefix (#909)', async ({ page }) => {
   await page.goto('./app/admin');
 
-  const duplicates = page.getByRole('link', { name: 'Duplicate books' });
+  const duplicates = page.getByRole('link', { name: 'Duplicates', exact: true });
   await expect(duplicates).toHaveAttribute('href', /\/cwa\/app\/duplicates$/);
   await expect(duplicates).not.toContainText('Opens in classic view');
 

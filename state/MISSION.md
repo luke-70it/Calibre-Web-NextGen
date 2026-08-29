@@ -47,5 +47,6 @@ Commit this completion record, push final HEAD, and hand off without opening a P
 - Python green: 139/139 across both new suites and adjacent feedback, sidebar, serializer/account, null-view-settings, and anonymous-login suites.
 - Frontend green: production `tsc -b && vite build`; 1905 modules transformed.
 - Browser green: touched/adjacent flow 10 passed and one intentional mobile Classic-hover skip; accessibility 24 passed and 9 intentional matrix skips.
+- Reverse-proxy green: temporary nginx `/cwa/` rig, 6/6 subpath Playwright tests passed after correcting the stale `Duplicate books` selector to the live accessible name `Duplicates`.
 - Live base→branch HTTP matrix: missing Accept 200→200; curl wildcard 200→200; wget wildcard 200→200; OPDS-reader root 200→200; `/opds` 200→200; invalid-token Kobo sync 404→404; browser `/` and `/login` 200→302 `/app/`.
 - Live guest browser: anonymous identity true, local hidden state applied, show toggle persisted local `0`, and zero preference POSTs.
