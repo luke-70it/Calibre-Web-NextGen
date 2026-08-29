@@ -25,7 +25,12 @@ def delivery_protocol(tmp_path, monkeypatch):
     engine = create_engine(f"sqlite:///{tmp_path / 'delivery-protocol.db'}")
     ub.Base.metadata.create_all(engine)
     session = sessionmaker(bind=engine)()
-    current_user = SimpleNamespace(id=1, role_download=lambda: True)
+    current_user = SimpleNamespace(
+        id=1,
+        role_download=lambda: True,
+        book_visible=True,
+        filtered_book_calls=[],
+    )
 
     monkeypatch.setattr(ub, "session", session)
     monkeypatch.setattr(module, "ub", ub)
@@ -43,17 +48,48 @@ def delivery_protocol(tmp_path, monkeypatch):
     book = SimpleNamespace(
         id=42,
         title="Queued book",
+        path="Author/Queued book",
         data=[SimpleNamespace(
             format="EPUB", name="Queued book", uncompressed_size=1234,
         )],
     )
+    from cps import calibre_db
+
+    def get_filtered_book(book_id, *args, **kwargs):
+        explicit_user = kwargs.get("user")
+        current_user.filtered_book_calls.append({
+            "book_id": book_id,
+            "user": explicit_user,
+            "allow_show_archived": kwargs.get("allow_show_archived", False),
+            "allow_show_hidden": kwargs.get("allow_show_hidden", False),
+        })
+        if (book_id == book.id and explicit_user is current_user
+                and current_user.book_visible):
+            return book
+        return None
+
+    monkeypatch.setattr(calibre_db, "get_filtered_book", get_filtered_book)
+    # Keep the old unfiltered path live so the revocation test is genuinely red
+    # until the download route switches to the explicit-user filtered lookup.
+    monkeypatch.setattr(
+        calibre_db, "get_book",
+        lambda book_id: book if book_id == book.id else None,
+    )
+    visible_book = calibre_db.get_filtered_book(
+        book.id,
+        allow_show_archived=True,
+        allow_show_hidden=True,
+        user=current_user,
+    )
+    assert visible_book is book
     device_delivery.queue_book_for_device(
         session=session,
         user_id=1,
         device_public_id=device.public_id,
-        book=book,
+        book=visible_book,
     )
     session.commit()
+    current_user.filtered_book_calls.clear()
 
     yield app.test_client(), session, current_user, device, module
     session.close()
@@ -83,6 +119,42 @@ def _complete(client, delivery, **overrides):
     }
     payload.update(overrides)
     return client.put("/kosync/syncs/deliveries/complete", json=payload)
+
+
+def _download_headers(delivery):
+    return {
+        "X-CWNG-Device-ID": "first-runtime-device",
+        "X-CWNG-Device-Name": "First reader",
+        "X-CWNG-Claim-Token": delivery["claim_token"],
+    }
+
+
+def _prepare_delivery_file(tmp_path, monkeypatch):
+    root = tmp_path / "library"
+    book_dir = root / "Author" / "Queued book"
+    book_dir.mkdir(parents=True)
+    payload = b"phase-two-delivery-bytes"
+    (book_dir / "Queued book.epub").write_bytes(payload)
+
+    from cps import calibre_db, config
+    data = SimpleNamespace(
+        format="EPUB", name="Queued book", uncompressed_size=len(payload),
+    )
+    monkeypatch.setattr(
+        calibre_db, "get_book_format",
+        lambda book_id, fmt: data if book_id == 42 and fmt == "EPUB" else None,
+    )
+    monkeypatch.setattr(config, "get_book_path", lambda: str(root))
+    return payload
+
+
+def _expected_download_filter_call(current_user):
+    return [{
+        "book_id": 42,
+        "user": current_user,
+        "allow_show_archived": True,
+        "allow_show_hidden": True,
+    }]
 
 
 def test_real_route_claim_repeat_and_complete_are_idempotent(delivery_protocol):
@@ -116,32 +188,11 @@ def test_claimed_download_streams_only_to_the_owning_device(
         delivery_protocol, tmp_path, monkeypatch):
     client, _session, current_user, _device, _module = delivery_protocol
     delivery = _claim(client).get_json()["delivery"]
-    root = tmp_path / "library"
-    book_dir = root / "Author" / "Queued book"
-    book_dir.mkdir(parents=True)
-    payload = b"phase-two-delivery-bytes"
-    (book_dir / "Queued book.epub").write_bytes(payload)
-
-    # cps.calibre_db is an application singleton rather than an importable
-    # module on every install, so patch the package attribute used by the
-    # route's local import.
-    from cps import calibre_db, config
-    book = SimpleNamespace(id=42, path="Author/Queued book")
-    data = SimpleNamespace(format="EPUB", name="Queued book", uncompressed_size=len(payload))
-    monkeypatch.setattr(calibre_db, "get_book", lambda book_id: book if book_id == 42 else None)
-    monkeypatch.setattr(
-        calibre_db, "get_book_format",
-        lambda book_id, fmt: data if book_id == 42 and fmt == "EPUB" else None,
-    )
-    monkeypatch.setattr(config, "get_book_path", lambda: str(root))
+    payload = _prepare_delivery_file(tmp_path, monkeypatch)
 
     response = client.get(
         delivery["download_path"].replace("/syncs/", "/kosync/syncs/", 1),
-        headers={
-            "X-CWNG-Device-ID": "first-runtime-device",
-            "X-CWNG-Device-Name": "First reader",
-            "X-CWNG-Claim-Token": delivery["claim_token"],
-        },
+        headers=_download_headers(delivery),
     )
     current_user.id = 2
     stolen = client.get(
@@ -156,7 +207,38 @@ def test_claimed_download_streams_only_to_the_owning_device(
     assert response.status_code == 200
     assert response.data == payload
     assert "attachment" in response.headers["Content-Disposition"]
+    assert current_user.filtered_book_calls == _expected_download_filter_call(
+        current_user,
+    )
     assert stolen.status_code == 409
+
+
+def test_download_rechecks_visibility_after_claim_and_refuses_revoked_book(
+        delivery_protocol, tmp_path, monkeypatch):
+    client, session, current_user, _device, _module = delivery_protocol
+    assert current_user.book_visible is True
+    delivery = _claim(client).get_json()["delivery"]
+    _prepare_delivery_file(tmp_path, monkeypatch)
+
+    # The delivery was queued and claimed while this user could see the book.
+    # A later library/restriction change must revoke the byte stream too.
+    current_user.book_visible = False
+    response = client.get(
+        delivery["download_path"].replace("/syncs/", "/kosync/syncs/", 1),
+        headers=_download_headers(delivery),
+    )
+
+    assert response.status_code == 410
+    assert response.get_json() == {
+        "error": "delivery_file_unavailable",
+        "message": "Delivery is no longer available",
+    }
+    assert current_user.filtered_book_calls == _expected_download_filter_call(
+        current_user,
+    )
+    row = session.query(ub.DeviceBookDelivery).one()
+    assert row.state == device_delivery.FAILED
+    assert row.failure_reason == "Delivery is no longer available"
 
 
 def test_empty_queue_is_an_explicit_success(delivery_protocol):
