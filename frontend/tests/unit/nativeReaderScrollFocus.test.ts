@@ -19,13 +19,9 @@
  *
  * WHAT THIS DOES NOT CATCH, stated plainly so the green is not read as more
  * than it is:
- *   - It is a TEXT SCAN, not a renderer and not a browser. It cannot show that
- *     focus actually lands, or that arrow keys actually scroll. The frontend
- *     ships no DOM test framework on purpose (adding one is a new dependency,
- *     operator-gated), and the Playwright harness drives Chromium -- the one
- *     engine where the bug does NOT reproduce -- so an e2e assertion there
- *     would confirm nothing about Safari either. The discriminating test needs
- *     WebKit and does not exist yet.
+ *   - It is a TEXT SCAN, not a renderer and not a browser. The behavioral
+ *     focus-and-scroll claim is pinned separately by
+ *     e2e/native-reader-keyboard-scroll.spec.ts in the WebKit-only project.
  *   - It pins the fix's shape, so a refactor that keeps the behaviour by other
  *     means (say, moving the scroll to the document) fails here spuriously.
  *     That is the trade for having any executable guard at all; treat a failure
@@ -40,6 +36,8 @@ import path from 'node:path';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = readFileSync(path.join(HERE, '../../src/pages/NativeReader.tsx'), 'utf8');
 const CSS = readFileSync(path.join(HERE, '../../src/pages/NativeReader.module.css'), 'utf8');
+const PLAYWRIGHT = readFileSync(path.join(HERE, '../../playwright.config.ts'), 'utf8');
+const WORKFLOW = readFileSync(path.join(HERE, '../../../.github/workflows/tests.yml'), 'utf8');
 
 test('the reader shell still relies on an inner scroll container', () => {
   // The premise of the whole finding. If either of these stops being true the
@@ -66,4 +64,15 @@ test('focus on the scroll container is visible, not clipped by the fixed shell',
   assert.ok(rule, '.body has no focus-visible style');
   assert.match(rule[0], /outline:/, '.body:focus-visible does not draw an outline');
   assert.match(rule[0], /outline-offset:\s*-/, 'focus ring is not inset, so it clips at the shell edge');
+});
+
+test('the behavioral regression stays routed through WebKit in CI', () => {
+  assert.match(PLAYWRIGHT, /name:\s*'webkit-reader'/, 'the focused WebKit project is missing');
+  assert.match(PLAYWRIGHT, /testMatch:\s*WEBKIT_READER_SPEC/, 'the reader spec is not scoped to WebKit');
+  assert.match(PLAYWRIGHT, /devices\['Desktop Safari'\]/, 'the reader project is not using WebKit');
+  assert.match(
+    WORKFLOW,
+    /playwright install --with-deps chromium webkit/,
+    'CI does not install the WebKit browser required by the reader project',
+  );
 });
