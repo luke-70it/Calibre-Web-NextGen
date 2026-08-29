@@ -1528,9 +1528,16 @@ class KoboAnnotationSeedCapture(Base):
         server_default=text("'upstream_capture'"),
     )
     failure_reason = Column(String(64), nullable=True)
+    reconciliation_conflict_count = Column(
+        Integer, nullable=False, default=0, server_default=text("0"),
+    )
     book_state = relationship("KoboAnnotationBookState", back_populates="seed_captures")
     pages = relationship(
         "KoboAnnotationSeedCapturePage", back_populates="seed_capture",
+        cascade="all, delete-orphan",
+    )
+    row_baselines = relationship(
+        "KoboAnnotationSeedRowBaseline", back_populates="seed_capture",
         cascade="all, delete-orphan",
     )
 
@@ -1571,6 +1578,34 @@ class KoboAnnotationSeedCapturePage(Base):
     __table_args__ = (
         UniqueConstraint('seed_capture_id', 'page_number', name='uq_kascp_capture_page'),
         Index('ix_kascp_capture', 'seed_capture_id', 'page_number'),
+    )
+
+
+class KoboAnnotationSeedRowBaseline(Base):
+    """Server-owned per-row CAS evidence for one upstream seed capture."""
+    __tablename__ = 'kobo_annotation_seed_row_baseline'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    seed_capture_id = Column(
+        Integer, ForeignKey('kobo_annotation_seed_capture.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    annotation_key = Column(String, nullable=False)
+    # Deliberately not a foreign key: deletion/reinsertion is itself CAS
+    # divergence and the historical identity must survive to prove it.
+    annotation_row_id = Column(Integer, nullable=True)
+    content_revision = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    content_sha256 = Column(String(64), nullable=True)
+    seed_capture = relationship(
+        "KoboAnnotationSeedCapture", back_populates="row_baselines",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            'seed_capture_id', 'annotation_key',
+            name='uq_kasrb_capture_annotation',
+        ),
+        Index('ix_kasrb_capture', 'seed_capture_id'),
     )
 
 
@@ -3688,6 +3723,7 @@ def migrate_kobo_annotation_seed_pipeline(engine, _session):
             KoboAnnotationBookState.__table__,
             KoboAnnotationSeedCapture.__table__,
             KoboAnnotationSeedCapturePage.__table__,
+            KoboAnnotationSeedRowBaseline.__table__,
         ],
         checkfirst=True,
     )
@@ -3714,6 +3750,11 @@ def migrate_kobo_annotation_seed_pipeline(engine, _session):
                 "kobo_annotation_seed_capture",
                 "started_authority_revision",
                 "started_authority_revision INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "kobo_annotation_seed_capture",
+                "reconciliation_conflict_count",
+                "reconciliation_conflict_count INTEGER NOT NULL DEFAULT 0",
             ),
         )
         for table_name, column_name, ddl in additions:
@@ -3779,6 +3820,7 @@ _KOBO_TWO_WAY_TABLES = (
     KoboDeviceBookAnnotationState.__table__,
     KoboAnnotationSeedCapture.__table__,
     KoboAnnotationSeedCapturePage.__table__,
+    KoboAnnotationSeedRowBaseline.__table__,
     KoboAnnotationPageSnapshot.__table__,
     KoboAnnotationPageCursor.__table__,
 )

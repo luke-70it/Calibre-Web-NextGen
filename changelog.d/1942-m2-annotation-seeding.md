@@ -12,3 +12,8 @@
   newer server edits and tombstones, serializes reconciliation per book,
   expires abandoned captures, isolates later-device failures, and provides an
   authenticated retry for an initial quarantined seed.
+- **New/reset Kobo devices now establish routing evidence before their first
+  local annotation response.** Authority lookup failures remain tri-state,
+  corrupt capture proof is rebuilt from the complete live set, reconciliation
+  uses server-owned row revisions, and post-authority sets over 100 are flagged
+  while remaining losslessly available in one complete response.

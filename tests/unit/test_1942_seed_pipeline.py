@@ -165,6 +165,23 @@ def _accepted_capture_with_page(
     return capture
 
 
+def _accepted_routing_capture(session, state, device_id):
+    now = datetime.now(timezone.utc)
+    capture = ub.KoboAnnotationSeedCapture(
+        book_state_id=state.id,
+        device_id=device_id,
+        started_at=now,
+        started_authority_revision=state.authority_revision or 0,
+        completed_at=now,
+        annotation_count=0,
+        page_count=0,
+        result="accepted",
+        seed_kind="routing_only",
+    )
+    session.add(capture)
+    return capture
+
+
 def _annotation_row(annotation_id, **overrides):
     values = {
         "user_id": USER_ID,
@@ -205,16 +222,6 @@ def test_capture_page_persists_reconciles_and_repairs_legacy_content_id(
     _book(monkeypatch)
     _device(session, DEVICE_A)
     _state(session, content_id=f"legacy-book:{BOOK_ID}")
-    session.add(ub.Annotation(
-        user_id=USER_ID,
-        book_id=BOOK_ID,
-        annotation_id="seeded-1",
-        source="kobo",
-        origin_device_id=None,
-        content_revision=4,
-        client_modified_at=datetime(2026, 8, 28, 1, 0, 0),
-        hidden=False,
-    ))
     session.commit()
     upstream = _upstream_response([_wire_annotation("seeded-1")])
     monkeypatch.setattr(rs, "proxy_to_kobo_reading_services", lambda **_k: upstream)
@@ -247,7 +254,7 @@ def test_capture_page_persists_reconciles_and_repairs_legacy_content_id(
     assert state.opaque_content_source == "wire_attachments_verified"
     assert state.opaque_content_checked_at is not None
     assert annotation.origin_device_id == DEVICE_A
-    assert annotation.content_revision == 5
+    assert annotation.content_revision == 1
     assert materialization.provenance == "kobo_cloud_seed"
     assert materialization.serveable is True
 
@@ -394,7 +401,10 @@ def test_ever_authoritative_gate_failure_keeps_get_local_and_patch_byte_exact(
     app, session, monkeypatch,
 ):
     _book(monkeypatch)
-    _state(session, status="quarantined", ever=True, content_id=OWNED)
+    _device(session, DEVICE_A)
+    state = _state(session, status="quarantined", ever=True, content_id=OWNED)
+    session.flush()
+    _accepted_routing_capture(session, state, DEVICE_A)
     session.commit()
     monkeypatch.setattr(rs, "_stage_patch_for_recovery", lambda *_a, **_k: None)
     monkeypatch.setattr(
@@ -408,10 +418,10 @@ def test_ever_authoritative_gate_failure_keeps_get_local_and_patch_byte_exact(
     with app.test_request_context(
         f"/api/v3/content/{OWNED}/annotations", method="PATCH", json={},
     ):
-        g.annotation_origin_device_id = 999
+        g.annotation_origin_device_id = DEVICE_A
         response = rs.handle_annotations.__wrapped__(OWNED)
     with _request(app):
-        g.annotation_origin_device_id = 999
+        g.annotation_origin_device_id = DEVICE_A
         fetched = rs.handle_annotations.__wrapped__(OWNED)
 
     assert response.status_code == 204
@@ -990,6 +1000,341 @@ def test_stale_capture_authority_revision_is_rejected_before_reconciliation(
     assert session.query(ub.Annotation).count() == 0
 
 
+def test_new_device_first_get_commits_routing_only_before_rendering_live_set(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_B)
+    state = _state(
+        session, status="authoritative", ever=True, content_id=OWNED,
+    )
+    state.authority_revision = 4
+    session.add(_annotation_row("server-A"))
+    session.commit()
+    original_render = authority.render_owned_annotations
+    proof_seen_before_render = []
+
+    def render_with_precondition(**kwargs):
+        capture = (
+            session.query(ub.KoboAnnotationSeedCapture)
+            .filter_by(device_id=DEVICE_B, result="accepted")
+            .one()
+        )
+        proof_seen_before_render.append(capture.seed_kind)
+        return original_render(**kwargs)
+
+    monkeypatch.setattr(authority, "render_owned_annotations", render_with_precondition)
+    monkeypatch.setattr(
+        rs, "proxy_to_kobo_reading_services",
+        lambda **_k: pytest.fail("download-shaped first GET unexpectedly proxied"),
+    )
+
+    with _request(app, headers={"If-None-Match": 'W/"A:kobo-manifest"'}):
+        g.annotation_origin_device_id = DEVICE_B
+        response = rs.handle_annotations.__wrapped__(OWNED)
+
+    assert response.status_code == 200
+    assert proof_seen_before_render == ["routing_only"]
+    assert [row["id"] for row in json.loads(response.get_data())["annotations"]] == [
+        "server-A",
+    ]
+
+
+def test_new_device_first_get_with_prior_cwng_etag_proxies_never_503(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_B)
+    state = _state(
+        session, status="authoritative", ever=True, content_id=OWNED,
+    )
+    state.authority_revision = 4
+    session.add(_annotation_row("server-A"))
+    session.commit()
+    proxy_calls = []
+
+    def proxy(**_kwargs):
+        proxy_calls.append(True)
+        return _upstream_response([])
+
+    monkeypatch.setattr(rs, "proxy_to_kobo_reading_services", proxy)
+    with _request(
+        app,
+        headers={"If-None-Match": 'W/"CWNG:old-generation:3:deadbeef"'},
+    ):
+        g.annotation_origin_device_id = DEVICE_B
+        response = rs.handle_annotations.__wrapped__(OWNED)
+
+    assert response.status_code == 200
+    assert response.status_code != 503
+    assert proxy_calls == [True]
+    assert not session.query(ub.KoboAnnotationSeedCapture).filter_by(
+        device_id=DEVICE_B, seed_kind="routing_only",
+    ).count()
+
+
+def test_corrupt_authoritative_capture_rebuilds_live_proof_never_503_and_recovers(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    state = _state(
+        session, status="authoritative", ever=True, content_id=OWNED,
+    )
+    state.authority_revision = 2
+    session.flush()
+    corrupt = _accepted_capture_with_page(
+        session, state, DEVICE_A, [_wire_annotation("live-A")],
+    )
+    session.flush()
+    corrupt.pages[0].response_body_gzip = b"not-gzip"
+    session.add(_annotation_row("live-A"))
+    session.commit()
+    monkeypatch.setattr(
+        rs, "proxy_to_kobo_reading_services",
+        lambda **_k: pytest.fail("corrupt historical proof resumed stale proxy"),
+    )
+
+    with _request(app):
+        g.annotation_origin_device_id = DEVICE_A
+        response = rs.handle_annotations.__wrapped__(OWNED)
+
+    session.refresh(state)
+    session.refresh(corrupt)
+    assert response.status_code == 200
+    assert response.status_code != 503
+    assert [row["id"] for row in json.loads(response.get_data())["annotations"]] == [
+        "live-A",
+    ]
+    assert corrupt.result == "failed"
+    assert state.authority_status == "authoritative"
+    assert state.quarantine_reason == "capture_evidence_rebuilt_live"
+    assert session.query(ub.KoboAnnotationSeedCapture).filter_by(
+        device_id=DEVICE_A, result="accepted", seed_kind="routing_only",
+    ).count() == 1
+
+    monkeypatch.setattr(kobo_two_way_api, "_book_titles", lambda _ids: {})
+    monkeypatch.setattr(kobo_two_way_api, "current_user", rs.current_user)
+    with app.test_request_context(
+        "/api/v1/account/kobo-two-way-annotations/books/retry",
+        method="POST",
+        json={"book_id": BOOK_ID},
+    ):
+        recovered = kobo_two_way_api.retry_quarantined_kobo_two_way_book()
+    session.refresh(state)
+    assert recovered.status_code == 200
+    assert state.authority_status == "authoritative"
+    assert state.quarantine_reason is None
+
+
+def test_ever_authoritative_lookup_failure_uses_known_local_evidence_for_get_patch(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    state = _state(
+        session, status="authoritative", ever=True, content_id=OWNED,
+    )
+    state.authority_revision = 2
+    session.flush()
+    _accepted_routing_capture(session, state, DEVICE_A)
+    session.add(_annotation_row("known-local"))
+    session.commit()
+    monkeypatch.setattr(
+        authority, "ever_authoritative",
+        lambda *_a: authority.AUTHORITY_LOOKUP_FAILED,
+    )
+    monkeypatch.setattr(rs, "_stage_patch_for_recovery", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        rs, "proxy_to_kobo_reading_services",
+        lambda **_k: pytest.fail("ambiguous first lookup swallowed sticky evidence"),
+    )
+
+    with app.test_request_context(
+        f"/api/v3/content/{OWNED}/annotations", method="PATCH", json={},
+    ):
+        g.annotation_origin_device_id = DEVICE_A
+        patched = rs.handle_annotations.__wrapped__(OWNED)
+    with _request(app):
+        g.annotation_origin_device_id = DEVICE_A
+        fetched = rs.handle_annotations.__wrapped__(OWNED)
+
+    assert patched.status_code == 204
+    assert patched.headers["Content-Type"] == "text/html"
+    assert patched.headers["Content-Length"] == "0"
+    assert fetched.status_code == 200
+    assert [row["id"] for row in json.loads(fetched.get_data())["annotations"]] == [
+        "known-local",
+    ]
+
+
+def test_authority_lookup_failed_pre_authority_proxies_get_and_patch_status_quo(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    _state(session, status="unseeded", ever=False, content_id=OWNED)
+    session.commit()
+    monkeypatch.setattr(
+        authority, "ever_authoritative",
+        lambda *_a: authority.AUTHORITY_LOOKUP_FAILED,
+    )
+    monkeypatch.setattr(
+        authority, "authority_evidence_for_route",
+        lambda *_a: authority.AUTHORITY_LOOKUP_FAILED,
+    )
+    monkeypatch.setattr(
+        rs.config, "config_kobo_two_way_annotation_sync", False, raising=False,
+    )
+    monkeypatch.setattr(rs, "_stage_patch_for_recovery", lambda *_a, **_k: None)
+    proxy_calls = []
+
+    def proxy(**_kwargs):
+        proxy_calls.append(request.method)
+        return _upstream_response([])
+
+    from flask import request
+    monkeypatch.setattr(rs, "proxy_to_kobo_reading_services", proxy)
+    with _request(app):
+        g.annotation_origin_device_id = DEVICE_A
+        fetched = rs.handle_annotations.__wrapped__(OWNED)
+    with app.test_request_context(
+        f"/api/v3/content/{OWNED}/annotations", method="PATCH", json={},
+    ):
+        g.annotation_origin_device_id = DEVICE_A
+        patched = rs.handle_annotations.__wrapped__(OWNED)
+
+    assert fetched.status_code == 200
+    assert patched.status_code == 200
+    assert proxy_calls == ["GET", "PATCH"]
+
+
+def test_authoritative_patch_growth_over_100_flags_and_serves_complete_single_page(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    state = _state(
+        session, status="authoritative", ever=True, content_id=OWNED,
+    )
+    state.authority_revision = 5
+    session.flush()
+    _accepted_routing_capture(session, state, DEVICE_A)
+    session.add_all([_annotation_row(f"row-{index:03d}") for index in range(100)])
+    session.commit()
+    monkeypatch.setattr(rs, "_stage_patch_for_recovery", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        rs, "proxy_to_kobo_reading_services",
+        lambda **_k: pytest.fail("oversize authoritative set contacted stale Kobo"),
+    )
+
+    with app.test_request_context(
+        f"/api/v3/content/{OWNED}/annotations",
+        method="PATCH",
+        json={"updatedAnnotations": [_wire_annotation("row-100")]},
+    ):
+        g.annotation_origin_device_id = DEVICE_A
+        patched = rs.handle_annotations.__wrapped__(OWNED)
+    with _request(app):
+        g.annotation_origin_device_id = DEVICE_A
+        fetched = rs.handle_annotations.__wrapped__(OWNED)
+
+    session.refresh(state)
+    payload = json.loads(fetched.get_data())
+    assert patched.status_code == 204
+    assert patched.get_data() == b""
+    assert patched.headers["Content-Type"] == "text/html"
+    assert patched.headers["Content-Length"] == "0"
+    assert state.quarantine_reason == "oversize_single_page"
+    assert fetched.status_code == 200
+    assert len(payload["annotations"]) == 101
+    assert {row["id"] for row in payload["annotations"]} == {
+        *(f"row-{index:03d}" for index in range(101)),
+    }
+    assert payload["nextPageOffsetToken"] is None
+
+
+def test_clock_skewed_kobo_row_uses_server_baseline_local_wins_and_surfaces_conflict(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    _state(session, status="unseeded", ever=False, content_id=OWNED)
+    future_clock = datetime(2035, 1, 1, 0, 0, 0)
+    session.add(_annotation_row(
+        "skewed",
+        note_text="newer-local",
+        client_modified_at=future_clock,
+        server_modified_at=datetime(2026, 8, 28, 0, 0, 0),
+        content_revision=7,
+    ))
+    session.commit()
+    stale = _wire_annotation("skewed")
+    stale["noteText"] = "stale-cloud"
+    stale["clientLastModifiedUtc"] = "2035-01-01T00:00:00.000Z"
+    monkeypatch.setattr(
+        rs, "proxy_to_kobo_reading_services",
+        lambda **_k: _upstream_response([stale]),
+    )
+
+    with _request(app):
+        g.annotation_origin_device_id = DEVICE_A
+        response = rs.handle_annotations.__wrapped__(OWNED)
+
+    row = session.query(ub.Annotation).filter_by(annotation_id="skewed").one()
+    state = session.query(ub.KoboAnnotationBookState).one()
+    capture = session.query(ub.KoboAnnotationSeedCapture).one()
+    baseline = session.query(ub.KoboAnnotationSeedRowBaseline).one()
+    assert response.status_code == 200
+    assert row.note_text == "newer-local"
+    assert row.content_revision == 7
+    assert baseline.annotation_row_id == row.id
+    assert baseline.content_revision == 7
+    assert baseline.content_sha256
+    assert capture.result == "accepted"
+    assert capture.failure_reason == "seed_row_conflict_local_won"
+    assert capture.reconciliation_conflict_count == 1
+    assert state.authority_status == "authoritative"
+    assert state.quarantine_reason == "seed_row_conflict_local_won"
+    assert session.query(ub.KoboAnnotationMaterialization).count() == 0
+
+
+def test_row_changed_after_page_commit_fails_baseline_cas_and_keeps_local(
+    app, session, monkeypatch,
+):
+    _book(monkeypatch)
+    _device(session, DEVICE_A)
+    _state(session, status="unseeded", ever=False, content_id=OWNED)
+    row = _annotation_row("raced")
+    session.add(row)
+    session.commit()
+    original_reconcile = seeding._reconcile_and_promote
+
+    def mutate_then_reconcile(capture_id, **kwargs):
+        current = session.query(ub.Annotation).filter_by(annotation_id="raced").one()
+        current.note_text = "local-after-page-commit"
+        current.content_revision += 1
+        current.server_modified_at = datetime.now(timezone.utc)
+        session.commit()
+        return original_reconcile(capture_id, **kwargs)
+
+    monkeypatch.setattr(seeding, "_reconcile_and_promote", mutate_then_reconcile)
+    monkeypatch.setattr(
+        rs, "proxy_to_kobo_reading_services",
+        lambda **_k: _upstream_response([_wire_annotation("raced")]),
+    )
+    with _request(app):
+        g.annotation_origin_device_id = DEVICE_A
+        rs.handle_annotations.__wrapped__(OWNED)
+
+    session.refresh(row)
+    capture = session.query(ub.KoboAnnotationSeedCapture).one()
+    assert row.note_text == "local-after-page-commit"
+    assert row.content_revision == 2
+    assert capture.reconciliation_conflict_count == 1
+    assert capture.failure_reason == "seed_row_conflict_local_won"
+
+
 def test_additive_migration_is_idempotent_and_backfills_safety_history(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'pre-m2.db'}", future=True)
     with engine.begin() as conn:
@@ -1045,6 +1390,10 @@ def test_additive_migration_is_idempotent_and_backfills_safety_history(tmp_path)
     assert columns["kobo_annotation_seed_capture"].count(
         "started_authority_revision",
     ) == 1
+    assert columns["kobo_annotation_seed_capture"].count(
+        "reconciliation_conflict_count",
+    ) == 1
+    assert "kobo_annotation_seed_row_baseline" in inspect(engine).get_table_names()
     assert "uq_kasc_pending_book_owner" in {
         row["name"] for row in inspect(engine).get_indexes(
             "kobo_annotation_seed_capture",

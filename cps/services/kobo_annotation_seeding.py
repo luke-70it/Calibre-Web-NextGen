@@ -35,6 +35,7 @@ _SAFE_FAILURE_REASONS = frozenset({
     "seed_local_set_missing_captured_id",
     "seed_local_set_requires_pagination",
     "seed_response_invalid",
+    "seed_row_conflict_local_won",
 })
 
 
@@ -406,37 +407,97 @@ def _visible_ids(user_id, book_id):
     }
 
 
-def _server_evidence_is_newer(
-    annotation, payload, capture, annotation_sync, book,
-):
-    """Prefer current server state when a cloud seed cannot prove it is newer."""
-    if annotation is None:
-        return False
-    if annotation_sync.kobo_payload_matches_annotation(annotation, payload, book):
-        return False
-    if annotation.source == "webreader":
-        return True
+_ROW_EVIDENCE_FIELDS = (
+    "annotation_id", "source", "annotation_type", "highlighted_text",
+    "highlight_color", "note_text", "content_id", "start_container_path",
+    "start_container_child_index", "start_offset", "end_container_path",
+    "end_container_child_index", "end_offset", "context_string",
+    "chapter_progress", "cfi_range", "position_type", "pdf_page",
+    "pdf_quad_json", "comic_page", "start_xpointer", "end_xpointer",
+    "hidden", "client_modified_at", "server_modified_at",
+)
 
-    server_modified = _as_utc(annotation.server_modified_at)
-    capture_started = _as_utc(capture.started_at)
-    client_modified = annotation_sync.parse_client_modified_utc(
-        payload.get("clientLastModifiedUtc"),
+
+def _row_content_sha256(annotation):
+    """Hash server-owned generic content for durable reconciliation CAS."""
+    if annotation is None:
+        return None
+    values = []
+    for field in _ROW_EVIDENCE_FIELDS:
+        value = getattr(annotation, field, None)
+        if isinstance(value, datetime):
+            value = _as_utc(value)
+            value = value.isoformat() if value is not None else None
+        values.append(value)
+    encoded = json.dumps(
+        values, ensure_ascii=True, separators=(",", ":"), default=str,
+    ).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _snapshot_row_baselines(capture, annotations, *, user_id, book_id):
+    """Persist the first server revision/digest seen for every captured id."""
+    annotation_ids = {
+        payload.get("id") for payload in annotations
+        if isinstance(payload, dict)
+        and isinstance(payload.get("id"), str)
+        and payload.get("id")
+    }
+    if not annotation_ids:
+        return
+    existing = {
+        row[0] for row in (
+            ub.session.query(ub.KoboAnnotationSeedRowBaseline.annotation_key)
+            .filter(
+                ub.KoboAnnotationSeedRowBaseline.seed_capture_id == capture.id,
+                ub.KoboAnnotationSeedRowBaseline.annotation_key.in_(annotation_ids),
+            )
+            .all()
+        )
+    }
+    rows = (
+        ub.session.query(ub.Annotation)
+        .filter(
+            ub.Annotation.user_id == user_id,
+            ub.Annotation.book_id == book_id,
+            ub.Annotation.annotation_id.in_(annotation_ids),
+        )
+        .all()
     )
-    client_modified = _as_utc(client_modified)
-    if server_modified is not None and (
-        client_modified is None or server_modified >= client_modified
-    ):
-        return True
-    if (
-        server_modified is not None
-        and capture_started is not None
-        and server_modified >= capture_started
-    ):
-        return True
-    materialization = getattr(annotation, "kobo_materialization", None)
+    by_key = {row.annotation_id: row for row in rows}
+    for annotation_key in annotation_ids - existing:
+        annotation = by_key.get(annotation_key)
+        revision = getattr(annotation, "content_revision", 0) if annotation is not None else 0
+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
+            revision = 0
+        ub.session.add(ub.KoboAnnotationSeedRowBaseline(
+            seed_capture_id=capture.id,
+            annotation_key=annotation_key,
+            annotation_row_id=getattr(annotation, "id", None),
+            content_revision=revision,
+            content_sha256=_row_content_sha256(annotation),
+        ))
+
+
+def _baseline_allows_insert(baseline, annotation):
+    """True only when this capture durably observed the row as absent."""
     return bool(
-        materialization is not None
-        and materialization.materialization_revision != annotation.content_revision
+        baseline is not None
+        and baseline.annotation_row_id is None
+        and baseline.content_revision == 0
+        and baseline.content_sha256 is None
+        and annotation is None
+    )
+
+
+def _baseline_still_matches(baseline, annotation):
+    """Server-owned CAS check; client timestamps intentionally play no role."""
+    if baseline is None or annotation is None:
+        return False
+    return bool(
+        baseline.annotation_row_id == annotation.id
+        and baseline.content_revision == annotation.content_revision
+        and baseline.content_sha256 == _row_content_sha256(annotation)
     )
 
 
@@ -520,7 +581,7 @@ def seed_coverage(*, user_id, book_state_id):
 
 
 def accept_routing_only_seed(*, user_id, book_id, device_id, log):
-    """Record device coverage after an ever-authoritative local GET.
+    """Commit device coverage before an ever-authoritative local GET.
 
     Kobo's cloud is stale after local PATCH acknowledgements begin, so a new
     device must receive the local complete set. Its acceptance evidence is
@@ -559,12 +620,76 @@ def accept_routing_only_seed(*, user_id, book_id, device_id, log):
         return False
 
 
+def rebuild_authoritative_device_evidence(*, user_id, book_id, device_id, log):
+    """Replace unreadable historical capture proof with current live proof.
+
+    The authoritative generic rows are the monotonic store. Corrupt compressed
+    capture bytes are diagnostics, not permission to emit 5xx or resume a stale
+    Kobo replacement set. Retire only this device's unreadable evidence and
+    commit routing-only proof before the caller renders the live set.
+    """
+    try:
+        state = _state_for_book(user_id, book_id)
+        if state is None or not state.ever_authoritative:
+            return False
+        captures = (
+            ub.session.query(ub.KoboAnnotationSeedCapture)
+            .filter(
+                ub.KoboAnnotationSeedCapture.book_state_id == state.id,
+                ub.KoboAnnotationSeedCapture.device_id == device_id,
+                ub.KoboAnnotationSeedCapture.result == "accepted",
+                ub.KoboAnnotationSeedCapture.seed_kind == "upstream_capture",
+            )
+            .all()
+        )
+        rebuilt = False
+        for capture in captures:
+            invalid = False
+            try:
+                _pages, annotations, _raw_pages = _load_captured_pages(capture.id)
+                invalid = any(
+                    not isinstance(payload, dict)
+                    or not isinstance(payload.get("id"), str)
+                    or not payload.get("id")
+                    for payload in annotations
+                )
+            except Exception:
+                invalid = True
+            if not invalid:
+                continue
+            capture.result = "failed"
+            capture.failure_reason = "seed_response_invalid"
+            rebuilt = True
+        if not rebuilt:
+            return False
+        state.quarantine_reason = "capture_evidence_rebuilt_live"
+        ub.session.flush()
+        return accept_routing_only_seed(
+            user_id=user_id, book_id=book_id, device_id=device_id, log=log,
+        )
+    except Exception:
+        ub.session.rollback()
+        log.exception(
+            "Kobo authoritative capture evidence rebuild failed "
+            "user_id=%s book_id=%s", user_id, book_id,
+        )
+        return False
+
+
 def recover_quarantined_book(*, user_id, book_id):
-    """User-scoped state transition used by the authenticated retry API."""
+    """User-scoped recovery for seed quarantine or surfaced proof conflict."""
     state = _state_for_book(user_id, book_id)
     if state is None:
         return "not_found", None
-    if state.authority_status != "quarantined":
+    recoverable_authoritative_reason = state.quarantine_reason in {
+        "capture_evidence_rebuilt_live",
+        "seed_row_conflict_local_won",
+    }
+    if state.authority_status != "quarantined" and not (
+        state.ever_authoritative
+        and state.authority_status == "authoritative"
+        and recoverable_authoritative_reason
+    ):
         return "conflict", state
     now = _now()
     pending = (
@@ -643,6 +768,18 @@ def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
                 records = []
             raw_by_id.update({record.annotation_id: record for record in records})
 
+        baselines = {
+            row.annotation_key: row for row in (
+                ub.session.query(ub.KoboAnnotationSeedRowBaseline)
+                .filter(
+                    ub.KoboAnnotationSeedRowBaseline.seed_capture_id == capture_id,
+                )
+                .all()
+            )
+        }
+        conflict_ids = []
+        cas_conflict_count = 0
+
         for payload in annotations:
             annotation = (
                 ub.session.query(ub.Annotation)
@@ -659,11 +796,13 @@ def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
                     annotation, payload, book,
                 )
             )
-            protected_by_server = _server_evidence_is_newer(
-                annotation, payload, capture, annotation_sync, book,
-            )
+            baseline = baselines.get(payload["id"])
+            if baseline is None:
+                raise ValueError("captured annotation has no server baseline")
             applied = False
-            if not equivalent_before and not protected_by_server:
+            if not equivalent_before and _baseline_allows_insert(
+                baseline, annotation,
+            ):
                 applied_row = annotation_sync._upsert_annotation(
                     ub.session,
                     payload,
@@ -675,6 +814,15 @@ def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
                 if applied_row is not None:
                     annotation = applied_row
                     applied = True
+            elif not equivalent_before:
+                # A divergent row that already existed when the page was
+                # persisted is local authority. Even if its client clock ties
+                # or lies in the future, upstream arrival order may not replace
+                # it. The durable revision+digest baseline also catches a row
+                # changed between page commit and reconciliation.
+                if not _baseline_still_matches(baseline, annotation):
+                    cas_conflict_count += 1
+                conflict_ids.append(payload["id"])
             if annotation is None:
                 annotation = (
                     ub.session.query(ub.Annotation)
@@ -763,7 +911,9 @@ def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
     state.authority_revision = (state.authority_revision or 0) + 1
     state.ever_authoritative = True
     state.seeded_at = now
-    state.quarantine_reason = None
+    state.quarantine_reason = (
+        "seed_row_conflict_local_won" if conflict_ids else None
+    )
     state.upstream_seed_etag = capture.upstream_etag
     captured_opaque_status, captured_opaque_source = (
         _captured_opaque_content_status(annotations)
@@ -779,12 +929,21 @@ def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
     capture.page_count = len(pages)
     capture.completed_at = now
     capture.result = "accepted"
-    capture.failure_reason = None
+    capture.failure_reason = (
+        "seed_row_conflict_local_won" if conflict_ids else None
+    )
+    capture.reconciliation_conflict_count = len(conflict_ids)
     capture.seed_kind = "upstream_capture"
     if ub.session_commit() is False:
         return False
 
     coverage = seed_coverage(user_id=user.id, book_state_id=state.id)
+    if conflict_ids:
+        log.warning(
+            "Kobo annotation seed retained divergent local rows "
+            "user_id=%s book_id=%s conflict_count=%s cas_conflict_count=%s",
+            user.id, book.id, len(conflict_ids), cas_conflict_count,
+        )
     log.info(
         "Kobo annotation seed accepted user_id=%s book_id=%s "
         "annotation_count=%s page_count=%s books_partially_seeded=%s "
@@ -830,7 +989,7 @@ def record_proxy_response(
             return _set_failure(
                 capture_id, "seed_response_invalid", quarantine=False, log=log,
             )
-        _annotations, next_offset = parsed
+        annotations, next_offset = parsed
         if next_offset is not None and next_offset == request_offset_token:
             return _set_failure(
                 capture_id, "seed_response_invalid", quarantine=False, log=log,
@@ -871,6 +1030,9 @@ def record_proxy_response(
 
         capture.upstream_etag = response.headers.get("ETag") or capture.upstream_etag
         capture.response_sha256 = digest
+        _snapshot_row_baselines(
+            capture, annotations, user_id=user.id, book_id=book.id,
+        )
         ub.session.flush()
         if ub.session_commit() is False:
             return False

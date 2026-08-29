@@ -248,11 +248,12 @@ def update_kobo_two_way_book():
     "/account/kobo-two-way-annotations/books/retry", methods=["POST"],
 )
 def retry_quarantined_kobo_two_way_book():
-    """Authenticated, user-scoped recovery for a quarantined seed.
+    """Authenticated, user-scoped recovery for seed/proof failures.
 
     Initial-seed quarantine returns to ``unseeded``. Historical rows that had
-    already become authoritative return to local authority because Kobo's
-    cloud has since been starved and cannot safely become the GET source again.
+    already become authoritative remain local because Kobo's cloud has since
+    been starved. Surfaced live-proof rebuilds and local-wins reconciliation
+    conflicts can be acknowledged/cleared without hand-SQL.
     """
     guard = _require_real_user()
     if guard:
@@ -272,9 +273,6 @@ def retry_quarantined_kobo_two_way_book():
     )
     if row is None:
         return _err("not_found", "This book has no Kobo two-way state yet", 404)
-    if row.authority_status != "quarantined":
-        return _err("conflict", "This book is not quarantined", 409)
-
     try:
         from ..services.kobo_annotation_seeding import recover_quarantined_book
         outcome, row = recover_quarantined_book(
@@ -287,7 +285,7 @@ def retry_quarantined_kobo_two_way_book():
     if outcome == "not_found":
         return _err("not_found", "This book has no Kobo two-way state yet", 404)
     if outcome == "conflict":
-        return _err("conflict", "This book is not quarantined", 409)
+        return _err("conflict", "This book has no recoverable seed issue", 409)
     if outcome != "ok":
         return _err("db_error", "Could not retry book seeding", 500)
 

@@ -1,8 +1,16 @@
 # Mission: #1942 M2 annotation seeding pipeline
 
 Updated: 2026-08-29
-Phase: adversarial correction R2 complete
-Status: 9/9 correction outcomes done and verified
+Phase: closure correction R3 delivered
+Status: 5/5 closure outcomes done and verified
+
+## R3 definition of done (closure FIX-FIRST verdict)
+
+- [x] A new/reset device's download-shaped first GET on an ever-authoritative book commits device-specific `routing_only` evidence before rendering; a request carrying prior CWNG-possession evidence proxies instead, never 503.
+- [x] Ever-authoritative GETs never return 503: corrupt capture evidence is rebuilt from the complete live set, and authoritative recovery is supported beyond the quarantined-only path.
+- [x] `ever_authoritative` is tri-state at GET and PATCH routing boundaries; lookup failure is never treated as never-authoritative or silently swallowed.
+- [x] Post-authority growth beyond 100 still acks the device PATCH, advances the local revision, flags `oversize_single_page`, and serves the complete local set in one response with the pending-hardware boundary documented.
+- [x] Reconciliation uses a durable server-owned per-row revision baseline/CAS; divergent rows keep local content and surface the capture conflict. Named regressions, serial focused/full suites, Ruff, and `git diff --check` pass.
 
 ## R2 definition of done (FIX-FIRST verdict)
 
@@ -18,7 +26,7 @@ Status: 9/9 correction outcomes done and verified
 
 ## Now / next action
 
-R2 correction set complete and verified. Commit as `new-usemame`, produce `1942-m2-r2.bundle`, and push if network permits.
+R3 is committed atop exact base `7dc4375fd` as `new-usemame`; a verified complete-history `1942-m2-r3.bundle` is in the writable worktree root.
 
 ## Verification commands
 
@@ -28,6 +36,14 @@ R2 correction set complete and verified. Commit as `new-usemame`, produce `1942-
 - Git: `git diff --check`; inspect scoped diff; verify commit author and remote owner before push/bundle.
 
 ## Decisions and rationale
+
+- 2026-08-29 R3: closure review `/tmp/cwng-m2-review2-last.txt` was read completely (262 lines); it reopens the mission at exact base `7dc4375fdf346453ed287d75cd8e4f937584ce4c`.
+- 2026-08-29 R3: hardware-observed `notes/KOBO-HIGHLIGHTS-STATE.md` §6p establishes the download/re-download GET lifecycle used for pre-serve `routing_only` evidence. A prior CWNG ETag is possession evidence and fails safe to status-quo proxy, never an error response.
+- 2026-08-29 R3: the manager's post-authority oversize decision deliberately supersedes the nominal M2 `≤100` wire cap: local PATCH remains lossless, the book is flagged, and GET returns the complete set in one page. Nickel acceptance is ASSUMED pending the Clara A/B probe.
+- 2026-08-29 R3: corrupt historical capture bytes cannot invalidate the current live authoritative set. Recovery rebuilds proof from live rows and preserves local authority; stale Kobo proxy and GET error responses remain forbidden after authority.
+- 2026-08-29 R3: reconciliation conflicts are resolved by server-owned row revision evidence, never the client clock. CAS divergence keeps the local row and records a privacy-safe conflict signal.
+- 2026-08-29 R3: the new baseline table participates in explicit child-first privacy purge; the adjacent suite caught and verified this integration requirement before delivery.
+- 2026-08-29 R3 delivery: the sandbox rejected the requested parent path `../1942-m2-r3.bundle`; the verified complete-history fallback is `1942-m2-r3.bundle` in this writable worktree root.
 
 - 2026-08-29 R2: adversarial review `/tmp/cwng-m2-review-last.txt` was read completely (318 lines); its FIX-FIRST verdict reopens the mission and invalidates the prior merge-ready claim.
 - 2026-08-29 R2: when the review leaves behavior open, choose fail-safe proxy/status-quo behavior only if the cloud has not yet been starved; once `ever_authoritative=1`, paired GET/PATCH stickiness forbids stale upstream replacement-set GETs.
@@ -52,6 +68,14 @@ R2 correction set complete and verified. Commit as `new-usemame`, produce `1942-
 - 2026-08-29: final spec/runbook audit added capture-derived W1 opaque evidence in `c407da24fe`: a complete set records `absent` only when attachments prove it, records `present` when observed, and never downgrades durable prior `present` evidence.
 
 ## Evidence classification
+
+- OBSERVED R3: exact delivery base is `7dc4375fdf346453ed287d75cd8e4f937584ce4c`.
+- OBSERVED R3: all five closure outcomes are implemented and covered by named regressions for pre-render routing proof, prior-CWNG-ETag proxy, corrupt-proof live rebuild plus authenticated recovery, tri-state GET/PATCH routing, lossless 101-row response, clock-skew local-wins, and post-page-commit CAS divergence.
+- OBSERVED R3: `tests/unit/test_1942_seed_pipeline.py` passes 29/29 serially.
+- OBSERVED R3: required focused compatibility passes 74/74 serially (`#1942`, existing `#1923`, authenticated Kobo two-way API).
+- OBSERVED R3: adjacent schema, Stage-0, scope-migration, and privacy-purge verification passes 67/67 serially.
+- OBSERVED R3: final full unit suite collected 7,622 tests: 7,499 passed, 106 skipped, 17 failed, 6,165 warnings in 242.54s. All 17 are the known managed-sandbox infrastructure set: 10 loopback socket-bind denials and 7 `ps` execution denials; no application assertion failed.
+- OBSERVED R3: scoped Ruff on the new/small implementation and regression files passes; fatal-error Ruff across every changed Python file passes; Python compilation and `git diff --check` pass. A broad whole-file Ruff invocation still reports 13 pre-existing legacy findings outside the changed hunks.
 
 - OBSERVED R2: exact base is `e4be9b4df1bb54afa50aa3cfaa0e5a7276799467`; worktree has no code modifications at reopen.
 - OBSERVED R2: review reproduced paired-authority inversion, membership-substitution promotion, stale-sidecar serving, global quarantine from later-device failure, dead paginated capture stranding, and missing logical reconciliation serialization.

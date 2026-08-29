@@ -452,28 +452,34 @@ def _owned_annotation_patch_ack(capture_session, ownership, entitlement_id):
 def _owned_patch_is_local_authority(ownership, entitlement_id):
     """Use the exact same complete-set proof as the owned GET."""
     try:
+        from cps.services.kobo_annotation_authority import (
+            AUTHORITY_EVER,
+            AUTHORITY_LOOKUP_FAILED,
+            authority_evidence_for_route,
+            ever_authoritative,
+            local_get_is_eligible,
+        )
         # Once CWNG has ever become authoritative, Kobo's cloud copy is known
         # to have drifted because owned PATCHes stopped feeding it. A later
         # instance/user/device gate failure must therefore never resume
         # forwarding against that stale copy.
-        state = (
-            ub.session.query(ub.KoboAnnotationBookState.ever_authoritative)
-            .filter(
-                ub.KoboAnnotationBookState.user_id == current_user.id,
-                ub.KoboAnnotationBookState.book_id == ownership.id,
+        history = ever_authoritative(current_user.id, ownership.id)
+        if history == AUTHORITY_LOOKUP_FAILED:
+            history = authority_evidence_for_route(
+                current_user.id, ownership.id,
             )
-            .first()
-        )
-        if state is not None and bool(state[0]):
+        if history == AUTHORITY_EVER:
             return True
     except Exception:
-        # The ordinary complete-set gate remains independently usable during
-        # startup/schema diagnostics and in isolated route harnesses. Runtime
-        # migrations guarantee the column before real ORM request handling.
-        log.debug("Sticky Kobo PATCH authority lookup unavailable", exc_info=True)
+        history = "lookup_failed"
+        log.exception("Sticky Kobo PATCH authority lookup failed")
 
     try:
-        from cps.services.kobo_annotation_authority import local_get_is_eligible
+        if history == AUTHORITY_LOOKUP_FAILED:
+            # No evidence says this is a starved cloud. Preserve the
+            # pre-authority status-quo path; critically, lookup failure was not
+            # collapsed into a false historical value.
+            return False
         return local_get_is_eligible(
             settings=config,
             user=current_user,
@@ -562,22 +568,49 @@ def _proxy_owned_annotation_get(capture_session, ownership, entitlement_id):
 def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
     """Return one complete eligible local page, otherwise proxy unchanged."""
     sticky = False
+    page_limit = _owned_annotation_page_limit()
     try:
         from cps.services.kobo_annotation_authority import (
+            AUTHORITY_EVER,
+            AUTHORITY_LOOKUP_FAILED,
+            STICKY_GET_LOCAL,
+            authority_evidence_for_route,
             ever_authoritative,
             local_get_is_eligible,
+            prepare_authoritative_device_get,
+            render_authoritative_complete_set,
             render_owned_annotations,
             sticky_render_page_limit,
         )
 
-        page_limit = _owned_annotation_page_limit()
-        sticky = ever_authoritative(current_user.id, ownership.id)
+        history = ever_authoritative(current_user.id, ownership.id)
+        if history == AUTHORITY_LOOKUP_FAILED:
+            history = authority_evidence_for_route(
+                current_user.id, ownership.id,
+            )
+        if history == AUTHORITY_LOOKUP_FAILED:
+            return _proxy_owned_annotation_get(
+                capture_session, ownership, entitlement_id,
+            )
+        sticky = history == AUTHORITY_EVER
+        has_cursor = request.args.get("pageOffsetToken") is not None
         if sticky:
+            pre_serve = prepare_authoritative_device_get(
+                user_id=current_user.id,
+                book_id=ownership.id,
+                device_id=getattr(g, "annotation_origin_device_id", None),
+                if_none_match=request.headers.get("If-None-Match"),
+                has_cursor=has_cursor,
+                log=log,
+            )
+            if pre_serve != STICKY_GET_LOCAL:
+                return _proxy_owned_annotation_get(
+                    capture_session, ownership, entitlement_id,
+                )
             page_limit = sticky_render_page_limit(
                 current_user.id, ownership.id, page_limit,
             )
-        has_cursor = request.args.get("pageOffsetToken") is not None
-        if (has_cursor and not sticky) or not local_get_is_eligible(
+        if not sticky and (has_cursor or not local_get_is_eligible(
             settings=config,
             user=current_user,
             book_id=ownership.id,
@@ -585,16 +618,9 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
             page_limit=page_limit,
             device_id=getattr(g, "annotation_origin_device_id", None),
             log=log,
-        ):
-            if not sticky:
-                return _proxy_owned_annotation_get(
-                    capture_session, ownership, entitlement_id,
-                )
-            # Kobo's cloud has been starved by local PATCH acknowledgements.
-            # A local refusal is safer than sending that stale replacement set.
-            return make_response(
-                jsonify({"error": "Local annotation set temporarily unavailable"}),
-                503,
+        )):
+            return _proxy_owned_annotation_get(
+                capture_session, ownership, entitlement_id,
             )
 
         rendered = render_owned_annotations(
@@ -610,9 +636,14 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
                 return _proxy_owned_annotation_get(
                     capture_session, ownership, entitlement_id,
                 )
-            return make_response(
-                jsonify({"error": "Local annotation set temporarily unavailable"}),
-                503,
+            rendered = render_authoritative_complete_set(
+                user_id=current_user.id,
+                book_id=ownership.id,
+                entitlement_id=entitlement_id,
+                page_limit=max(page_limit or 100, 2 ** 31 - 1),
+                device_id=getattr(g, "annotation_origin_device_id", None),
+                log=log,
+                reason="authoritative_render_proof_rebuilt_live",
             )
         body, etag = rendered
         _record_annotation_decision(
@@ -622,23 +653,6 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
         response.headers["Content-Type"] = "application/json"
         response.headers["Content-Length"] = str(len(body))
         response.headers["ETag"] = etag
-        if sticky:
-            try:
-                from cps.services.kobo_annotation_seeding import (
-                    accept_routing_only_seed,
-                )
-                accept_routing_only_seed(
-                    user_id=current_user.id,
-                    book_id=ownership.id,
-                    device_id=getattr(g, "annotation_origin_device_id", None),
-                    log=log,
-                )
-            except Exception:
-                log.warning(
-                    "Kobo routing-only seed could not attach user_id=%s book_id=%s",
-                    getattr(current_user, "id", None), ownership.id,
-                    exc_info=True,
-                )
         return response
     except Exception:
         log.exception(
@@ -646,21 +660,28 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
             entitlement_id,
         )
         if sticky:
-            return make_response(
-                jsonify({"error": "Local annotation set temporarily unavailable"}),
-                503,
+            from cps.services.kobo_annotation_authority import (
+                render_authoritative_complete_set,
+                sticky_render_page_limit,
             )
-        try:
-            from cps.services.kobo_annotation_authority import ever_authoritative
-            if ever_authoritative(current_user.id, ownership.id):
-                return make_response(
-                    jsonify({
-                        "error": "Local annotation set temporarily unavailable",
-                    }),
-                    503,
-                )
-        except Exception:
-            pass
+            emergency_limit = sticky_render_page_limit(
+                current_user.id, ownership.id, page_limit,
+            )
+            rendered = render_authoritative_complete_set(
+                user_id=current_user.id,
+                book_id=ownership.id,
+                entitlement_id=entitlement_id,
+                page_limit=max(emergency_limit, 2 ** 31 - 1),
+                device_id=getattr(g, "annotation_origin_device_id", None),
+                log=log,
+                reason="authoritative_route_exception_rebuilt_live",
+            )
+            body, etag = rendered
+            response = make_response(body, 200)
+            response.headers["Content-Type"] = "application/json"
+            response.headers["Content-Length"] = str(len(body))
+            response.headers["ETag"] = etag
+            return response
         return _proxy_owned_annotation_get(
             capture_session, ownership, entitlement_id,
         )
@@ -1095,6 +1116,20 @@ def handle_annotations(entitlement_id):
             )
         finally:
             _mark_patch_spool_outcome(patch_spool_ticket, patch_spool_outcome)
+    if book is not None:
+        try:
+            from cps.services.kobo_annotation_authority import (
+                mark_authoritative_oversize,
+            )
+            mark_authoritative_oversize(
+                current_user.id, book.id, log=log,
+            )
+        except Exception:
+            log.exception(
+                "Kobo authoritative oversize classification failed "
+                "user_id=%s book_id=%s",
+                getattr(current_user, "id", None), book.id,
+            )
     if book is not None and _owned_patch_is_local_authority(book, entitlement_id):
         return _owned_annotation_patch_ack(capture_session, book, entitlement_id)
     return _proxy_annotation_request(capture_session, book, entitlement_id)

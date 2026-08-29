@@ -468,6 +468,13 @@ def test_stage0_orm_parent_deletes_remove_all_owned_children():
             seed_capture_id=capture.id, page_number=0,
             response_body_gzip=b"page", response_sha256="1" * 64,
         ),
+        ub.KoboAnnotationSeedRowBaseline(
+            seed_capture_id=capture.id,
+            annotation_key="ann",
+            annotation_row_id=annotation.id,
+            content_revision=1,
+            content_sha256="2" * 64,
+        ),
         ub.KoboAnnotationPageCursor(
             token="cursor", snapshot_id=snapshot.snapshot_id, page_offset=0,
         ),
@@ -483,6 +490,7 @@ def test_stage0_orm_parent_deletes_remove_all_owned_children():
         ub.KoboDeviceBookAnnotationState,
         ub.KoboAnnotationSeedCapture,
         ub.KoboAnnotationSeedCapturePage,
+        ub.KoboAnnotationSeedRowBaseline,
         ub.KoboAnnotationPageSnapshot,
         ub.KoboAnnotationPageCursor,
     ):
