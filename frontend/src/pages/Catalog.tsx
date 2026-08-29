@@ -16,6 +16,7 @@ import { apiPost, apiGet, ApiError, type Book, type AdvancedSearchParams } from 
 import { formatAuthors } from '../lib/authors';
 import { saveCatalog, loadCatalog } from '../lib/scrollCache';
 import { usePersistentBool } from '../lib/usePersistentBool';
+import { useNamedPreference } from '../lib/useNamedPreference';
 import { usePersistentChoice } from '../lib/usePersistentChoice';
 import { useCardActionsHidden } from '../lib/useCardActionsHidden';
 import { useT } from '../lib/i18n';
@@ -313,8 +314,14 @@ export function Catalog({ entityKind, entityId, view, defaultFilter }: CatalogPr
   const removalImpact = useMyLibraryRemovalImpact();
   const removeFromLibrary = useRemoveFromMyLibrary();
 
-  // Discover section visibility (persisted; toggled by the gear menu or its ×).
-  const [discoverHidden, setDiscoverHidden] = usePersistentBool('cwng_discover_hidden_v1', false);
+  // Discover follows a signed-in account. Guests stay local-only; an existing
+  // local value is adopted once when an account has no server value yet.
+  const discoverPreferenceError = useCallback(
+    () => announce(t('Could not save.'), { assertive: true }), [announce, t]);
+  const [discoverHidden, setDiscoverHidden, discoverPreferenceSaving] = useNamedPreference(
+    'discover_hidden', 'cwng_discover_hidden_v1', false,
+    { onError: discoverPreferenceError },
+  );
   const [showHidden, setShowHidden] = usePersistentBool('cwng_show_hidden_books_v1', false);
   // #1054: let a user drop the per-card Read/edit row to calm the grid down.
   const [cardActionsHidden, setCardActionsHidden] = useCardActionsHidden();
@@ -882,8 +889,10 @@ export function Catalog({ entityKind, entityId, view, defaultFilter }: CatalogPr
                 <label className={styles.settingsItem}>
                   <input
                     type="checkbox"
+                    data-testid="show-discover-section"
                     className={styles.settingsCheck}
                     checked={!discoverHidden}
+                    disabled={discoverPreferenceSaving}
                     onChange={(e) => setDiscoverHidden(!e.target.checked)}
                   />
                   <span>{t('Show Discover section')}</span>
@@ -950,7 +959,11 @@ export function Catalog({ entityKind, entityId, view, defaultFilter }: CatalogPr
 
       {/* Discover: random picks, library landing only (not while searching). */}
       {!hideLibraryControls && !search && !discoverHidden && (
-        <DiscoverSection onClose={() => setDiscoverHidden(true)} hideActions={cardActionsHidden} />
+        <DiscoverSection
+          onClose={() => setDiscoverHidden(true)}
+          closeDisabled={discoverPreferenceSaving}
+          hideActions={cardActionsHidden}
+        />
       )}
 
       {isFirstLoad ? (
