@@ -47,7 +47,11 @@ test('a JavaScript-disabled browser self-heals to Classic', async ({ browser, ba
     await page.waitForURL((url) => isRootClassicFallback(url));
     const terminal = new URL(page.url());
     if (terminal.pathname === '/login') {
-      await expect(page.locator('input[autocomplete="username"]')).toBeVisible();
+      // Classic's own login field. `input[autocomplete="username"]` belongs to
+      // the SPA's React form, which renders nothing with JavaScript disabled --
+      // asserting it here could never pass, and "not found" would look the same
+      // whether the fallback worked or served an inert SPA shell.
+      await expect(page.locator('input#username[name="username"]')).toBeVisible();
     } else {
       await expect(page.locator('#books').first()).toBeVisible();
     }
