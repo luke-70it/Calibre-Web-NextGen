@@ -36,6 +36,7 @@ _SAFE_FAILURE_REASONS = frozenset({
     "seed_local_set_requires_pagination",
     "seed_response_invalid",
     "seed_row_conflict_local_won",
+    "seed_row_conflict_unresolved",
 })
 
 
@@ -684,6 +685,7 @@ def recover_quarantined_book(*, user_id, book_id):
     recoverable_authoritative_reason = state.quarantine_reason in {
         "capture_evidence_rebuilt_live",
         "seed_row_conflict_local_won",
+        "seed_row_conflict_unresolved",
     }
     if state.authority_status != "quarantined" and not (
         state.ever_authoritative
@@ -833,13 +835,16 @@ def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
                     )
                     .first()
                 )
-            if annotation is not None and annotation.origin_device_id is None:
-                annotation.origin_device_id = device_id
             if annotation is None:
                 raise ValueError("captured annotation was not reconciled")
             equivalent_after = annotation_sync.kobo_payload_matches_annotation(
                 annotation, payload, book,
             )
+            if (
+                annotation.origin_device_id is None
+                and (applied or equivalent_after)
+            ):
+                annotation.origin_device_id = device_id
             raw_record = raw_by_id.get(payload["id"])
             if raw_record is not None and (applied or equivalent_after):
                 annotation_sync._store_raw_materialization(
@@ -859,6 +864,27 @@ def _reconcile_and_promote(capture_id, *, book, user, device_id, log):
         )
         return _set_failure(
             capture_id, "seed_response_invalid", quarantine=False, log=log,
+        )
+
+    if conflict_ids and not state.ever_authoritative:
+        # There is no ordering claim strong enough to make before first
+        # authority: the captured device row and the pre-existing server row
+        # diverge, while client clocks are explicitly non-authoritative. Keep
+        # both durable sources, expose the conflict, and require authenticated
+        # recovery/re-seeding instead of promoting an older local row that the
+        # next replacement-set GET could write over the device's newer copy.
+        capture.annotation_count = len(annotations)
+        capture.page_count = len(pages)
+        capture.reconciliation_conflict_count = len(conflict_ids)
+        ub.session.flush()
+        log.warning(
+            "Kobo annotation seed promotion blocked by unresolved row conflict "
+            "user_id=%s book_id=%s conflict_count=%s cas_conflict_count=%s",
+            user.id, book.id, len(conflict_ids), cas_conflict_count,
+        )
+        return _set_failure(
+            capture_id, "seed_row_conflict_unresolved",
+            quarantine=True, log=log,
         )
 
     visible_ids = _visible_ids(user.id, book.id)

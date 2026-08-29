@@ -576,6 +576,7 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
             STICKY_GET_LOCAL,
             authority_evidence_for_route,
             ever_authoritative,
+            load_last_served_complete_set,
             local_get_is_eligible,
             prepare_authoritative_device_get,
             render_authoritative_complete_set,
@@ -599,14 +600,33 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
                 user_id=current_user.id,
                 book_id=ownership.id,
                 device_id=getattr(g, "annotation_origin_device_id", None),
-                if_none_match=request.headers.get("If-None-Match"),
-                has_cursor=has_cursor,
                 log=log,
             )
             if pre_serve != STICKY_GET_LOCAL:
-                return _proxy_owned_annotation_get(
-                    capture_session, ownership, entitlement_id,
+                rendered = load_last_served_complete_set(
+                    user_id=current_user.id,
+                    book_id=ownership.id,
+                    log=log,
                 )
+                if rendered is None:
+                    log.critical(
+                        "Kobo authoritative GET has neither live proof nor "
+                        "last-served snapshot user_id=%s book_id=%s",
+                        current_user.id, ownership.id,
+                    )
+                    return make_response(jsonify({
+                        "error": "Authoritative annotation set temporarily unavailable",
+                    }), 503)
+                body, etag = rendered
+                _record_annotation_decision(
+                    capture_session, ownership, "answered_from_snapshot",
+                    entitlement_id,
+                )
+                response = make_response(body, 200)
+                response.headers["Content-Type"] = "application/json"
+                response.headers["Content-Length"] = str(len(body))
+                response.headers["ETag"] = etag
+                return response
             page_limit = sticky_render_page_limit(
                 current_user.id, ownership.id, page_limit,
             )
@@ -645,6 +665,15 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
                 log=log,
                 reason="authoritative_render_proof_rebuilt_live",
             )
+            if rendered is None:
+                log.critical(
+                    "Kobo authoritative GET could not read live rows or a "
+                    "last-served snapshot user_id=%s book_id=%s",
+                    current_user.id, ownership.id,
+                )
+                return make_response(jsonify({
+                    "error": "Authoritative annotation set temporarily unavailable",
+                }), 503)
         body, etag = rendered
         _record_annotation_decision(
             capture_session, ownership, "answered_locally", entitlement_id,
@@ -661,21 +690,36 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
         )
         if sticky:
             from cps.services.kobo_annotation_authority import (
+                load_last_served_complete_set,
                 render_authoritative_complete_set,
                 sticky_render_page_limit,
+            )
+            rendered = load_last_served_complete_set(
+                user_id=current_user.id,
+                book_id=ownership.id,
+                log=log,
             )
             emergency_limit = sticky_render_page_limit(
                 current_user.id, ownership.id, page_limit,
             )
-            rendered = render_authoritative_complete_set(
-                user_id=current_user.id,
-                book_id=ownership.id,
-                entitlement_id=entitlement_id,
-                page_limit=max(emergency_limit, 2 ** 31 - 1),
-                device_id=getattr(g, "annotation_origin_device_id", None),
-                log=log,
-                reason="authoritative_route_exception_rebuilt_live",
-            )
+            if rendered is None:
+                rendered = render_authoritative_complete_set(
+                    user_id=current_user.id,
+                    book_id=ownership.id,
+                    entitlement_id=entitlement_id,
+                    page_limit=max(emergency_limit, 2 ** 31 - 1),
+                    device_id=getattr(g, "annotation_origin_device_id", None),
+                    log=log,
+                    reason="authoritative_route_exception_rebuilt_live",
+                )
+            if rendered is None:
+                log.critical(
+                    "Kobo authoritative GET terminal fallback exhausted "
+                    "user_id=%s book_id=%s", current_user.id, ownership.id,
+                )
+                return make_response(jsonify({
+                    "error": "Authoritative annotation set temporarily unavailable",
+                }), 503)
             body, etag = rendered
             response = make_response(body, 200)
             response.headers["Content-Type"] = "application/json"

@@ -1,8 +1,14 @@
 # Mission: #1942 M2 annotation seeding pipeline
 
 Updated: 2026-08-29
-Phase: closure correction R3 delivered
-Status: 5/5 closure outcomes done and verified
+Phase: closure correction R4 implementation
+Status: 3/3 R4 outcomes done and verified
+
+## R4 definition of done (closure FIX-FIRST verdict)
+
+- [x] A prior CWNG ETag on an ever-authoritative book is answered locally with the current complete set, HTTP 200, and a CWNG ETag; no ever-authoritative GET branch proxies Kobo.
+- [x] Every successful complete local render durably snapshots its exact body; dual live-query failure replays the validated snapshot, readable membership failure never emits an invented empty set, and no-snapshot authority failure has only the explicit loud 503 terminal fallback.
+- [x] An initial divergent same-ID reconciliation conflict retains both candidates, is rejected/quarantined through the authenticated recovery path, and cannot promote into an older local replacement response. Named serial regressions, focused/full suites, Ruff, and `git diff --check` pass.
 
 ## R3 definition of done (closure FIX-FIRST verdict)
 
@@ -26,7 +32,7 @@ Status: 5/5 closure outcomes done and verified
 
 ## Now / next action
 
-R3 is committed atop exact base `7dc4375fd` as `new-usemame`; a verified complete-history `1942-m2-r3.bundle` is in the writable worktree root.
+Commit the verified R4 correction atop exact base `a8cf4694dc711577fe527c4c9a61fd6f266940ba` with the required identity and create/verify `1942-m2-r4.bundle` at the worktree root.
 
 ## Verification commands
 
@@ -36,6 +42,12 @@ R3 is committed atop exact base `7dc4375fd` as `new-usemame`; a verified complet
 - Git: `git diff --check`; inspect scoped diff; verify commit author and remote owner before push/bundle.
 
 ## Decisions and rationale
+
+- 2026-08-29 R4: closure review `/tmp/cwng-m2-review3-last.txt` was read completely (250 lines); all three fail-wrong paths are present at `a8cf4694d` and reopen the mission.
+- 2026-08-29 R4: the R3 prior-CWNG-ETag proxy decision was wrong. A CWNG ETag is affirmative possession of CWNG's set, so every ever-authoritative GET remains local; `If-None-Match` never produces 304.
+- 2026-08-29 R4: a failed live-row query is unknown, never proof of an empty set. Persist exact served bytes as a validated gzip+SHA snapshot and prefer stale-but-CWNG replay over invented empty or stale Kobo data. Without any prior snapshot, a loud 503 is the explicitly authorized terminal authority fallback.
+- 2026-08-29 R4: a server CAS proves mutation ordering, not which divergent baseline candidate is newer. Initial unresolved divergence blocks promotion and retains the local row plus captured page evidence for authenticated recovery.
+- 2026-08-29 R4: review3's separate Account UI discoverability and oversize diagnostic/revision bookkeeping observations are valid but outside the user's explicit three-path R4 scope; they are not silently represented as closed.
 
 - 2026-08-29 R3: closure review `/tmp/cwng-m2-review2-last.txt` was read completely (262 lines); it reopens the mission at exact base `7dc4375fdf346453ed287d75cd8e4f937584ce4c`.
 - 2026-08-29 R3: hardware-observed `notes/KOBO-HIGHLIGHTS-STATE.md` §6p establishes the download/re-download GET lifecycle used for pre-serve `routing_only` evidence. A prior CWNG ETag is possession evidence and fails safe to status-quo proxy, never an error response.
@@ -68,6 +80,14 @@ R3 is committed atop exact base `7dc4375fd` as `new-usemame`; a verified complet
 - 2026-08-29: final spec/runbook audit added capture-derived W1 opaque evidence in `c407da24fe`: a complete set records `absent` only when attachments prove it, records `present` when observed, and never downgrades durable prior `present` evidence.
 
 ## Evidence classification
+
+- OBSERVED R4: exact delivery base is `a8cf4694dc711577fe527c4c9a61fd6f266940ba`; all three closure-review fail-wrong paths reproduced before correction.
+- OBSERVED R4: the named M2 pipeline suite passes 33/33 serially, including prior-CWNG-ETag local 200 plus paired PATCH, exact snapshot replay after both live queries fail, nonempty snapshot replay on readable-membership failure, explicit no-snapshot terminal 503, and the inverse-conflict quarantine/recovery sequence.
+- OBSERVED R4: existing #1923 authority passes 17/17 and the authenticated Kobo two-way API passes 28/28 serially (78/78 required focused tests total).
+- OBSERVED R4: adjacent Stage-0, sync-schema, privacy/purge, and scope-migration suites pass 67/67 serially.
+- OBSERVED R4: final-tree full unit suite collected 7,626 tests: 7,503 passed, 106 skipped, and 17 failed in 271.19s. The 17 are the known managed-sandbox infrastructure set: 10 loopback socket-bind denials and 7 `ps` execution denials; no application assertion failed.
+- OBSERVED R4: scoped Ruff on the implementation/regression files passes, fatal-error Ruff across the two touched legacy files passes, Python compilation and `git diff --check` pass. Broad whole-file Ruff reports 12 pre-existing legacy findings outside the changed hunks.
+- ASSUMED R4: no hardware behavior is claimed; the Clara oversize-page A/B remains post-merge as previously scoped.
 
 - OBSERVED R3: exact delivery base is `7dc4375fdf346453ed287d75cd8e4f937584ce4c`.
 - OBSERVED R3: all five closure outcomes are implemented and covered by named regressions for pre-render routing proof, prior-CWNG-ETag proxy, corrupt-proof live rebuild plus authenticated recovery, tri-state GET/PATCH routing, lossless 101-row response, clock-skew local-wins, and post-page-commit CAS divergence.

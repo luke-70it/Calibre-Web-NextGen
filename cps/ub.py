@@ -1409,6 +1409,15 @@ class KoboAnnotationBookState(Base):
     generation_id = Column(String(36), nullable=False, default=lambda: str(uuid.uuid4()))
     set_digest = Column(String(64), nullable=True)
     current_etag = Column(Text, nullable=True)
+    # Exact bytes from the last complete local replacement set.  Nickel can
+    # treat an empty/error annotations GET as authoritative deletion, so this
+    # is the durable fallback when both live render queries fail after Kobo's
+    # cloud copy has become stale.
+    last_served_body_gzip = Column(BLOB, nullable=True)
+    last_served_body_sha256 = Column(String(64), nullable=True)
+    last_served_etag = Column(Text, nullable=True)
+    last_served_annotation_count = Column(Integer, nullable=True)
+    last_served_at = Column(DateTime, nullable=True)
     etag_kind = Column(String(24), nullable=True)
     upstream_seed_etag = Column(Text, nullable=True)
     opaque_content_status = Column(String(16), nullable=False, default='unknown')
@@ -3739,6 +3748,31 @@ def migrate_kobo_annotation_seed_pipeline(engine, _session):
                 "kobo_annotation_book_state",
                 "ever_authoritative",
                 "ever_authoritative BOOLEAN NOT NULL DEFAULT 0",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_body_gzip",
+                "last_served_body_gzip BLOB",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_body_sha256",
+                "last_served_body_sha256 VARCHAR(64)",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_etag",
+                "last_served_etag TEXT",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_annotation_count",
+                "last_served_annotation_count INTEGER",
+            ),
+            (
+                "kobo_annotation_book_state",
+                "last_served_at",
+                "last_served_at DATETIME",
             ),
             (
                 "kobo_annotation_seed_capture",

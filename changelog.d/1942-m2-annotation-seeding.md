@@ -17,3 +17,8 @@
   corrupt capture proof is rebuilt from the complete live set, reconciliation
   uses server-owned row revisions, and post-authority sets over 100 are flagged
   while remaining losslessly available in one complete response.
+- **Authoritative annotation GET failures can no longer become destructive
+  empty sets or stale Kobo replacements.** CWNG always answers a prior CWNG
+  ETag locally, durably snapshots each complete response for exact replay when
+  live reads fail, and blocks initial authority while same-ID reconciliation
+  conflicts remain unresolved.

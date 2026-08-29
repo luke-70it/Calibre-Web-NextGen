@@ -15,11 +15,12 @@ promote into an independently authoritative/cloud-seeded set; it does not make
 the authenticated user's own, byte-exact upload unsafe to replay to that same
 user.  Refusing it here would replace a device row with less faithful columns.
 
-An owned annotations GET must also never become an error response.  Nickel has
-been observed treating an error as an empty replacement set, so a degraded 200
-containing every row's identity and text is safer than a 5xx that is perfectly
-honest about a rendering or state-persistence failure.  Book-state persistence
-is consequently advisory, and row rendering has a last-resort wire mapping.
+An owned annotations GET must not manufacture an empty replacement set from a
+read failure. Nickel has been observed treating errors destructively too, so a
+validated snapshot of CWNG's last exact complete response is replayed when the
+live set cannot be read. With no snapshot at all, a loud 503 is the terminal
+ever-authoritative fallback; it is still safer than claiming unknown means
+empty or proxying Kobo's known-stale copy.
 
 This renderer is used only after Stage 0 proves that the authenticated device's
 complete set was accepted and the book state is ``authoritative`` (the stored
@@ -37,6 +38,7 @@ nor proxies a stale replacement set.
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import math
@@ -62,7 +64,7 @@ AUTHORITY_EVER = "ever_authoritative"
 AUTHORITY_NEVER = "never_authoritative"
 AUTHORITY_LOOKUP_FAILED = "lookup_failed"
 STICKY_GET_LOCAL = "local"
-STICKY_GET_PROXY = "proxy"
+STICKY_GET_SNAPSHOT = "snapshot"
 
 
 def _blob(value):
@@ -538,18 +540,8 @@ def _requirements_membership_is_safe(
     return True
 
 
-def _has_prior_cwng_possession(if_none_match):
-    if not isinstance(if_none_match, str):
-        return False
-    return any(
-        token.strip().startswith('W/"CWNG:')
-        or token.strip().startswith('"CWNG:')
-        for token in if_none_match.split(",")
-    )
-
-
 def prepare_authoritative_device_get(
-    *, user_id, book_id, device_id, if_none_match, has_cursor, log,
+    *, user_id, book_id, device_id, log,
 ):
     """Commit device evidence before an ever-authoritative local response.
 
@@ -558,13 +550,15 @@ def prepare_authoritative_device_get(
     have been emptied. A fresh/reset device is therefore safe to hydrate from
     CWNG's monotonic live set. An earlier PATCH is already in that set. The
     residual offline-edit-without-upload case is byte-identical to Kobo cloud
-    status quo. A prior CWNG ETag is contrary possession evidence, so a device
-    without accepted evidence takes the status-quo proxy for that request.
+    status quo. A prior CWNG ETag proves possession of OUR prior replacement
+    set, so it strengthens the local path: Kobo's now-stale copy must never be
+    proxied back over it. Any inability to establish fresh live proof requests
+    the last complete CWNG snapshot, never the upstream route.
     """
     try:
         state = _state_for_book(user_id, book_id)
         if state is None or not state.ever_authoritative:
-            return STICKY_GET_PROXY
+            return STICKY_GET_SNAPSHOT
         device = (
             ub.session.query(ub.Device.id)
             .filter(
@@ -575,7 +569,7 @@ def prepare_authoritative_device_get(
             .first()
         )
         if device is None:
-            return STICKY_GET_PROXY
+            return STICKY_GET_SNAPSHOT
 
         accepted = (
             ub.session.query(ub.KoboAnnotationSeedCapture)
@@ -588,8 +582,6 @@ def prepare_authoritative_device_get(
             .all()
         )
         if not accepted:
-            if has_cursor or _has_prior_cwng_possession(if_none_match):
-                return STICKY_GET_PROXY
             from cps.services.kobo_annotation_seeding import accept_routing_only_seed
             return (
                 STICKY_GET_LOCAL
@@ -597,7 +589,7 @@ def prepare_authoritative_device_get(
                     user_id=user_id, book_id=book_id,
                     device_id=device_id, log=log,
                 )
-                else STICKY_GET_PROXY
+                else STICKY_GET_SNAPSHOT
             )
 
         upstream = [row for row in accepted if row.seed_kind == "upstream_capture"]
@@ -615,7 +607,7 @@ def prepare_authoritative_device_get(
                     user_id=user_id, book_id=book_id,
                     device_id=device_id, log=log,
                 )
-                else STICKY_GET_PROXY
+                else STICKY_GET_SNAPSHOT
             )
         visible_ids = {
             row[0] for row in (
@@ -636,14 +628,14 @@ def prepare_authoritative_device_get(
             user_id=user_id,
             book_id=book_id,
             visible_ids=visible_ids,
-        ) else STICKY_GET_PROXY
+        ) else STICKY_GET_SNAPSHOT
     except Exception:
         _safe_rollback()
         log.exception(
             "Kobo authoritative device pre-serve proof failed "
             "user_id=%s book_id=%s", user_id, book_id,
         )
-        return STICKY_GET_PROXY
+        return STICKY_GET_SNAPSHOT
 
 
 def local_get_is_eligible(*, settings, user, book_id, entitlement_id,
@@ -923,9 +915,107 @@ def _log_degraded(log, *, user_id, book_id, visible_count, reasons):
         pass
 
 
+def _snapshot_payload(state, *, log, user_id, book_id):
+    """Validate and return the last exact complete-set bytes and ETag."""
+    compressed = _blob(getattr(state, "last_served_body_gzip", None))
+    expected_digest = getattr(state, "last_served_body_sha256", None)
+    etag = getattr(state, "last_served_etag", None)
+    expected_count = getattr(state, "last_served_annotation_count", None)
+    if (
+        compressed is None
+        or not isinstance(expected_digest, str)
+        or len(expected_digest) != 64
+        or not isinstance(etag, str)
+        or not etag.startswith('W/"CWNG:')
+        or not isinstance(expected_count, int)
+        or isinstance(expected_count, bool)
+        or expected_count < 0
+    ):
+        return None
+    try:
+        body = gzip.decompress(compressed)
+        if hashlib.sha256(body).hexdigest() != expected_digest:
+            raise ValueError("snapshot digest mismatch")
+        payload = json.loads(body)
+        annotations = payload.get("annotations") if isinstance(payload, dict) else None
+        if (
+            not isinstance(annotations, list)
+            or len(annotations) != expected_count
+            or payload.get("nextPageOffsetToken") is not None
+        ):
+            raise ValueError("snapshot is not one complete page")
+    except Exception:
+        try:
+            log.error(
+                "Kobo authoritative last-served snapshot invalid "
+                "user_id=%s book_id=%s",
+                user_id, book_id, exc_info=True,
+            )
+        except Exception:
+            pass
+        return None
+    return body, etag
+
+
+def load_last_served_complete_set(*, user_id, book_id, log):
+    """Load CWNG's durable complete replacement set without inventing rows."""
+    try:
+        state = _state_for_book(user_id, book_id)
+        if state is None or not state.ever_authoritative:
+            return None
+        return _snapshot_payload(
+            state, log=log, user_id=user_id, book_id=book_id,
+        )
+    except Exception:
+        _safe_rollback()
+        try:
+            log.critical(
+                "Kobo authoritative last-served snapshot lookup failed "
+                "user_id=%s book_id=%s",
+                user_id, book_id, exc_info=True,
+            )
+        except Exception:
+            pass
+        return None
+
+
+def _commit_complete_render(*, state, body, digest, annotation_count):
+    """Advance CWNG revision and atomically persist the exact served bytes."""
+    if state.set_digest != digest:
+        state.authority_revision = (state.authority_revision or 0) + 1
+        state.set_digest = digest
+        state.last_mutation_at = datetime.now(timezone.utc)
+    revision = max(1, state.authority_revision or 0)
+    state.authority_revision = revision
+    etag = 'W/"CWNG:{}:{}:{}"'.format(
+        state.generation_id, revision, digest[:16],
+    )
+    state.current_etag = etag
+    state.etag_kind = "cwng_revision"
+    state.last_served_body_gzip = gzip.compress(body, mtime=0)
+    state.last_served_body_sha256 = digest
+    state.last_served_etag = etag
+    state.last_served_annotation_count = annotation_count
+    state.last_served_at = datetime.now(timezone.utc)
+    # State, ETag, and fallback bytes become durable together before Flask can
+    # begin sending the replacement-set response.
+    ub.session.commit()
+    return etag
+
+
 def _emergency_render(*, user_id, book_id, entitlement_id, page_limit,
                       device_id, log, reason, force_authoritative=False):
     rows, query_reason = _emergency_rows(user_id, book_id, page_limit)
+    if query_reason is not None:
+        # A failed query supplies no evidence that the visible set is empty.
+        # Replaying our own last complete response is the only non-wiping 200.
+        _log_degraded(
+            log, user_id=user_id, book_id=book_id, visible_count=0,
+            reasons=[reason, query_reason, "last_served_snapshot_required"],
+        )
+        return load_last_served_complete_set(
+            user_id=user_id, book_id=book_id, log=log,
+        )
     if len(rows) > page_limit:
         return None
     if not force_authoritative and not _render_count_is_safe(
@@ -959,10 +1049,34 @@ def _emergency_render(*, user_id, book_id, entitlement_id, page_limit,
     body = b'{"annotations":[' + b",".join(objects) \
         + b'],"nextPageOffsetToken":null}'
     digest = hashlib.sha256(body).hexdigest()
-    normalized_content_id = _normalized_entitlement_id(entitlement_id)
-    etag = _transient_etag(
-        user_id, book_id, normalized_content_id, digest,
+    state, normalized_content_id, state_reason = _book_state(
+        user_id, book_id, entitlement_id,
     )
+    if state_reason is not None:
+        reasons.append(state_reason)
+    if state is None:
+        etag = _transient_etag(
+            user_id, book_id, normalized_content_id, digest,
+        )
+    else:
+        try:
+            etag = _commit_complete_render(
+                state=state, body=body, digest=digest,
+                annotation_count=len(rows),
+            )
+        except Exception as error:
+            _safe_rollback()
+            reasons.append(_failure_reason("book_state_commit", error))
+            fallback = load_last_served_complete_set(
+                user_id=user_id, book_id=book_id, log=log,
+            )
+            if fallback is not None:
+                _log_degraded(
+                    log, user_id=user_id, book_id=book_id,
+                    visible_count=len(rows), reasons=reasons,
+                )
+                return fallback
+            return None
     _log_degraded(
         log, user_id=user_id, book_id=book_id,
         visible_count=len(rows), reasons=reasons,
@@ -1014,27 +1128,23 @@ def _render_owned_annotations(*, user_id, book_id, entitlement_id, page_limit,
         )
     else:
         try:
-            if state.set_digest != digest:
-                state.authority_revision = (state.authority_revision or 0) + 1
-                state.set_digest = digest
-                state.last_mutation_at = datetime.now(timezone.utc)
-            revision = max(1, state.authority_revision or 0)
-            state.authority_revision = revision
-            etag = 'W/"CWNG:{}:{}:{}"'.format(
-                state.generation_id, revision, digest[:16],
+            etag = _commit_complete_render(
+                state=state, body=body, digest=digest,
+                annotation_count=len(rows),
             )
-            state.current_etag = etag
-            state.etag_kind = "cwng_revision"
-            # Commit directly so this boundary owns the one sanitized error
-            # log. ``ub.session_commit`` logs before returning False, which
-            # would duplicate the degraded-response record below.
-            ub.session.commit()
         except Exception as error:
             _safe_rollback()
             reasons.append(_failure_reason("book_state_commit", error))
-            etag = _transient_etag(
-                user_id, book_id, normalized_content_id, digest,
+            fallback = load_last_served_complete_set(
+                user_id=user_id, book_id=book_id, log=log,
             )
+            if fallback is not None:
+                _log_degraded(
+                    log, user_id=user_id, book_id=book_id,
+                    visible_count=len(rows), reasons=reasons,
+                )
+                return fallback
+            return None
 
     _log_degraded(
         log, user_id=user_id, book_id=book_id,
@@ -1073,7 +1183,7 @@ def render_owned_annotations(*, user_id, book_id, entitlement_id, page_limit,
 
 def render_authoritative_complete_set(*, user_id, book_id, entitlement_id,
                                       page_limit, device_id, log, reason):
-    """Last-resort 200 for known authority; never convert GET to 5xx."""
+    """Rebuild or replay known authority; ``None`` requests terminal 503."""
     return _emergency_render(
         user_id=user_id,
         book_id=book_id,
