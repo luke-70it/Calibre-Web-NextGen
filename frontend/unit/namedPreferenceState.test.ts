@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { resolveNamedPreferenceState } from '../src/lib/namedPreferenceState.ts';
+import {
+  queueNamedPreferenceAdoption,
+  resolveNamedPreferenceState,
+} from '../src/lib/namedPreferenceState.ts';
 
 test('an authenticated server boolean is authoritative on the first render', () => {
   assert.deepEqual(
@@ -59,4 +62,48 @@ test('loading and older-server states stay local and never post', () => {
     assert.equal(state.canPersist, false);
     assert.equal(state.shouldAdopt, false);
   }
+});
+
+test('same-account adoptions coalesce into one write and fan errors out', async () => {
+  const account = {};
+  const writes: Array<{
+    preferences: Record<string, boolean>;
+    fail: () => void;
+  }> = [];
+  const errors: string[] = [];
+  const mutate = (
+    preferences: Record<string, boolean>,
+    options: { onError: () => void },
+  ) => writes.push({ preferences, fail: options.onError });
+
+  queueNamedPreferenceAdoption(
+    account, 'show_hidden_books', true, mutate, () => errors.push('hidden'));
+  queueNamedPreferenceAdoption(
+    account, 'card_actions_hidden', true, mutate, () => errors.push('cards'));
+  await Promise.resolve();
+
+  assert.equal(writes.length, 1);
+  assert.deepEqual(writes[0].preferences, {
+    show_hidden_books: true,
+    card_actions_hidden: true,
+  });
+  writes[0].fail();
+  assert.deepEqual(errors, ['hidden', 'cards']);
+});
+
+test('different accounts never share an adoption batch', async () => {
+  const writes: Record<string, boolean>[] = [];
+  const mutate = (
+    preferences: Record<string, boolean>,
+    _options: { onError: () => void },
+  ) => writes.push(preferences);
+
+  queueNamedPreferenceAdoption({}, 'discover_hidden', true, mutate);
+  queueNamedPreferenceAdoption({}, 'discover_hidden', false, mutate);
+  await Promise.resolve();
+
+  assert.deepEqual(writes, [
+    { discover_hidden: true },
+    { discover_hidden: false },
+  ]);
 });

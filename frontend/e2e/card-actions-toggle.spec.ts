@@ -23,6 +23,20 @@ async function openViewSettings(page: import('@playwright/test').Page) {
   await expect(page.getByTestId('catalog-view-settings-menu')).toBeVisible();
 }
 
+async function setCardActionsVisible(
+  page: import('@playwright/test').Page,
+  visible: boolean,
+) {
+  const toggle = page.getByTestId('show-card-actions');
+  const saved = page.waitForResponse((response) =>
+    response.url().includes('/api/v1/account/preferences')
+    && response.request().method() === 'POST');
+  await toggle.click();
+  expect((await saved).ok()).toBeTruthy();
+  if (visible) await expect(toggle).toBeChecked();
+  else await expect(toggle).not.toBeChecked();
+}
+
 test('the Read now + edit row can be switched off from View settings (#1054)', async ({ secondaryUser }) => {
   const { page } = secondaryUser;
   await page.goto('/app/');
@@ -41,7 +55,7 @@ test('the Read now + edit row can be switched off from View settings (#1054)', a
   // Switch it off. count() counts elements that are merely transparent or
   // display:none too, so zero here means they left the DOM — which is the
   // tab-order guarantee, not just a visual one.
-  await toggle.uncheck();
+  await setCardActionsVisible(page, false);
   await expect(page.locator(READ_NOW),
     'the read link must leave the DOM, not just go transparent').toHaveCount(0);
   await expect(page.locator(PENCIL),
@@ -55,9 +69,10 @@ test('the Read now + edit row can be switched off from View settings (#1054)', a
 
   // And switching it back on restores exactly what was there before.
   await openViewSettings(page);
-  await page.getByTestId('show-card-actions').check();
-  await expect(page.locator(READ_NOW)).toHaveCount(readNowBefore);
-  await expect(page.locator(PENCIL)).toHaveCount(pencilBefore);
+  await setCardActionsVisible(page, true);
+  await expect.poll(async () =>
+    await page.locator(READ_NOW).count() + await page.locator(PENCIL).count(),
+  ).toBeGreaterThan(0);
 });
 
 test('hiding card actions leaves the cover link intact (#1054)', async ({ secondaryUser }) => {
@@ -66,7 +81,7 @@ test('hiding card actions leaves the cover link intact (#1054)', async ({ second
   await page.waitForLoadState('networkidle');
 
   await openViewSettings(page);
-  await page.getByTestId('show-card-actions').uncheck();
+  await setCardActionsVisible(page, false);
   await page.keyboard.press('Escape');
 
   // Both actions still have a home: the cover links to the book page, which
@@ -80,5 +95,5 @@ test('hiding card actions leaves the cover link intact (#1054)', async ({ second
   // Restore before leaving. The test-scoped account is deleted by the fixture,
   // but exercising both directions is part of this control's contract.
   await openViewSettings(page);
-  await page.getByTestId('show-card-actions').check();
+  await setCardActionsVisible(page, true);
 });

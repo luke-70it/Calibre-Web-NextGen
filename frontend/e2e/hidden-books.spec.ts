@@ -53,13 +53,25 @@ async function csrfHeaders(page: Page): Promise<Record<string, string>> {
 }
 
 async function resetShowHiddenPreference(page: Page) {
-  await page.request.post('/api/v1/account/preferences', {
+  const response = await page.request.post('/api/v1/account/preferences', {
     headers: await csrfHeaders(page),
     data: { preferences: { show_hidden_books: false } },
   });
+  expect(response.ok()).toBeTruthy();
 }
 
-test('Hide persists across reload; Show hidden reveals a marked book and provides Unhide', async ({ page }) => {
+async function showHiddenBooks(page: Page) {
+  const toggle = page.getByTestId('show-hidden-books');
+  const saved = page.waitForResponse((response) =>
+    response.url().includes('/api/v1/account/preferences')
+    && response.request().method() === 'POST');
+  await toggle.click();
+  expect((await saved).ok()).toBeTruthy();
+  await expect(toggle).toBeChecked();
+}
+
+test('Hide persists across reload; Show hidden reveals a marked book and provides Unhide', async ({ secondaryUser }) => {
+  const { page } = secondaryUser;
   await page.goto('/app');
   const book = await firstBook(page);
   test.skip(!book, 'seed has no books');
@@ -92,11 +104,7 @@ test('Hide persists across reload; Show hidden reveals a marked book and provide
     await page.getByTestId('catalog-view-settings').click();
     const showHidden = page.getByTestId('show-hidden-books');
     await expect(showHidden).not.toBeChecked();
-    const preferenceSaved = page.waitForResponse((response) =>
-      response.url().includes('/api/v1/account/preferences')
-      && response.request().method() === 'POST');
-    await showHidden.check();
-    expect((await preferenceSaved).ok()).toBeTruthy();
+    await showHiddenBooks(page);
     expect(await page.evaluate(() => localStorage.getItem('cwng_show_hidden_books_v1'))).toBe('1');
     const revealed = await page.request.get('/api/v1/books?per_page=60&show_hidden=1').then((r) => r.json());
     expect(revealed.total).toBe(before.total);
@@ -129,7 +137,8 @@ test('Hide persists across reload; Show hidden reveals a marked book and provide
   assertNoPageErrors(errors);
 });
 
-test('hidden+archived remains recoverable through Show hidden, while Archived keeps hidden out', async ({ page }) => {
+test('hidden+archived remains recoverable through Show hidden, while Archived keeps hidden out', async ({ secondaryUser }) => {
+  const { page } = secondaryUser;
   await page.goto('/app');
   const book = await firstBook(page);
   test.skip(!book, 'seed has no books');
@@ -147,7 +156,7 @@ test('hidden+archived remains recoverable through Show hidden, while Archived ke
 
     await page.goto('/app');
     await page.getByTestId('catalog-view-settings').click();
-    await page.getByTestId('show-hidden-books').check();
+    await showHiddenBooks(page);
     const card = page.getByRole('link', { name: `Open details for ${book!.title}` });
     await expect(card).toBeVisible();
     await expect(card.getByTestId('hidden-book-badge')).toBeVisible();
@@ -235,12 +244,11 @@ test('Guest never receives a Hide action even when the instance feature is enabl
   await page.goto('/app');
   const book = await firstBook(page);
   test.skip(!book, 'seed has no books');
+  const me = await page.request.get('/api/v1/auth/me').then((response) => response.json());
+  me.role = { ...(me.role ?? {}), anonymous: true, delete_books: false };
+  me.features = { ...(me.features ?? {}), hide_books: true };
   await page.route('**/api/v1/auth/me', async (route) => {
-    const response = await route.fetch();
-    const me = await response.json();
-    me.role = { ...(me.role ?? {}), anonymous: true, delete_books: false };
-    me.features = { ...(me.features ?? {}), hide_books: true };
-    await route.fulfill({ response, json: me });
+    await route.fulfill({ status: 200, contentType: 'application/json', json: me });
   });
   await page.goto(`/app/book/${book!.id}`);
   await expect(page.getByTestId('hide-book-toggle')).toHaveCount(0);

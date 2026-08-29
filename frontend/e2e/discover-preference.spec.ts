@@ -28,6 +28,20 @@ async function installReadNowObserver(page: import('@playwright/test').Page) {
   });
 }
 
+function preferenceWrite(
+  response: import('@playwright/test').Response,
+  name: string,
+  value?: boolean,
+) {
+  if (!response.url().includes('/api/v1/account/preferences')
+      || response.request().method() !== 'POST') return false;
+  const body = response.request().postDataJSON() as {
+    preferences?: Record<string, boolean>;
+  };
+  return Object.prototype.hasOwnProperty.call(body.preferences ?? {}, name)
+    && (value === undefined || body.preferences?.[name] === value);
+}
+
 test('Discover adopts local hidden state once and follows the account across browsers', async ({
   secondaryUser, browser, baseURL,
 }) => {
@@ -56,8 +70,7 @@ test('Discover adopts local hidden state once and follows the account across bro
   await page.evaluate(() => localStorage.setItem('cwng_discover_hidden_v1', '1'));
 
   const adoption = page.waitForResponse((response) =>
-    response.url().includes('/api/v1/account/preferences')
-    && response.request().method() === 'POST');
+    preferenceWrite(response, 'discover_hidden', true));
   await page.reload();
   expect((await adoption).ok()).toBeTruthy();
   await expect(page.getByTestId('discover-section')).toHaveCount(0);
@@ -65,10 +78,12 @@ test('Discover adopts local hidden state once and follows the account across bro
     (window as typeof window & { __discoverMounted?: boolean }).__discoverMounted ?? false,
   )).toBe(false);
 
-  const adoptedMe = await page.request.get('/api/v1/auth/me');
-  expect((await adoptedMe.json() as {
-    preferences: { discover_hidden: boolean | null };
-  }).preferences.discover_hidden).toBe(true);
+  await expect.poll(async () => {
+    const adoptedMe = await page.request.get('/api/v1/auth/me');
+    return (await adoptedMe.json() as {
+      preferences: { discover_hidden: boolean | null };
+    }).preferences.discover_hidden;
+  }).toBe(true);
 
   // Browser B gets only the same account cookies, never browser A's storage.
   const browserB = await browser.newContext({ baseURL });

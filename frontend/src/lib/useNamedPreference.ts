@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useMe, useUpdateNamedPreferences } from './queries';
 import { usePersistentBool } from './usePersistentBool';
-import { resolveNamedPreferenceState } from './namedPreferenceState';
+import {
+  queueNamedPreferenceAdoption,
+  resolveNamedPreferenceState,
+} from './namedPreferenceState';
 
 function readStoredBool(key: string): boolean | null {
   try {
@@ -54,15 +57,14 @@ export function useNamedPreference(
     if (!state.shouldAdopt || valueToAdopt === null
         || adoptionAttempted.current) return;
     adoptionAttempted.current = true;
-    update.mutate(
-      { [name]: valueToAdopt },
-      {
-        onError: () => {
-          options.onError?.();
-        },
-      },
+    queueNamedPreferenceAdoption(
+      me!, name, valueToAdopt,
+      (preferences, mutationOptions) => update.mutate(preferences, {
+        onError: mutationOptions.onError,
+      }),
+      options.onError,
     );
-  }, [name, options, state.shouldAdopt, update]);
+  }, [me, name, options, state.shouldAdopt, update]);
 
   const setValue = useCallback((next: boolean) => {
     const previous = value;
