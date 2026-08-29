@@ -1403,6 +1403,9 @@ class KoboAnnotationBookState(Base):
     content_id = Column(String(64), nullable=False)
     authority_status = Column(String(24), nullable=False, default='unseeded')
     authority_revision = Column(Integer, nullable=False, default=0)
+    ever_authoritative = Column(
+        Boolean, nullable=False, default=False, server_default=text("0"),
+    )
     generation_id = Column(String(36), nullable=False, default=lambda: str(uuid.uuid4()))
     set_digest = Column(String(64), nullable=True)
     current_etag = Column(Text, nullable=True)
@@ -1514,6 +1517,10 @@ class KoboAnnotationSeedCapture(Base):
     annotation_count = Column(Integer, nullable=True)
     page_count = Column(Integer, nullable=True)
     result = Column(String(24), nullable=False, default='pending')
+    seed_kind = Column(
+        String(32), nullable=False, default='upstream_capture',
+        server_default=text("'upstream_capture'"),
+    )
     failure_reason = Column(String(64), nullable=True)
     book_state = relationship("KoboAnnotationBookState", back_populates="seed_captures")
     pages = relationship(
@@ -1524,6 +1531,10 @@ class KoboAnnotationSeedCapture(Base):
     __table_args__ = (
         CheckConstraint("result IN ('pending', 'accepted', 'rejected', 'failed')",
                         name='ck_kasc_result'),
+        CheckConstraint(
+            "seed_kind IN ('upstream_capture', 'routing_only')",
+            name='ck_kasc_seed_kind',
+        ),
         Index('ix_kasc_book_time', 'book_state_id', 'started_at'),
     )
 
@@ -3655,6 +3666,70 @@ def migrate_webreader_device_identity_slice(engine, _session):
         ))
 
 
+def migrate_kobo_annotation_seed_pipeline(engine, _session):
+    """Install M2's sticky-authority and capture-kind columns before ORM use."""
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            KoboAnnotationBookState.__table__,
+            KoboAnnotationSeedCapture.__table__,
+            KoboAnnotationSeedCapturePage.__table__,
+        ],
+        checkfirst=True,
+    )
+    with engine.begin() as conn:
+        table_names = {
+            row[0] for row in conn.execute(text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN "
+                "('kobo_annotation_book_state', 'kobo_annotation_seed_capture')"
+            ))
+        }
+        additions = (
+            (
+                "kobo_annotation_book_state",
+                "ever_authoritative",
+                "ever_authoritative BOOLEAN NOT NULL DEFAULT 0",
+            ),
+            (
+                "kobo_annotation_seed_capture",
+                "seed_kind",
+                "seed_kind TEXT NOT NULL DEFAULT 'upstream_capture' "
+                "CHECK (seed_kind IN ('upstream_capture', 'routing_only'))",
+            ),
+        )
+        for table_name, column_name, ddl in additions:
+            if table_name not in table_names:
+                continue
+            existing = {
+                row[1] for row in conn.execute(
+                    text(f"PRAGMA table_info({table_name})")
+                )
+            }
+            if column_name in existing:
+                continue
+            try:
+                conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {ddl}"))
+            except exc.OperationalError as error:
+                if "duplicate column" not in str(error).lower():
+                    raise
+
+        # Preserve the safety history of databases that reached authority by
+        # the hand-run M2 precursor. Raw SQL keeps this pre-ORM per #1950.
+        conn.execute(text(
+            "UPDATE kobo_annotation_book_state SET ever_authoritative=1 "
+            "WHERE authority_status='authoritative' AND ever_authoritative=0"
+        ))
+        # Before M2, an accepted empty capture with no page evidence could only
+        # be the runbook's routing-only seed. Captured empty upstream sets have
+        # page evidence and are therefore not rewritten here.
+        conn.execute(text(
+            "UPDATE kobo_annotation_seed_capture SET seed_kind='routing_only' "
+            "WHERE result='accepted' AND annotation_count=0 "
+            "AND NOT EXISTS (SELECT 1 FROM kobo_annotation_seed_capture_page p "
+            "WHERE p.seed_capture_id=kobo_annotation_seed_capture.id)"
+        ))
+
+
 _KOBO_TWO_WAY_TABLES = (
     KoboAnnotationMaterialization.__table__,
     KoboAnnotationBookState.__table__,
@@ -3973,8 +4048,9 @@ def migrate_kobo_two_way_annotation_sync(engine, _session):
                 result = conn.execute(text(
                     "INSERT INTO kobo_annotation_book_state "
                     "(user_id, book_id, content_id, authority_status, authority_revision, "
+                    "ever_authoritative, "
                     "generation_id, opaque_content_status, updated_at) VALUES "
-                    "(:user_id, :book_id, :content_id, 'unseeded', 0, :generation_id, "
+                    "(:user_id, :book_id, :content_id, 'unseeded', 0, 0, :generation_id, "
                     "'unknown', :updated_at)"
                 ), {
                     "user_id": user_id,
@@ -4336,6 +4412,7 @@ def migrate_Database(_session):
     migrate_multi_device_annotation_safe_slice(engine, _session)
     migrate_device_management_slice(engine, _session)
     migrate_webreader_device_identity_slice(engine, _session)
+    migrate_kobo_annotation_seed_pipeline(engine, _session)
     migrate_kobo_two_way_annotation_sync(engine, _session)
     migrate_book_cover_preview_table(engine, _session)
     migrate_notice_tables(engine, _session)

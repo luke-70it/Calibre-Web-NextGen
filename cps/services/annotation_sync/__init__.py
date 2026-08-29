@@ -187,7 +187,10 @@ def _kobo_payload_matches_row(annotation, payload, span, normalized_content_id):
     return incoming == current
 
 
-def _upsert_annotation(session, payload, book, user, *, origin_device_id=None):
+def _upsert_annotation(
+    session, payload, book, user, *, origin_device_id=None,
+    mark_last_editor=True,
+):
     """Find-or-create Annotation row keyed on (user_id, book_id, annotation_id).
 
     Populates content fields AND position fields from the Kobo PATCH payload
@@ -302,10 +305,16 @@ def _upsert_annotation(session, payload, book, user, *, origin_device_id=None):
             annotation_type=to_storage_type(payload.get("type")),
         )
         session.add(ann)
-    elif getattr(ann, "content_revision", None) is None:
-        ann.content_revision = 1
     else:
-        ann.content_revision += 1
+        if ann.origin_device_id is None and origin_device_id is not None:
+            # A complete upstream seed is the first durable evidence available
+            # for most legacy rows. Attribute only rows whose original device
+            # is still unknown; never overwrite another writer's origin.
+            ann.origin_device_id = origin_device_id
+        if getattr(ann, "content_revision", None) is None:
+            ann.content_revision = 1
+        else:
+            ann.content_revision += 1
     # If a previously soft-deleted (hidden) annotation comes back, un-hide it.
     ann.hidden = False
     # Content fields
@@ -345,13 +354,17 @@ def _upsert_annotation(session, payload, book, user, *, origin_device_id=None):
     if client_time is not _CLIENT_TIME_MISSING:
         ann.client_modified_at = client_time
     ann.server_modified_at = _now()
-    ann.last_editor_device_id = origin_device_id
+    if mark_last_editor:
+        ann.last_editor_device_id = origin_device_id
     ann.last_synced = _now()
     session.flush()
     return ann
 
 
-def _store_raw_materialization(session, annotation, raw_record, *, trace_id=None):
+def _store_raw_materialization(
+    session, annotation, raw_record, *, trace_id=None,
+    provenance="kobo_patch", serveable=False, match_content_revision=False,
+):
     """Best-effort sidecar upsert isolated behind a SQLite savepoint."""
     from cps import ub
     from cps.services import kobo_annotation_stage0
@@ -369,24 +382,32 @@ def _store_raw_materialization(session, annotation, raw_record, *, trace_id=None
             if row is None:
                 row = ub.KoboAnnotationMaterialization(
                     annotation_id=annotation.id,
-                    materialization_revision=1,
-                    provenance="kobo_patch",
-                    serveable=False,
+                    materialization_revision=(
+                        annotation.content_revision
+                        if match_content_revision else 1
+                    ),
+                    provenance=provenance,
+                    serveable=serveable,
                     created_at=now,
                     updated_at=now,
                 )
                 session.add(row)
             else:
-                row.materialization_revision += 1
+                row.materialization_revision = (
+                    annotation.content_revision
+                    if match_content_revision
+                    else row.materialization_revision + 1
+                )
                 row.updated_at = now
             row.raw_annotation_json = raw_record.raw_annotation_json
             row.raw_location_json = raw_record.raw_location_json
             row.raw_client_modified_utc = raw_record.raw_client_modified_utc
             row.payload_sha256 = raw_record.payload_sha256
             row.attachments_state = raw_record.attachments_state
-            row.provenance = "kobo_patch"
-            # PATCH is a delta and never establishes serveability in Stage 0.
-            row.serveable = False
+            row.provenance = provenance
+            # PATCH callers retain the conservative defaults; a complete cloud
+            # seed may explicitly mark its exact object replayable.
+            row.serveable = serveable
             row.quarantine_reason = None
             session.flush()
         return True

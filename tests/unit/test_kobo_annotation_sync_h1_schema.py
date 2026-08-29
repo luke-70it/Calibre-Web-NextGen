@@ -576,6 +576,7 @@ class TestMigrationPreservesAllUserData:
         ub.migrate_annotation_koreader_identity(engine, session)
         ub.migrate_multi_device_annotation_safe_slice(engine, session)
         ub.migrate_device_management_slice(engine, session)
+        ub.migrate_kobo_annotation_seed_pipeline(engine, session)
         ub.migrate_kobo_two_way_annotation_sync(engine, session)
 
         # Fresh session: ORM read must work on every row.

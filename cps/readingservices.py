@@ -452,6 +452,27 @@ def _owned_annotation_patch_ack(capture_session, ownership, entitlement_id):
 def _owned_patch_is_local_authority(ownership, entitlement_id):
     """Use the exact same complete-set proof as the owned GET."""
     try:
+        # Once CWNG has ever become authoritative, Kobo's cloud copy is known
+        # to have drifted because owned PATCHes stopped feeding it. A later
+        # instance/user/device gate failure must therefore never resume
+        # forwarding against that stale copy.
+        state = (
+            ub.session.query(ub.KoboAnnotationBookState.ever_authoritative)
+            .filter(
+                ub.KoboAnnotationBookState.user_id == current_user.id,
+                ub.KoboAnnotationBookState.book_id == ownership.id,
+            )
+            .first()
+        )
+        if state is not None and bool(state[0]):
+            return True
+    except Exception:
+        # The ordinary complete-set gate remains independently usable during
+        # startup/schema diagnostics and in isolated route harnesses. Runtime
+        # migrations guarantee the column before real ORM request handling.
+        log.debug("Sticky Kobo PATCH authority lookup unavailable", exc_info=True)
+
+    try:
         from cps.services.kobo_annotation_authority import local_get_is_eligible
         return local_get_is_eligible(
             settings=config,
@@ -489,6 +510,55 @@ def _owned_annotation_page_limit():
         return None
 
 
+def _proxy_owned_annotation_get(capture_session, ownership, entitlement_id):
+    """Proxy one owned GET and best-effort feed its response to M2 seeding."""
+    seed_capture_id = None
+    device_id = getattr(g, "annotation_origin_device_id", None)
+    request_offset_token = request.args.get("pageOffsetToken")
+    try:
+        from cps.services import kobo_annotation_seeding
+        seed_capture_id = kobo_annotation_seeding.begin_or_resume_capture(
+            settings=config,
+            user=current_user,
+            book=ownership,
+            device_id=device_id,
+            request_offset_token=request_offset_token,
+            device_etag=request.headers.get("If-None-Match"),
+            log=log,
+        )
+    except Exception:
+        log.warning(
+            "Kobo annotation seed capture could not attach user_id=%s book_id=%s",
+            getattr(current_user, "id", None), getattr(ownership, "id", None),
+            exc_info=True,
+        )
+
+    response = _proxy_annotation_request(
+        capture_session, ownership, entitlement_id,
+    )
+    if seed_capture_id is not None:
+        try:
+            from cps.services import kobo_annotation_seeding
+            kobo_annotation_seeding.record_proxy_response(
+                seed_capture_id,
+                response=response,
+                book=ownership,
+                user=current_user,
+                device_id=device_id,
+                request_offset_token=request_offset_token,
+                log=log,
+            )
+        except Exception:
+            # The proxied response remains the GET's wire authority. Seeding is
+            # durable best-effort and can retry on a later request.
+            log.warning(
+                "Kobo annotation seed response could not persist capture_id=%s",
+                seed_capture_id,
+                exc_info=True,
+            )
+    return response
+
+
 def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
     """Return one complete eligible local page, otherwise proxy unchanged."""
     try:
@@ -508,7 +578,7 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
             device_id=getattr(g, "annotation_origin_device_id", None),
             log=log,
         ):
-            return _proxy_annotation_request(
+            return _proxy_owned_annotation_get(
                 capture_session, ownership, entitlement_id,
             )
 
@@ -521,7 +591,7 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
             log=log,
         )
         if rendered is None:
-            return _proxy_annotation_request(
+            return _proxy_owned_annotation_get(
                 capture_session, ownership, entitlement_id,
             )
         body, etag = rendered
@@ -538,7 +608,7 @@ def _owned_annotation_get_response(capture_session, ownership, entitlement_id):
             "Owned Kobo annotation GET local authority failed; proxying "
             "entitlement=%s", entitlement_id,
         )
-        return _proxy_annotation_request(
+        return _proxy_owned_annotation_get(
             capture_session, ownership, entitlement_id,
         )
 
