@@ -9,6 +9,14 @@ export XDG_RUNTIME_DIR=/tmp/runtime-root
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 export SDL_VIDEODRIVER=x11
 
+# A restarted container keeps its /tmp, so the previous boot's X lock and socket
+# survive and Xvfb refuses the display ("Server is already active for display N").
+# Restarting is the documented way to pick up a plugin edit, so clearing these is
+# part of a normal start, not error recovery.
+display_num="${DISPLAY#:}"
+display_num="${display_num%%.*}"
+rm -f "/tmp/.X${display_num}-lock" "/tmp/.X11-unix/X${display_num}"
+
 Xvfb "$DISPLAY" -screen 0 "${SCREEN_W}x${SCREEN_H}x24" -nolisten tcp &
 for i in $(seq 1 60); do xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 && break; sleep 0.25; done
 xdpyinfo -display "$DISPLAY" >/dev/null 2>&1 || { echo "FATAL: Xvfb never came up"; exit 1; }
