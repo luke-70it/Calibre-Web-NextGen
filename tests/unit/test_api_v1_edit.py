@@ -212,7 +212,8 @@ def test_delete_endpoints_translate_core_danger_to_non_2xx():
     ]:
         with _ctx(path):
             with patch.object(mod, "current_user", _editor()), \
-                 patch.object(mod.calibre_db, "get_filtered_book", return_value=SimpleNamespace(id=5)), \
+                 patch.object(mod.calibre_db, "get_filtered_book", return_value=SimpleNamespace(
+                     id=5, data=[SimpleNamespace(format="EPUB"), SimpleNamespace(format="PDF")])), \
                  patch.object(mod, "delete_book_from_table", return_value=core_result):
                 resp = call()
         assert resp[1] == 500
