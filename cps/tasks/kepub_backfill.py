@@ -5,8 +5,9 @@ import os
 import threading
 
 from flask_babel import lazy_gettext as N_
+from sqlalchemy import text
 
-from .. import config, db, helper, logger, ub
+from .. import config, db, logger, ub
 from ..epub import get_epub_layout
 from ..services.worker import (CalibreTask, STAT_CANCELLED, STAT_ENDED, STAT_FAIL,
                                STAT_FINISH_SUCCESS, WorkerThread)
@@ -33,6 +34,11 @@ _pending_owner = None
 # that path too, so a cancel cannot leave the latch stuck on for the lifetime of
 # the process (which silently downgraded every Kobo KEPUB download to EPUB).
 _TERMINAL_STATS = (STAT_FAIL, STAT_FINISH_SUCCESS, STAT_ENDED, STAT_CANCELLED)
+# A broken metadata database/session should stop this hidden startup task after
+# a handful of bounded recovery attempts, not turn a large synced library into
+# one error (and traceback) per book. Three attempts tolerate a transient
+# teardown race while putting a hard ceiling on the resulting log volume.
+_SESSION_REBUILD_LIMIT = 3
 
 
 def _clear_pending(task):
@@ -51,6 +57,99 @@ class TaskKepubBackfill(CalibreTask):
         self.converted = 0
         self.skipped = 0
         self.failed = 0
+        self.processed = 0
+
+    def _status_message(self, total):
+        return N_(
+            u"%(processed)d/%(total)d processed: %(converted)d converted, "
+            u"%(skipped)d skipped, %(failed)d failed",
+            processed=self.processed,
+            total=total,
+            converted=self.converted,
+            skipped=self.skipped,
+            failed=self.failed,
+        )
+
+    @staticmethod
+    def _discard_database(local_db, rollback=False):
+        """End this worker greenlet's transaction and remove its scoped Session.
+
+        Every ``CalibreDB`` made by the worker resolves through the same
+        greenlet-scoped registry. Calling ``Session.close()`` is therefore not
+        enough: the closed (or failed) Session remains registered and the next
+        ``CalibreDB`` object receives it again. Assigning ``None`` uses
+        ``CalibreDB.session``'s removal contract and makes the next access
+        materialise a genuinely new Session.
+        """
+        if local_db is None:
+            return
+        try:
+            session = local_db.session
+        except Exception:
+            session = None
+        if rollback and session is not None:
+            try:
+                session.rollback()
+            except Exception as error:
+                log.warning("KEPUB backfill session rollback failed: %s", error)
+        try:
+            local_db.session = None
+        except Exception as error:
+            # Test doubles and downstream CalibreDB-compatible implementations
+            # may not expose the removal setter. Close is the best available
+            # fallback, while the production class always takes the path above.
+            try:
+                if session is not None:
+                    session.close()
+            except Exception:
+                pass
+            log.warning("KEPUB backfill could not discard its database session: %s", error)
+
+    def _rebuild_database(self, failed_db, book_id):
+        """Rollback/remove a poisoned Session and return a fresh CalibreDB.
+
+        Recovery itself is circuit-broken. If the registry or engine cannot
+        produce a usable Session, retrying once for every remaining book would
+        reproduce the issue's unbounded log flood without doing useful work.
+        """
+        self._discard_database(failed_db, rollback=True)
+        last_error = None
+        for attempt in range(1, _SESSION_REBUILD_LIMIT + 1):
+            rebuilt_db = None
+            try:
+                rebuilt_db = db.CalibreDB(expire_on_commit=False, init=True)
+                session = rebuilt_db.session
+                if session is None:
+                    raise RuntimeError("CalibreDB did not provide a database session")
+                if getattr(session, "is_active", True) is False:
+                    raise RuntimeError("CalibreDB provided an inactive database session")
+                # Session construction alone does not prove its engine/DBAPI
+                # connection survived the concurrent reconnect that triggered
+                # recovery. Probe the wire, then end the probe transaction so
+                # the next book begins from a clean boundary.
+                if hasattr(session, "execute"):
+                    session.execute(text("SELECT 1")).scalar()
+                    session.rollback()
+                log.info(
+                    "KEPUB backfill rebuilt its database session after book %s",
+                    book_id,
+                )
+                return rebuilt_db
+            except Exception as error:
+                last_error = error
+                self._discard_database(rebuilt_db, rollback=True)
+                log.warning(
+                    "KEPUB backfill database session rebuild %d/%d failed "
+                    "after book %s: %s",
+                    attempt, _SESSION_REBUILD_LIMIT, book_id, error,
+                )
+
+        log.error(
+            "KEPUB backfill aborting after %d consecutive database session "
+            "rebuild failures following book %s: %s",
+            _SESSION_REBUILD_LIMIT, book_id, last_error,
+        )
+        return None
 
     def run(self, worker_thread):
         global _pending
@@ -70,10 +169,12 @@ class TaskKepubBackfill(CalibreTask):
                 app_session.close()
 
             local_db = db.CalibreDB(expire_on_commit=False, init=True)
+            abort_after_rebuild_failure = False
             try:
                 total = len(book_ids)
                 for index, book_id in enumerate(book_ids):
                     if self.stat == STAT_ENDED:
+                        self.message = self._status_message(total)
                         return
                     # The guard covers the whole per-book body, not just the
                     # conversion. Reading the book row and its formats can raise
@@ -88,17 +189,31 @@ class TaskKepubBackfill(CalibreTask):
                         self.failed += 1
                         log.error_or_exception(
                             "KEPUB backfill failed for book {}: {}".format(book_id, error))
-                    self.progress = (index + 1) / total if total else 1
+                        local_db = self._rebuild_database(local_db, book_id)
+                        if local_db is None:
+                            abort_after_rebuild_failure = True
+                    finally:
+                        self.processed += 1
+                        self.progress = (index + 1) / total if total else 1
+                    if abort_after_rebuild_failure:
+                        break
             finally:
-                # CalibreDB.session is documented as possibly None (cps/db.py
-                # "Don't raise exception - let caller handle AttributeError"), and
-                # a raise here both escapes run() and masks whatever the try body
-                # was actually failing on -- so the task would report "'NoneType'
-                # has no attribute 'close'" instead of the real cause.
-                try:
-                    local_db.session.close()
-                except Exception as error:
-                    log.error("KEPUB backfill could not close its database session: %s", error)
+                # Remove, rather than merely close, this persistent worker
+                # greenlet's scoped Session so later tasks cannot inherit it.
+                self._discard_database(local_db)
+
+            self.message = self._status_message(total)
+
+            if abort_after_rebuild_failure:
+                terminal_error = N_(
+                    u"KEPUB backfill aborted after %(count)d consecutive "
+                    u"database session rebuild failures; %(status)s",
+                    count=_SESSION_REBUILD_LIMIT,
+                    status=self.message,
+                )
+                log.error("%s", terminal_error)
+                self._handleError(terminal_error)
+                return
 
             # The legacy completion flag no longer gates startup: every eligible
             # boot performs the cheap idempotent scan. Keep writing it for safe
@@ -115,7 +230,10 @@ class TaskKepubBackfill(CalibreTask):
                     config.config_kobo_kepub_backfill_completed = False
                     raise
             if self.failed:
-                self._handleError(N_(u"%(count)d KEPUB conversion(s) failed", count=self.failed))
+                self._handleError(N_(
+                    u"KEPUB backfill finished with failures; %(status)s",
+                    status=self.message,
+                ))
                 return
             self._handleSuccess()
         finally:
