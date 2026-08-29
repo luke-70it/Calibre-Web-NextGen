@@ -905,8 +905,73 @@ def container_name(cwa_container) -> str:
     return "cwa-test-container"
 
 
+class CWAApiClient:
+    """An authenticated client that is BOTH a mapping and an HTTP client.
+
+    Two call styles exist in the suite and both are load-bearing:
+
+        tests/docker/       client["session"].get(client["base_url"] + path)
+        tests/integration/  client.get("/kosync/users/auth", headers=...)
+
+    The fixture used to return a plain dict, so the second style raised
+    ``AttributeError: 'dict' object has no attribute 'put'`` -- on 47 call sites
+    across three files. Nobody saw it, because those tests were being skipped for
+    an unrelated reason (the fixture could not log in), so the suite reported
+    green while most of it could not have run at all.
+
+    Deliberately NOT a dict subclass: ``dict.get`` is a mapping method, and
+    overriding it to mean "HTTP GET" makes ``client.get("base_url")`` silently do
+    something entirely different. Mapping access is ``[]`` only, so ``.get`` can
+    mean exactly one thing.
+    """
+
+    def __init__(self, base_url, session, container):
+        self._values = {
+            "base_url": base_url,
+            "session": session,
+            "container": container,
+        }
+
+    def __getitem__(self, key):
+        return self._values[key]
+
+    def __contains__(self, key):
+        return key in self._values
+
+    @property
+    def base_url(self):
+        return self._values["base_url"]
+
+    @property
+    def session(self):
+        return self._values["session"]
+
+    def _url(self, path):
+        # Relative paths resolve against the container under test; an absolute
+        # URL passes through, so a test can reach elsewhere on purpose.
+        if path.startswith(("http://", "https://")):
+            return path
+        return f"{self._values['base_url']}{path}"
+
+    def request(self, method, path, **kwargs):
+        kwargs.setdefault("timeout", 30)
+        return self._values["session"].request(method, self._url(path), **kwargs)
+
+    def get(self, path, **kwargs):
+        return self.request("GET", path, **kwargs)
+
+    def put(self, path, **kwargs):
+        return self.request("PUT", path, **kwargs)
+
+    def post(self, path, **kwargs):
+        return self.request("POST", path, **kwargs)
+
+    def delete(self, path, **kwargs):
+        return self.request("DELETE", path, **kwargs)
+
+
 @pytest.fixture(scope="function")
-def cwa_api_client(cwa_container) -> dict:
+def cwa_api_client(cwa_container) -> "CWAApiClient":
     """
     Provide a configured API client for interacting with CWA container.
 
@@ -977,11 +1042,7 @@ def cwa_api_client(cwa_container) -> dict:
     except requests.exceptions.RequestException as e:
         pytest.skip(f"Could not connect to CWA container: {e}")
 
-    return {
-        "base_url": base_url,
-        "session": session,
-        "container": cwa_container,
-    }
+    return CWAApiClient(base_url, session, cwa_container)
 
 
 @pytest.fixture(scope="function")
