@@ -49,3 +49,21 @@ def test_send_to_device_spa_strings_are_extraction_anchors():
         "Could not queue this book for the device.",
     ):
         assert f'_("{message}")' in strings
+
+
+def test_device_inventory_exposes_named_delete_and_storage_status():
+    devices = _source("frontend/src/pages/Devices.tsx")
+    strings = _source("cps/spa_strings.py")
+
+    assert "inventory_item_id" in devices
+    assert "Delete from device" in devices
+    assert "storage_free" in devices
+    assert "storage_total" in devices
+    assert "/inventory/${book.inventory_item_id}/delete" in devices
+    for message in (
+        "Delete from device",
+        "Deletion requested",
+        "Could not request deletion from this device.",
+        "{free} free of {total}",
+    ):
+        assert f'_("{message}")' in strings

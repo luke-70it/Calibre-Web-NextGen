@@ -36,6 +36,18 @@ msgstr "Het apparaat haalt dit op bij de volgende synchronisatie."
 msgid "Could not queue this book for the device."
 msgstr "Kan dit boek niet in de wachtrij voor het apparaat plaatsen."
 
+msgid "Could not request deletion from this device."
+msgstr "Verwijdering van dit apparaat kon niet worden aangevraagd."
+
+msgid "Delete from device"
+msgstr "Van apparaat verwijderen"
+
+msgid "Delete {path} from {name} on its next sync?"
+msgstr "{path} van {name} verwijderen bij de volgende synchronisatie?"
+
+msgid "Deletion requested"
+msgstr "Verwijdering aangevraagd"
+
 msgid "Queueing…"
 msgstr "In wachtrij plaatsen…"
 
@@ -188,6 +200,9 @@ msgstr "Gebruiker niet gevonden"
 
 #: cps/admin.py
 #, python-brace-format
+msgid "{free} free of {total}"
+msgstr "{free} vrij van {total}"
+
 msgid "{} users deleted successfully"
 msgstr "{} gebruikers succesvol verwijderd"
 

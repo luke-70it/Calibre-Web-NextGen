@@ -45,7 +45,7 @@ from typing import Dict, Optional, Any, Tuple
 from urllib.parse import quote
 
 from ...services import SyncToken as SyncToken, hardcover
-from ...services import device_delivery
+from ...services import device_capabilities, device_delivery
 from ...kobo import push_reading_state_to_hardcover
 
 from flask import Blueprint, request, jsonify, send_from_directory
@@ -1041,6 +1041,18 @@ def update_inventory():
     if not isinstance(data, dict):
         return _inventory_error("Inventory payload must be an object")
 
+    has_free = "free_space" in data
+    has_total = "total_space" in data
+    if has_free != has_total:
+        return _inventory_error("free_space and total_space must be reported together")
+    if has_free:
+        try:
+            device_capabilities.validate_storage(
+                data.get("free_space"), data.get("total_space"),
+            )
+        except device_capabilities.CapabilityValidationError as error:
+            return _inventory_error(str(error))
+
     device_name = data.get("device")
     raw_device_id = data.get("device_id")
     entries = data.get("inventory")
@@ -1083,6 +1095,12 @@ def update_inventory():
                 "Device identity could not be registered for this account",
                 409,
                 "device_identity_unavailable",
+            )
+
+        if has_free:
+            device_capabilities.record_storage(
+                session=ub.session, user_id=user.id, device_id=device.id,
+                free_bytes=data["free_space"], total_bytes=data["total_space"],
             )
 
         now = datetime.now(timezone.utc)
@@ -1214,18 +1232,47 @@ def claim_delivery():
     try:
         data = request.get_json()
         device_name, raw_device_id = _delivery_identity(
-            data, {"device", "device_id"},
+            data, {"device", "device_id", "free_space", "total_space"},
+        )
+        device_capabilities.validate_storage(
+            data.get("free_space"), data.get("total_space"),
         )
         internal_id = _registered_delivery_device(user, device_name, raw_device_id)
+        device_capabilities.record_storage(
+            session=ub.session, user_id=user.id, device_id=internal_id,
+            free_bytes=data["free_space"], total_bytes=data["total_space"],
+        )
         row = device_delivery.claim_next_delivery(
             session=ub.session,
             user_id=user.id,
             device_id=internal_id,
+            available_bytes=data["free_space"],
         )
+        refusal = None
+        if row is None:
+            oversized = (
+                ub.session.query(ub.DeviceBookDelivery)
+                .join(ub.Device, ub.Device.id == ub.DeviceBookDelivery.device_id)
+                .filter(
+                    ub.DeviceBookDelivery.device_id == internal_id,
+                    ub.DeviceBookDelivery.state == device_delivery.QUEUED,
+                    ub.DeviceBookDelivery.expected_size > data["free_space"],
+                    ub.Device.user_id == user.id,
+                )
+                .order_by(ub.DeviceBookDelivery.id)
+                .first()
+            )
+            if oversized is not None:
+                refusal = {
+                    "reason": "insufficient_storage",
+                    "required_bytes": oversized.expected_size,
+                    "available_bytes": data["free_space"],
+                }
         ub.session.commit()
-        return create_sync_response({
-            "delivery": _delivery_payload(row) if row is not None else None,
-        })
+        response = {"delivery": _delivery_payload(row) if row is not None else None}
+        if refusal is not None:
+            response["refusal"] = refusal
+        return create_sync_response(response)
     except BadRequest:
         ub.session.rollback()
         return _delivery_error("Malformed JSON")
@@ -1235,10 +1282,170 @@ def claim_delivery():
         if message == "Device identity could not be registered for this account":
             return _delivery_error(message, 409, "device_identity_unavailable")
         return _delivery_error(message)
+    except device_capabilities.CapabilityValidationError as error:
+        ub.session.rollback()
+        return _delivery_error(str(error))
     except SQLAlchemyError:
         ub.session.rollback()
         log.error("Device delivery claim could not be stored", exc_info=True)
         return _delivery_error("Delivery queue is unavailable", 503, "delivery_unavailable")
+
+
+@csrf.exempt
+@kosync.route("/kosync/syncs/deliveries/refuse", methods=["PUT"])
+def refuse_device_delivery():
+    """Release a lease after the final device-side disk preflight loses."""
+    blocked = _require_kosync_enabled()
+    if blocked:
+        return blocked
+    user = authenticate_user()
+    if not user:
+        return _delivery_error("Unauthorized", 401, "unauthorized")
+    try:
+        data = request.get_json()
+        device_name, raw_device_id = _delivery_identity(data, {
+            "device", "device_id", "delivery_id", "claim_token", "reason",
+            "free_space", "total_space",
+        })
+        device_capabilities.validate_storage(data.get("free_space"), data.get("total_space"))
+        internal_id = _registered_delivery_device(user, device_name, raw_device_id)
+        device_capabilities.record_storage(
+            session=ub.session, user_id=user.id, device_id=internal_id,
+            free_bytes=data["free_space"], total_bytes=data["total_space"],
+        )
+        row = device_delivery.refuse_delivery(
+            session=ub.session, user_id=user.id, device_id=internal_id,
+            delivery_id=data.get("delivery_id"), claim_token=data.get("claim_token"),
+            reason=data.get("reason"), available_bytes=data.get("free_space"),
+        )
+        ub.session.commit()
+        return create_sync_response({"requeued": True, "delivery_id": row.id})
+    except BadRequest:
+        ub.session.rollback()
+        return _delivery_error("Malformed JSON")
+    except (device_delivery.DeliveryValidationError,
+            device_capabilities.CapabilityValidationError) as error:
+        ub.session.rollback()
+        return _delivery_error(str(error), 409, "invalid_delivery_claim")
+    except SQLAlchemyError:
+        ub.session.rollback()
+        return _delivery_error("Delivery queue is unavailable", 503, "delivery_unavailable")
+
+
+def _capability_identity(data, extra=()):
+    return _delivery_identity(data, {"device", "device_id", *extra})
+
+
+def _deletion_payload(row):
+    return {
+        "id": row.id, "book_id": row.book_id, "lpath": row.lpath,
+        "checksum": row.checksum, "claim_token": row.claim_token,
+    }
+
+
+@csrf.exempt
+@kosync.route("/kosync/syncs/deletions/claim", methods=["POST"])
+def claim_device_deletion():
+    blocked = _require_kosync_enabled()
+    if blocked:
+        return blocked
+    user = authenticate_user()
+    if not user:
+        return _delivery_error("Unauthorized", 401, "unauthorized")
+    try:
+        data = request.get_json()
+        device_name, raw_device_id = _capability_identity(data)
+        internal_id = _registered_delivery_device(user, device_name, raw_device_id)
+        row = device_capabilities.claim_next_deletion(
+            session=ub.session, user_id=user.id, device_id=internal_id,
+        )
+        ub.session.commit()
+        return create_sync_response({
+            "deletion": _deletion_payload(row) if row is not None else None,
+        })
+    except (BadRequest, device_delivery.DeliveryValidationError) as error:
+        ub.session.rollback()
+        return _delivery_error(str(error))
+
+
+@csrf.exempt
+@kosync.route("/kosync/syncs/deletions/complete", methods=["PUT"])
+def complete_device_deletion():
+    blocked = _require_kosync_enabled()
+    if blocked:
+        return blocked
+    user = authenticate_user()
+    if not user:
+        return _delivery_error("Unauthorized", 401, "unauthorized")
+    try:
+        data = request.get_json()
+        device_name, raw_device_id = _capability_identity(data, {
+            "deletion_id", "claim_token", "deleted", "failure_reason",
+        })
+        internal_id = _registered_delivery_device(user, device_name, raw_device_id)
+        row = device_capabilities.complete_deletion(
+            session=ub.session, user_id=user.id, device_id=internal_id,
+            deletion_id=data.get("deletion_id"), claim_token=data.get("claim_token"),
+            deleted=data.get("deleted"), failure_reason=data.get("failure_reason"),
+        )
+        ub.session.commit()
+        return create_sync_response({"completed": True, "deletion_id": row.id})
+    except BadRequest:
+        ub.session.rollback()
+        return _delivery_error("Malformed JSON")
+    except (device_delivery.DeliveryValidationError,
+            device_capabilities.CapabilityValidationError) as error:
+        ub.session.rollback()
+        return _delivery_error(str(error), 409, "invalid_deletion_claim")
+
+
+@csrf.exempt
+@kosync.route("/kosync/syncs/collections", methods=["POST"])
+def get_device_collections():
+    blocked = _require_kosync_enabled()
+    if blocked:
+        return blocked
+    user = authenticate_user()
+    if not user:
+        return _delivery_error("Unauthorized", 401, "unauthorized")
+    try:
+        data = request.get_json()
+        device_name, raw_device_id = _capability_identity(data)
+        internal_id = _registered_delivery_device(user, device_name, raw_device_id)
+        snapshot = device_capabilities.collection_snapshot(
+            session=ub.session, user_id=user.id, device_id=internal_id,
+        )
+        ub.session.commit()
+        return create_sync_response(snapshot)
+    except (BadRequest, device_delivery.DeliveryValidationError,
+            device_capabilities.CapabilityValidationError) as error:
+        ub.session.rollback()
+        return _delivery_error(str(error), 409, "collections_unavailable")
+
+
+@csrf.exempt
+@kosync.route("/kosync/syncs/collections/complete", methods=["PUT"])
+def complete_device_collections():
+    blocked = _require_kosync_enabled()
+    if blocked:
+        return blocked
+    user = authenticate_user()
+    if not user:
+        return _delivery_error("Unauthorized", 401, "unauthorized")
+    try:
+        data = request.get_json()
+        device_name, raw_device_id = _capability_identity(data, {"revision"})
+        internal_id = _registered_delivery_device(user, device_name, raw_device_id)
+        row = device_capabilities.acknowledge_collections(
+            session=ub.session, user_id=user.id, device_id=internal_id,
+            revision=data.get("revision"),
+        )
+        ub.session.commit()
+        return create_sync_response({"completed": True, "revision": row.revision})
+    except (BadRequest, device_delivery.DeliveryValidationError,
+            device_capabilities.CapabilityValidationError) as error:
+        ub.session.rollback()
+        return _delivery_error(str(error), 409, "invalid_collection_revision")
 
 
 @csrf.exempt

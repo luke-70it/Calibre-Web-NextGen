@@ -155,6 +155,9 @@ local function newHarness(options)
         if options.root_missing then return nil end
         return "/books"
     end
+    function self_stub:getStorageSpace()
+        return 1024 * 1024, 2 * 1024 * 1024
+    end
     function self_stub:getDeliveryReceipt() return nil end
     function self_stub:getDocumentDigest() return "checksum" end
     function self_stub:persistDeliveryReceipt() return true end

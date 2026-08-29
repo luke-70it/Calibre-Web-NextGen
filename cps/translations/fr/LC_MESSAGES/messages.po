@@ -50,6 +50,18 @@ msgstr "L’appareil le récupérera lors de sa prochaine synchronisation."
 msgid "Could not queue this book for the device."
 msgstr "Impossible de mettre ce livre en file d’attente pour l’appareil."
 
+msgid "Could not request deletion from this device."
+msgstr "Impossible de demander la suppression sur cet appareil."
+
+msgid "Delete from device"
+msgstr "Supprimer de l’appareil"
+
+msgid "Delete {path} from {name} on its next sync?"
+msgstr "Supprimer {path} de {name} lors de sa prochaine synchronisation ?"
+
+msgid "Deletion requested"
+msgstr "Suppression demandée"
+
 msgid "Queueing…"
 msgstr "Mise en file d’attente…"
 
@@ -206,6 +218,9 @@ msgstr "L'utilisateur n'a pas été trouvé"
 
 #: cps/admin.py
 #, python-brace-format
+msgid "{free} free of {total}"
+msgstr "{free} libres sur {total}"
+
 msgid "{} users deleted successfully"
 msgstr "{} utilisateurs supprimés avec succès"
 

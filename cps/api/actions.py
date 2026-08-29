@@ -242,6 +242,12 @@ def queue_book_for_device(book_id):
             "state": "already_on_device",
             "message": "This book is already on that device",
         })
+    if result.reason == "insufficient_storage":
+        return _err(
+            "insufficient_storage",
+            "This device does not have enough reported free space for this book",
+            409,
+        )
     if result.delivery.state == device_delivery.FAILED:
         return _err("no_readable_format", result.reason, 422)
 
