@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 import { Link } from 'wouter';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeft, Smartphone } from 'lucide-react';
@@ -154,7 +154,10 @@ export function DeviceDetail({ publicId }: { publicId: string }) {
   const [role, setRole] = useState<'origin' | 'assigned'>('origin');
   const [page, setPage] = useState(1);
   const [positionOffset, setPositionOffset] = useState(0);
-  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const [retainedDevice, setRetainedDevice] = useState<{
+    publicId: string;
+    device: Device;
+  } | null>(null);
   const registry = useQuery<{ devices: Device[] }>({
     queryKey: ['annotation-devices'],
     queryFn: () => apiGet('/api/annotations/devices'),
@@ -190,24 +193,30 @@ export function DeviceDetail({ publicId }: { publicId: string }) {
   useEffect(() => {
     if (stalePositionPage) setPositionOffset(correctedPositionOffset);
   }, [correctedPositionOffset, stalePositionPage]);
-  const device = useMemo(
+  const resolvedDevice = useMemo(
     () => registry.data?.devices.find((candidate) => candidate.public_id === publicId)
-      || annotations.data?.device,
+      || (annotations.data?.device.public_id === publicId ? annotations.data.device : undefined),
     [annotations.data, publicId, registry.data],
   );
+  useEffect(() => {
+    if (resolvedDevice) setRetainedDevice({ publicId, device: resolvedDevice });
+  }, [publicId, resolvedDevice]);
+  // A query-key change temporarily clears annotations.data. Retain only the
+  // device already resolved for this public id so switching tabs cannot replace
+  // the whole tablist with the loading spinner and destroy keyboard focus.
+  const device = resolvedDevice
+    || (retainedDevice?.publicId === publicId ? retainedDevice.device : undefined);
 
-  const selectTab = (next: Tab, focus = false) => {
+  const selectTab = (next: Tab) => {
     setTab(next);
     setPage(1);
-    if (focus) {
-      // Focus after the commit that applies the roving tabindex: focusing the
-      // ref synchronously can be undone when React re-renders the tablist.
-      const index = TABS.findIndex((item) => item.id === next);
-      requestAnimationFrame(() => tabRefs.current[index]?.focus());
-    }
   };
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    const current = TABS.findIndex((item) => item.id === tab);
+    const buttons = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'),
+    );
+    const current = buttons.indexOf(event.target as HTMLButtonElement);
+    if (current < 0) return;
     let next = current;
     if (event.key === 'ArrowRight') next = (current + 1) % TABS.length;
     else if (event.key === 'ArrowLeft') next = (current - 1 + TABS.length) % TABS.length;
@@ -215,7 +224,8 @@ export function DeviceDetail({ publicId }: { publicId: string }) {
     else if (event.key === 'End') next = TABS.length - 1;
     else return;
     event.preventDefault();
-    selectTab(TABS[next].id, true);
+    selectTab(TABS[next].id);
+    buttons[next]?.focus();
   };
 
   if (registry.isLoading || (annotations.isLoading && !device)) return <SpinnerCentered size={40} />;
@@ -259,10 +269,9 @@ export function DeviceDetail({ publicId }: { publicId: string }) {
         <span>{t('Show annotations assigned to this device')}</span>
       </label>
       <div className={styles.tabs} role="tablist" aria-label={t('Device data')} onKeyDown={onTabKeyDown}>
-        {TABS.map((item, index) => (
+        {TABS.map((item) => (
           <button
             key={item.id}
-            ref={(node) => { tabRefs.current[index] = node; }}
             id={`device-tab-${item.id}`}
             type="button"
             role="tab"

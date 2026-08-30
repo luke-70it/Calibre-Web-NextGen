@@ -18,8 +18,12 @@ const device = {
 
 async function stubDeviceDetail(page: Page) {
   const annotationRequests: URL[] = [];
-  await page.route('**/api/annotations/devices?*', (route) => route.fulfill({
-    json: { devices: [device], limit: 100, offset: 0, total: 1 },
+  let releaseNotes = () => {};
+  const notesPending = new Promise<void>((resolve) => { releaseNotes = resolve; });
+  // Force the detail payload fallback: changing annotation type must not drop
+  // the already-resolved device while the next response is pending.
+  await page.route('**/api/annotations/devices', (route) => route.fulfill({
+    json: { devices: [], limit: 100, offset: 0, total: 0 },
   }));
   await page.route('**/api/annotations/devices/device-1/summary', (route) => route.fulfill({
     json: {
@@ -37,13 +41,14 @@ async function stubDeviceDetail(page: Page) {
       }],
     },
   }));
-  await page.route('**/api/annotations/devices/device-1/annotations?*', (route) => {
+  await page.route('**/api/annotations/devices/device-1/annotations?*', async (route) => {
     const url = new URL(route.request().url());
     annotationRequests.push(url);
     const type = url.searchParams.get('type') || 'highlight';
     const text = type === 'highlight' ? 'A highlighted passage' : null;
     const note = type === 'note' ? 'A standalone note' : null;
-    return route.fulfill({ json: {
+    if (type === 'note') await notesPending;
+    await route.fulfill({ json: {
       device,
       annotations: [{
         annotation_id: `${type}-1`, book_id: 5, annotation_type: type,
@@ -66,11 +71,11 @@ async function stubDeviceDetail(page: Page) {
       }],
     },
   }));
-  return annotationRequests;
+  return { requests: annotationRequests, releaseNotes };
 }
 
 test('device detail exposes typed tabs, assignment view, inventory, and positions', async ({ page }) => {
-  const requests = await stubDeviceDetail(page);
+  const { requests, releaseNotes } = await stubDeviceDetail(page);
   await page.goto('/app/account/devices/device-1');
   await expect(page.getByRole('heading', { name: 'Libra Colour' })).toBeVisible();
   await expect(page.getByText('A highlighted passage')).toBeVisible();
@@ -78,15 +83,18 @@ test('device detail exposes typed tabs, assignment view, inventory, and position
   await expect(page.getByText('42% read')).toBeVisible();
 
   const highlights = page.getByRole('tab', { name: 'Highlights' });
+  const notes = page.getByRole('tab', { name: 'Notes' });
   await highlights.focus();
   await highlights.press('ArrowRight');
-  await expect(page.getByRole('tab', { name: 'Notes' })).toBeFocused();
+  await expect(notes).toBeFocused();
+  releaseNotes();
   await expect(page.getByText('A standalone note')).toBeVisible();
+  await expect(notes).toBeFocused();
 
   await page.getByRole('checkbox', { name: 'Show annotations assigned to this device' }).check();
   await expect.poll(() => requests.at(-1)?.searchParams.get('role')).toBe('assigned');
 
-  await page.getByRole('tab', { name: 'Notes' }).press('End');
+  await notes.press('End');
   await expect(page.getByRole('tab', { name: 'Device library' })).toBeFocused();
   await expect(page.getByRole('status')).toContainText('Showing 1 of 1 books');
 
