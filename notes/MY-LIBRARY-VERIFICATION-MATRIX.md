@@ -66,7 +66,7 @@ boundary can silently eat user-owned data.
 | two accounts see independent selections; discovery filter | `my-library.spec.ts` | **proven (e2e)** |
 | classic-theme parity of library/global/add/remove | `my-library.spec.ts` | **proven (e2e)** |
 | **My Library × annotations, end to end in a browser** | `my-library.spec.ts` — UI removal, device view, annotation page, md/csv/json downloads | **proven (e2e; #2057 red-tested)** |
-| **My Library × Kobo sync set after removal** | `my-library.spec.ts` — real delivery/ack, UI removal, archived `ChangedEntitlement` | **proven (e2e wire + UI; sync-scope red-tested)** |
+| **My Library × Kobo sync set after removal** | `my-library.spec.ts` — real delivery/ack, UI removal, archived `ChangedEntitlement` | **proven on a Kobo-enabled container (wire + UI; sync-scope red-tested); SKIPPED in CI — no fixture sets `config_kobo_sync`** |
 | **state B (managed, no browse_global) in any e2e** | `my-library.spec.ts` — composed mode/role, no Global Library, exact last-book refusal | **proven (e2e; guard red-tested)** |
 | **empty-library UX in a browser** (emptying a curated library completely) | `my-library.spec.ts` — final UI removal, empty state, recovery link, re-add | **proven (e2e; desktop + mobile; last-removal red-tested)** |
 
