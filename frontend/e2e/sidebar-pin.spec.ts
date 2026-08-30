@@ -123,6 +123,24 @@ test.describe('#1839 desktop sidebar pin', () => {
     await nav.hover({ position: { x: 32, y: 80 } });
     await page.getByRole('button', { name: 'Pin sidebar' }).click();
 
+    // The rail's start position is this test's SCAFFOLDING, not its subject: the
+    // final assertion (`scrollTop > 0` after scrolling to the last item) is only
+    // meaningful if we began at 0, so establish that rather than assert it.
+    //
+    // Asserting it raced two separate things, and the failure was intermittent
+    // across PRs (green on #2014/#2016/#2035, red on #2022/#2024/#2027) with
+    // scrollTop reading 18 -- about half a row:
+    //   1. the pin click starts the rail's `width: 64px -> 220px` transition, and
+    //      labels reflowing as it widens let scroll anchoring nudge scrollTop; and
+    //   2. Playwright scrolls a click target into view first, which in this
+    //      deliberately short 1280x360 viewport can itself move the rail.
+    // Settling the width fixes (1) and the explicit reset fixes (2), so this is
+    // correct either way -- we never established which one fired, and the test
+    // does not need to care. Nothing about the product is masked: no assertion
+    // here ever described pin-time scroll behaviour.
+    await expect.poll(() => railWidth(page)).toBe('220px');
+    await nav.evaluate((element) => { element.scrollTop = 0; });
+
     const metricsBefore = await nav.evaluate((element) => ({
       clientHeight: element.clientHeight,
       scrollHeight: element.scrollHeight,
