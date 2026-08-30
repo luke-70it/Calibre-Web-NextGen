@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'wouter';
 import { ChevronLeft, MoreHorizontal, Pencil, Smartphone } from 'lucide-react';
 import { apiDelete, apiGet, apiPatch, apiPost, apiUrl } from '../lib/api';
+import { clampOffset } from '../lib/pagination';
 import { useAnnouncer } from '../lib/a11y/announcer';
 import { useT } from '../lib/i18n';
 import { EmptyState } from '../components/EmptyState';
@@ -88,6 +89,13 @@ export function Devices() {
       `/api/annotations/devices?active=true&limit=${DEVICE_PAGE_SIZE}&offset=${deviceOffset}`,
     ),
   });
+  const correctedDeviceOffset = data
+    ? clampOffset(deviceOffset, data.total, DEVICE_PAGE_SIZE)
+    : deviceOffset;
+  const staleDevicePage = correctedDeviceOffset !== deviceOffset;
+  useEffect(() => {
+    if (staleDevicePage) setDeviceOffset(correctedDeviceOffset);
+  }, [correctedDeviceOffset, staleDevicePage]);
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['annotation-devices'] });
   const rename = useMutation({
     mutationFn: ({ id, name }: { id: string; name: string }) => apiPatch(`/api/annotations/devices/${id}`, { label: name }),
@@ -112,7 +120,7 @@ export function Devices() {
     setMenu(null); setRemoving({ device, counts });
   };
 
-  if (isLoading) return <SpinnerCentered size={40} />;
+  if (isLoading || staleDevicePage) return <SpinnerCentered size={40} />;
   const devices = data?.devices ?? [];
   return (
     <main className={styles.container}>

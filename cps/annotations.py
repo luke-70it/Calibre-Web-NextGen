@@ -50,6 +50,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from . import calibre_db, logger, ub
 from .admin import admin_required
 from .cw_login import current_user
+from .db import FilteredBookVisibilityUnavailable
 from .render_template import render_title_template
 from .services.annotation_types import (
     to_storage_type,
@@ -92,7 +93,9 @@ MAX_ADMIN_DEVICE_LIMIT = 200
 # can choose the page, but cannot turn a user-facing read into an unbounded
 # export by supplying its own limit.
 DEVICE_ANNOTATION_PAGE_SIZE = 50
-MAX_DEVICE_ANNOTATION_PAGE = 10000
+# SQLite uses signed 64-bit row counts/offsets.  Deriving this public bound
+# from that storage limit keeps every page a true total can report reachable.
+MAX_DEVICE_ANNOTATION_PAGE = ((1 << 63) - 1) // DEVICE_ANNOTATION_PAGE_SIZE + 1
 DEVICE_ANNOTATION_TYPES = ("highlight", "note", "dogear")
 DEVICE_ANNOTATION_ROLES = ("origin", "assigned")
 AUTHORITY_STATUSES = (
@@ -114,6 +117,20 @@ def _database_error_response(operation):
         log.exception("annotations: rollback failed after %s", operation)
     log.exception("annotations: %s failed", operation)
     return jsonify({"error": "database_error"}), 500
+
+
+def _visibility_unavailable_response(operation, error):
+    """Expose a fail-closed visibility-policy outage without faking an empty view."""
+    try:
+        ub.session.rollback()
+    except Exception:
+        log.exception("annotations: rollback failed after %s", operation)
+    log.error("annotations: %s visibility unavailable: %s", operation, error)
+    return jsonify({
+        "error": "visibility_unavailable",
+        "message": "The filtered library view is temporarily unavailable.",
+        "retryable": True,
+    }), 503
 
 
 def _offset_pagination(*, default_limit, max_limit):
@@ -232,64 +249,13 @@ def _visible_books_for_owner(owner, book_ids):
     """Resolve a live, owner-filtered metadata view for a device-scoped read."""
     if owner is None:
         log.error("annotations: device owner unavailable; filtered book view denied")
-        return {}
+        raise FilteredBookVisibilityUnavailable("device owner unavailable")
     books = {}
     for book_id in sorted({int(value) for value in book_ids if value is not None}):
         book = calibre_db.get_filtered_book(book_id, user=owner)
         if book is not None:
             books[book_id] = book
     return books
-
-
-def _owner_visibility_state(session, owner_ids):
-    """Prefetch owner restrictions once per app table for a request."""
-    owner_ids = tuple(sorted({int(owner_id) for owner_id in owner_ids}))
-    state = {
-        owner_id: {"archived": set(), "hidden": set(), "membership": set()}
-        for owner_id in owner_ids
-    }
-    if not owner_ids:
-        return state
-    for user_id, book_id in session.query(
-            ub.ArchivedBook.user_id, ub.ArchivedBook.book_id).filter(
-                ub.ArchivedBook.user_id.in_(owner_ids),
-                ub.ArchivedBook.is_archived.is_(True),
-            ).all():
-        state[int(user_id)]["archived"].add(int(book_id))
-    for user_id, book_id in session.query(
-            ub.UserHiddenBook.user_id, ub.UserHiddenBook.book_id).filter(
-                ub.UserHiddenBook.user_id.in_(owner_ids),
-            ).all():
-        state[int(user_id)]["hidden"].add(int(book_id))
-    for user_id, book_id in session.query(
-            ub.UserLibraryBook.user_id, ub.UserLibraryBook.book_id).filter(
-                ub.UserLibraryBook.user_id.in_(owner_ids),
-            ).all():
-        state[int(user_id)]["membership"].add(int(book_id))
-    return state
-
-
-def _visible_book_scopes_for_owners(owners, session):
-    """Resolve all supplied owners' live filtered book IDs in one metadata query."""
-    owners = [owner for owner in owners if owner is not None]
-    if not owners:
-        log.error("annotations: no device owners available; filtered views denied")
-        return {}
-    visibility_state = _owner_visibility_state(session, (owner.id for owner in owners))
-    resolved = calibre_db.get_filtered_book_ids_for_users(owners, visibility_state)
-    return {
-        int(owner.id): frozenset(resolved.get(int(owner.id), ()))
-        for owner in owners
-    }
-
-
-def _visible_book_scope_for_owner(owner, session):
-    if owner is None:
-        log.error("annotations: device owner unavailable; filtered scope denied")
-        return frozenset()
-    return _visible_book_scopes_for_owners([owner], session).get(
-        int(owner.id), frozenset(),
-    )
 
 
 def _book_in_scope(column, visible_ids):
@@ -317,6 +283,176 @@ def _device_book_in_scope(device_column, book_column, devices, scopes):
         for device in devices
     ]
     return or_(*clauses) if clauses else false()
+
+
+def _owner_visibility_state(session, candidates_by_owner):
+    """Prefetch only restriction rows that can affect device-data candidates."""
+    candidates_by_owner = {
+        int(owner_id): frozenset(int(book_id) for book_id in book_ids)
+        for owner_id, book_ids in candidates_by_owner.items()
+    }
+    owner_ids = tuple(sorted(candidates_by_owner))
+    state = {
+        owner_id: {"archived": set(), "hidden": set(), "membership": set()}
+        for owner_id in owner_ids
+    }
+    if not owner_ids:
+        return state
+    for user_id, book_id in session.query(
+            ub.ArchivedBook.user_id, ub.ArchivedBook.book_id).filter(
+                ub.ArchivedBook.user_id.in_(owner_ids),
+                ub.ArchivedBook.is_archived.is_(True),
+                _owner_book_in_scope(
+                    ub.ArchivedBook.user_id,
+                    ub.ArchivedBook.book_id,
+                    candidates_by_owner,
+                ),
+            ).all():
+        state[int(user_id)]["archived"].add(int(book_id))
+    for user_id, book_id in session.query(
+            ub.UserHiddenBook.user_id, ub.UserHiddenBook.book_id).filter(
+                ub.UserHiddenBook.user_id.in_(owner_ids),
+                _owner_book_in_scope(
+                    ub.UserHiddenBook.user_id,
+                    ub.UserHiddenBook.book_id,
+                    candidates_by_owner,
+                ),
+            ).all():
+        state[int(user_id)]["hidden"].add(int(book_id))
+    for user_id, book_id in session.query(
+            ub.UserLibraryBook.user_id, ub.UserLibraryBook.book_id).filter(
+                ub.UserLibraryBook.user_id.in_(owner_ids),
+                _owner_book_in_scope(
+                    ub.UserLibraryBook.user_id,
+                    ub.UserLibraryBook.book_id,
+                    candidates_by_owner,
+                ),
+            ).all():
+        state[int(user_id)]["membership"].add(int(book_id))
+    return state
+
+
+def _visible_book_scopes_for_owners(owners, session, candidates_by_owner):
+    """Resolve supplied owners' candidate books in one live metadata query."""
+    owners = [owner for owner in owners if owner is not None]
+    if not owners:
+        log.error("annotations: no device owners available; filtered views denied")
+        raise FilteredBookVisibilityUnavailable("device owners unavailable")
+    owner_ids = {int(owner.id) for owner in owners}
+    if owner_ids != {int(owner_id) for owner_id in candidates_by_owner}:
+        log.error("annotations: device owner/candidate scope mismatch; filtered views denied")
+        raise FilteredBookVisibilityUnavailable("device owner scope mismatch")
+    visibility_state = _owner_visibility_state(session, candidates_by_owner)
+    resolved = calibre_db.get_filtered_book_ids_for_users(
+        owners, visibility_state, candidates_by_owner,
+    )
+    return {
+        int(owner.id): frozenset(resolved.get(int(owner.id), ()))
+        for owner in owners
+    }
+
+
+def _visible_book_scope_for_owner(owner, session, candidate_ids):
+    if owner is None:
+        log.error("annotations: device owner unavailable; filtered scope denied")
+        raise FilteredBookVisibilityUnavailable("device owner unavailable")
+    return _visible_book_scopes_for_owners(
+        [owner], session, {int(owner.id): frozenset(candidate_ids)},
+    ).get(
+        int(owner.id), frozenset(),
+    )
+
+
+def _device_book_candidates(devices, owners_by_id, session):
+    """Collect only books that have data relevant to the bounded device page."""
+    owner_ids = tuple(sorted(int(owner_id) for owner_id in owners_by_id))
+    candidates = {owner_id: set() for owner_id in owner_ids}
+    if not devices:
+        return {owner_id: frozenset() for owner_id in owner_ids}
+    device_ids = tuple(device.id for device in devices)
+
+    annotation_books = select(
+        ub.Annotation.user_id.label("owner_id"),
+        ub.Annotation.book_id.label("book_id"),
+    ).where(
+        ub.Annotation.user_id.in_(owner_ids),
+        ub.Annotation.hidden.isnot(True),
+        or_(
+            ub.Annotation.origin_device_id.in_(device_ids),
+            ub.Annotation.assigned_device_id.in_(device_ids),
+        ),
+    )
+    retired_assignment_books = select(
+        ub.Annotation.user_id.label("owner_id"),
+        ub.Annotation.book_id.label("book_id"),
+    ).select_from(ub.DeviceRetiredAssignment).join(
+        ub.Annotation,
+        ub.Annotation.id == ub.DeviceRetiredAssignment.annotation_id,
+    ).where(
+        ub.DeviceRetiredAssignment.device_id.in_(device_ids),
+        ub.Annotation.user_id.in_(owner_ids),
+        ub.Annotation.hidden.isnot(True),
+    )
+    position_books = select(
+        ub.Device.user_id.label("owner_id"),
+        ub.DeviceReadingPosition.book_id.label("book_id"),
+    ).select_from(ub.DeviceReadingPosition).join(
+        ub.Device, ub.Device.id == ub.DeviceReadingPosition.device_id,
+    ).where(
+        ub.DeviceReadingPosition.device_id.in_(device_ids),
+        ub.Device.user_id.in_(owner_ids),
+    )
+    authority_books = select(
+        ub.KoboAnnotationBookState.user_id.label("owner_id"),
+        ub.KoboAnnotationBookState.book_id.label("book_id"),
+    ).where(ub.KoboAnnotationBookState.user_id.in_(owner_ids))
+    latest_report_ids = select(
+        func.max(ub.DeviceInventoryReport.id),
+    ).where(
+        ub.DeviceInventoryReport.device_id.in_(device_ids),
+    ).group_by(ub.DeviceInventoryReport.device_id)
+    inventory_books = select(
+        ub.Device.user_id.label("owner_id"),
+        ub.DeviceInventoryItem.book_id.label("book_id"),
+    ).select_from(ub.DeviceInventoryItem).join(
+        ub.Device, ub.Device.id == ub.DeviceInventoryItem.device_id,
+    ).where(
+        ub.DeviceInventoryItem.device_id.in_(device_ids),
+        ub.DeviceInventoryItem.last_report_id.in_(latest_report_ids),
+        ub.DeviceInventoryItem.book_id.isnot(None),
+        ub.Device.user_id.in_(owner_ids),
+    )
+    candidate_rows = union_all(
+        annotation_books, retired_assignment_books, position_books,
+        authority_books, inventory_books,
+    ).subquery("device_book_candidates")
+    rows = session.execute(select(
+        candidate_rows.c.owner_id,
+        candidate_rows.c.book_id,
+    ).group_by(
+        candidate_rows.c.owner_id,
+        candidate_rows.c.book_id,
+    )).all()
+    for owner_id, book_id in rows:
+        candidates[int(owner_id)].add(int(book_id))
+    return {
+        owner_id: frozenset(book_ids)
+        for owner_id, book_ids in candidates.items()
+    }
+
+
+def _device_visibility_scopes(devices, owners_by_id, session):
+    """Resolve the live owner view for the bounded devices, failing closed loudly."""
+    if not devices:
+        return {}
+    expected_owner_ids = {int(device.user_id) for device in devices}
+    if expected_owner_ids != set(owners_by_id):
+        log.error("annotations: one or more device owners unavailable; filtered views denied")
+        raise FilteredBookVisibilityUnavailable("device owner unavailable")
+    candidates = _device_book_candidates(devices, owners_by_id, session)
+    return _visible_book_scopes_for_owners(
+        owners_by_id.values(), session, candidates,
+    )
 
 
 def _annotation_class_counts(rows):
@@ -600,7 +736,7 @@ def list_annotation_devices(*, user_id, session, active_only=False,
     ).limit(min(limit, MAX_DEVICE_LIST_LIMIT)).all()
     owner = session.query(ub.User).filter(ub.User.id == user_id).first()
     owners_by_id = {} if owner is None else {int(owner.id): owner}
-    scopes = _visible_book_scopes_for_owners(owners_by_id.values(), session)
+    scopes = _device_visibility_scopes(devices, owners_by_id, session)
     rows = _aggregate_device_rows(
         devices=devices,
         owners_by_id=owners_by_id,
@@ -628,7 +764,9 @@ def device_annotation_counts(public_id, *, user_id, session):
     if device is None:
         return None
     owner = _device_owner(device, session)
-    visible_ids = _visible_book_scope_for_owner(owner, session)
+    visible_ids = _device_visibility_scopes(
+        [device], {} if owner is None else {int(owner.id): owner}, session,
+    ).get(int(device.user_id), frozenset())
     origin, assigned = session.query(
         func.sum(case((ub.Annotation.origin_device_id == device.id, 1), else_=0)),
         func.sum(case((ub.Annotation.assigned_device_id == device.id, 1), else_=0)),
@@ -678,7 +816,9 @@ def restore_annotation_device(public_id, *, user_id, session, commit):
     restored = 0
     conflicts = 0
     owner = _device_owner(device, session)
-    visible_ids = _visible_book_scope_for_owner(owner, session)
+    visible_ids = _device_visibility_scopes(
+        [device], {} if owner is None else {int(owner.id): owner}, session,
+    ).get(int(device.user_id), frozenset())
     snapshots = session.query(
         ub.DeviceRetiredAssignment,
         ub.Annotation,
@@ -733,6 +873,8 @@ def annotation_devices_list():
             user_id=current_user.id, session=ub.session, active_only=active_only,
             limit=limit, offset=offset, return_total=True,
         )
+    except FilteredBookVisibilityUnavailable as error:
+        return _visibility_unavailable_response("device list", error)
     except (RuntimeError, SQLAlchemyError):
         return _database_error_response("device list")
     return jsonify({
@@ -827,7 +969,9 @@ def annotation_device_annotations(public_id):
             query = query.filter(
                 ub.Annotation.annotation_type == filters["annotation_type"],
             )
-        visible_ids = _visible_book_scope_for_owner(owner, ub.session)
+        visible_ids = _device_visibility_scopes(
+            [device], {} if owner is None else {int(owner.id): owner}, ub.session,
+        ).get(int(device.user_id), frozenset())
         query = query.filter(_book_in_scope(ub.Annotation.book_id, visible_ids))
         facet_rows = query.with_entities(
             ub.Annotation.annotation_type,
@@ -885,6 +1029,8 @@ def annotation_device_annotations(public_id):
             "pages": (total + DEVICE_ANNOTATION_PAGE_SIZE - 1) // DEVICE_ANNOTATION_PAGE_SIZE,
             "total": total,
         })
+    except FilteredBookVisibilityUnavailable as error:
+        return _visibility_unavailable_response("device annotations", error)
     except SQLAlchemyError:
         return _database_error_response("device annotations")
 
@@ -900,7 +1046,9 @@ def annotation_device_summary(public_id):
         if device is None:
             abort(404)
         owner = _device_owner(device, ub.session)
-        visible_ids = _visible_book_scope_for_owner(owner, ub.session)
+        visible_ids = _device_visibility_scopes(
+            [device], {} if owner is None else {int(owner.id): owner}, ub.session,
+        ).get(int(device.user_id), frozenset())
         aggregate = _aggregate_device_rows(
             devices=[device],
             owners_by_id={} if owner is None else {int(owner.id): owner},
@@ -916,6 +1064,8 @@ def annotation_device_summary(public_id):
             "seeded_books": aggregate["seeded_books"],
             "unseeded_books": aggregate["unseeded_books"],
         })
+    except FilteredBookVisibilityUnavailable as error:
+        return _visibility_unavailable_response("device summary", error)
     except SQLAlchemyError:
         return _database_error_response("device summary")
 
@@ -938,7 +1088,9 @@ def annotation_device_positions(public_id):
             return error_response, error_status
         limit, offset = pagination
         owner = _device_owner(device, ub.session)
-        visible_ids = _visible_book_scope_for_owner(owner, ub.session)
+        visible_ids = _device_visibility_scopes(
+            [device], {} if owner is None else {int(owner.id): owner}, ub.session,
+        ).get(int(device.user_id), frozenset())
         query = ub.session.query(ub.DeviceReadingPosition).filter(
             ub.DeviceReadingPosition.device_id == device.id,
             _book_in_scope(ub.DeviceReadingPosition.book_id, visible_ids),
@@ -978,6 +1130,8 @@ def annotation_device_positions(public_id):
             "offset": offset,
             "total": total,
         })
+    except FilteredBookVisibilityUnavailable as error:
+        return _visibility_unavailable_response("device positions", error)
     except SQLAlchemyError:
         return _database_error_response("device positions")
 
@@ -995,16 +1149,16 @@ def annotation_admin_devices():
             return error_response, error_status
         limit, offset = pagination
         total = ub.session.query(func.count(ub.Device.id)).scalar() or 0
-        page = ub.session.query(ub.Device, ub.User).join(
+        page = ub.session.query(ub.Device, ub.User).outerjoin(
             ub.User, ub.User.id == ub.Device.user_id,
         ).order_by(
             ub.User.name, ub.User.id, ub.Device.display_name, ub.Device.id,
         ).offset(offset).limit(limit).all()
         devices = [device for device, _owner in page]
         owners_by_id = {
-            int(owner.id): owner for _device, owner in page
+            int(owner.id): owner for _device, owner in page if owner is not None
         }
-        scopes = _visible_book_scopes_for_owners(owners_by_id.values(), ub.session)
+        scopes = _device_visibility_scopes(devices, owners_by_id, ub.session)
         aggregates = _aggregate_device_rows(
             devices=devices,
             owners_by_id=owners_by_id,
@@ -1024,6 +1178,8 @@ def annotation_admin_devices():
             "offset": offset,
             "total": int(total),
         })
+    except FilteredBookVisibilityUnavailable as error:
+        return _visibility_unavailable_response("admin device board", error)
     except (RuntimeError, SQLAlchemyError):
         return _database_error_response("admin device board")
 
@@ -1041,7 +1197,9 @@ def annotation_device_inventory(public_id):
             return error_response, error_status
         limit, offset = pagination
         owner = _device_owner(device, ub.session)
-        visible_ids = _visible_book_scope_for_owner(owner, ub.session)
+        visible_ids = _device_visibility_scopes(
+            [device], {} if owner is None else {int(owner.id): owner}, ub.session,
+        ).get(int(device.user_id), frozenset())
         report = (
             ub.session.query(ub.DeviceInventoryReport)
             .filter_by(device_id=device.id)
@@ -1106,6 +1264,8 @@ def annotation_device_inventory(public_id):
             "offset": offset,
             "total": total,
         })
+    except FilteredBookVisibilityUnavailable as error:
+        return _visibility_unavailable_response("device inventory", error)
     except SQLAlchemyError:
         return _database_error_response("device inventory")
 
@@ -1132,15 +1292,13 @@ def annotation_device_inventory_delete(public_id, item_id):
             raise device_capabilities.CapabilityValidationError()
         item, device = item_and_device
         owner = _device_owner(device, ub.session)
+        if item.book_id is None:
+            raise device_capabilities.CapabilityValidationError()
+        visible_ids = _visible_book_scope_for_owner(owner, ub.session, [item.book_id])
         if (
-            owner is None
-            or item.book_id is None
+            item.book_id not in visible_ids
             or calibre_db.get_filtered_book(item.book_id, user=owner) is None
         ):
-            if owner is None:
-                log.error(
-                    "annotations: inventory deletion denied; device owner unavailable",
-                )
             raise device_capabilities.CapabilityValidationError()
         deletion = device_capabilities.queue_named_deletion(
             session=ub.session, user_id=current_user.id,
@@ -1155,6 +1313,10 @@ def annotation_device_inventory_delete(public_id, item_id):
     except device_capabilities.CapabilityValidationError:
         ub.session.rollback()
         return jsonify({"error": "inventory_item_not_found"}), 404
+    except FilteredBookVisibilityUnavailable as error:
+        return _visibility_unavailable_response(
+            "device inventory deletion request", error,
+        )
     except (RuntimeError, SQLAlchemyError):
         return _database_error_response("device inventory deletion request")
 
@@ -1182,6 +1344,8 @@ def annotation_device_rename(public_id):
 def annotation_device_delete_preflight(public_id):
     try:
         found = device_annotation_counts(public_id, user_id=current_user.id, session=ub.session)
+    except FilteredBookVisibilityUnavailable as error:
+        return _visibility_unavailable_response("device delete preflight", error)
     except (RuntimeError, SQLAlchemyError):
         return _database_error_response("device delete preflight")
     if found is None:
@@ -1196,6 +1360,8 @@ def annotation_device_delete(public_id):
         result = soft_delete_annotation_device(
             public_id, user_id=current_user.id, session=ub.session, commit=ub.session_commit,
         )
+    except FilteredBookVisibilityUnavailable as error:
+        return _visibility_unavailable_response("device soft-delete", error)
     except (RuntimeError, SQLAlchemyError):
         return _database_error_response("device soft-delete")
     if result is None:
@@ -1211,6 +1377,8 @@ def annotation_device_restore(public_id):
         result = restore_annotation_device(
             public_id, user_id=current_user.id, session=ub.session, commit=ub.session_commit,
         )
+    except FilteredBookVisibilityUnavailable as error:
+        return _visibility_unavailable_response("device restore", error)
     except (RuntimeError, SQLAlchemyError):
         return _database_error_response("device restore")
     if result is None:

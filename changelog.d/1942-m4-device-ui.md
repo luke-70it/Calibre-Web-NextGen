@@ -28,3 +28,13 @@
 - **Inactive Kobo devices report zero current seeded and unseeded books.** Mixed
   seed coverage remains calculated and surfaced across active Kobo devices,
   rather than presenting retired devices as currently unseeded.
+- **Device pages recover when their current page disappears.** Removing the
+  last item on a page now returns annotations, positions, inventories, user
+  devices, and the administrator board to the last page that still exists.
+- **Filtered-library outages are explicit.** Missing owners or invalid
+  restriction configuration now return a retryable 503 response before any
+  device mutation, instead of presenting a successful but misleading empty
+  result.
+- **Administrator visibility work is candidate-scoped.** The live owner policy
+  is evaluated only for books represented by the bounded device page's
+  annotations, positions, authority state, or latest inventory report.

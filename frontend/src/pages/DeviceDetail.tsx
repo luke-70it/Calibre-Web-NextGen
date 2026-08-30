@@ -1,8 +1,9 @@
-import { useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { Link } from 'wouter';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeft, Smartphone } from 'lucide-react';
 import { apiGet } from '../lib/api';
+import { clampOffset, clampPage } from '../lib/pagination';
 import { useT } from '../lib/i18n';
 import { DeviceInventory, type Device } from '../components/DeviceInventory';
 import { DeviceSummary } from '../components/DeviceSummary';
@@ -175,6 +176,20 @@ export function DeviceDetail({ publicId }: { publicId: string }) {
     ),
     enabled: tab !== 'inventory',
   });
+  const correctedAnnotationPage = annotations.data
+    ? clampPage(page, annotations.data.pages)
+    : page;
+  const staleAnnotationPage = tab !== 'inventory' && correctedAnnotationPage !== page;
+  useEffect(() => {
+    if (staleAnnotationPage) setPage(correctedAnnotationPage);
+  }, [correctedAnnotationPage, staleAnnotationPage]);
+  const correctedPositionOffset = positions.data
+    ? clampOffset(positionOffset, positions.data.total, POSITION_PAGE_SIZE)
+    : positionOffset;
+  const stalePositionPage = correctedPositionOffset !== positionOffset;
+  useEffect(() => {
+    if (stalePositionPage) setPositionOffset(correctedPositionOffset);
+  }, [correctedPositionOffset, stalePositionPage]);
   const device = useMemo(
     () => registry.data?.devices.find((candidate) => candidate.public_id === publicId)
       || annotations.data?.device,
@@ -266,10 +281,10 @@ export function DeviceDetail({ publicId }: { publicId: string }) {
           ? <DeviceInventory device={device} />
           : <AnnotationList
               payload={annotations.data}
-              loading={annotations.isLoading}
+              loading={annotations.isLoading || staleAnnotationPage}
               error={annotations.error}
             />}
-        {tab !== 'inventory' && (annotations.data?.pages ?? 0) > 1 && (
+        {tab !== 'inventory' && !staleAnnotationPage && (annotations.data?.pages ?? 0) > 1 && (
           <nav className={styles.pagination} aria-label={t('Annotation pages')}>
             <button type="button" disabled={page <= 1} onClick={() => setPage(page - 1)}>
               {t('Previous')}
@@ -289,8 +304,9 @@ export function DeviceDetail({ publicId }: { publicId: string }) {
       </section>
       <section className={styles.positions} aria-labelledby="device-positions-heading">
         <h2 id="device-positions-heading">{t('Reading positions')}</h2>
-        <PositionList data={positions.data} loading={positions.isLoading} error={positions.error} />
-        {(positions.data?.total ?? 0) > POSITION_PAGE_SIZE && (
+        <PositionList data={positions.data}
+          loading={positions.isLoading || stalePositionPage} error={positions.error} />
+        {!stalePositionPage && (positions.data?.total ?? 0) > POSITION_PAGE_SIZE && (
           <nav className={styles.pagination} aria-label={t('Reading positions')}>
             <button type="button" disabled={positionOffset === 0}
               onClick={() => setPositionOffset(Math.max(0, positionOffset - POSITION_PAGE_SIZE))}>

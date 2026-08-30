@@ -1,8 +1,9 @@
 import { Link } from 'wouter';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ChevronLeft, Server } from 'lucide-react';
 import { apiGet } from '../lib/api';
+import { clampOffset } from '../lib/pagination';
 import { useT } from '../lib/i18n';
 import { type Device } from '../components/DeviceInventory';
 import { DeviceSummary } from '../components/DeviceSummary';
@@ -32,7 +33,14 @@ export function AdminDevices() {
       `/api/admin/devices?limit=${ADMIN_DEVICE_PAGE_SIZE}&offset=${offset}`,
     ),
   });
-  if (isLoading) return <SpinnerCentered size={40} />;
+  const correctedOffset = data
+    ? clampOffset(offset, data.total, ADMIN_DEVICE_PAGE_SIZE)
+    : offset;
+  const stalePage = correctedOffset !== offset;
+  useEffect(() => {
+    if (stalePage) setOffset(correctedOffset);
+  }, [correctedOffset, stalePage]);
+  if (isLoading || stalePage) return <SpinnerCentered size={40} />;
   const devices = data?.devices ?? [];
   return (
     <main className={styles.container}>

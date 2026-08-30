@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'wouter';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { apiGet, apiPost } from '../lib/api';
+import { clampOffset } from '../lib/pagination';
 import { useAnnouncer } from '../lib/a11y/announcer';
 import { useT } from '../lib/i18n';
 import styles from '../pages/Devices.module.css';
@@ -70,6 +71,13 @@ export function DeviceInventory({ device }: { device: Device }) {
       `/api/annotations/devices/${device.public_id}/inventory?limit=${DEVICE_INVENTORY_WINDOW}&offset=${offset}`,
     ),
   });
+  const correctedOffset = data
+    ? clampOffset(offset, data.total, DEVICE_INVENTORY_WINDOW)
+    : offset;
+  const stalePage = correctedOffset !== offset;
+  useEffect(() => {
+    if (stalePage) setOffset(correctedOffset);
+  }, [correctedOffset, stalePage]);
   const deletion = useMutation({
     mutationFn: (book: InventoryBook) => apiPost(
       `/api/annotations/devices/${device.public_id}/inventory/${book.inventory_item_id}/delete`,
@@ -88,7 +96,7 @@ export function DeviceInventory({ device }: { device: Device }) {
   // Bounded independently of the server's cap, so a mixed-version deployment
   // or a future contract regression still cannot flood this list.
   const books = (data?.books ?? []).slice(0, DEVICE_INVENTORY_WINDOW);
-  const status = isLoading
+  const status = isLoading || stalePage
     ? t('Loading device library…')
     : error
       ? t('Could not load this device library.')
@@ -101,7 +109,7 @@ export function DeviceInventory({ device }: { device: Device }) {
   return (
     <>
       <p role={error ? 'alert' : 'status'}>{status}</p>
-      {!isLoading && !error && books.length > 0 && (
+      {!isLoading && !stalePage && !error && books.length > 0 && (
         <ul className={styles.inventoryList} role="list">
           {books.map((book) => (
             <li key={`${book.lpath}:${book.checksum}`}>
@@ -132,7 +140,7 @@ export function DeviceInventory({ device }: { device: Device }) {
           ))}
         </ul>
       )}
-      {!isLoading && !error && (data?.total ?? 0) > DEVICE_INVENTORY_WINDOW && (
+      {!isLoading && !stalePage && !error && (data?.total ?? 0) > DEVICE_INVENTORY_WINDOW && (
         <nav className={styles.pagination} aria-label={t('Device library')}>
           <button type="button" disabled={offset === 0}
             onClick={() => setOffset(Math.max(0, offset - DEVICE_INVENTORY_WINDOW))}>

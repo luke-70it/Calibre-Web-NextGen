@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from types import SimpleNamespace
+import sqlite3
 
 import pytest
 from flask import Flask
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
 
 
 @pytest.fixture
@@ -20,6 +22,37 @@ def session():
     db.close()
 
 
+def _metadata_library(*, book_count=20, restricted_column=0):
+    """Build a production-shaped, separately observed Calibre metadata DB."""
+    from cps import db
+
+    def creator():
+        connection = sqlite3.connect(":memory:", check_same_thread=False)
+        connection.execute("ATTACH DATABASE ':memory:' AS calibre")
+        return connection
+
+    engine = create_engine(
+        "sqlite+pysqlite://", creator=creator, poolclass=StaticPool,
+    )
+    db.Base.metadata.create_all(engine)
+    metadata_session = sessionmaker(bind=engine)()
+    metadata_session.execute(db.Books.__table__.insert(), [{
+        "id": book_id,
+        "title": f"Metadata book {book_id}",
+        "sort": f"Metadata book {book_id}",
+        "author_sort": "",
+        "series_index": "1.0",
+        "path": f"book-{book_id}",
+        "has_cover": 0,
+    } for book_id in range(1, book_count + 1)])
+    metadata_session.commit()
+    cdb = object.__new__(db.CalibreDB)
+    cdb.session = metadata_session
+    cdb.config = SimpleNamespace(config_restricted_column=restricted_column)
+    cdb.reconnect_db = lambda *_args, **_kwargs: None
+    return engine, metadata_session, cdb
+
+
 @pytest.fixture(autouse=True)
 def filtered_library_stub(monkeypatch):
     """Keep app.db-only fixtures explicit without weakening production authz."""
@@ -27,9 +60,9 @@ def filtered_library_stub(monkeypatch):
 
     original = annotations._visible_book_scopes_for_owners
 
-    def scopes(owners, _session):
+    def scopes(owners, _session, candidates_by_owner):
         return {
-            int(owner.id): frozenset(range(1, 20_001))
+            int(owner.id): frozenset(candidates_by_owner.get(int(owner.id), ()))
             for owner in owners if owner is not None
         }
 
@@ -93,6 +126,7 @@ def test_device_list_exposes_webreader_kind_without_faking_legacy_rows(session):
     from cps import ub
     from cps.annotations import list_annotation_devices
 
+    _user(session)
     browser = ub.Device(
         user_id=7,
         kind="webreader",
@@ -584,8 +618,10 @@ def _allow_books(monkeypatch, annotations, *, hidden=()):
     monkeypatch.setattr(
         annotations,
         "_visible_book_scopes_for_owners",
-        lambda owners, _session: {
-            int(owner.id): frozenset(set(range(1, 20_001)) - hidden)
+        lambda owners, _session, candidates_by_owner: {
+            int(owner.id): frozenset(
+                set(candidates_by_owner.get(int(owner.id), ())) - hidden
+            )
             for owner in owners if owner is not None
         },
     )
@@ -645,7 +681,7 @@ def test_device_annotations_default_to_origin_and_assigned_toggle_has_facets_and
 
 
 @pytest.mark.unit
-def test_device_annotations_pagination_is_fixed_and_page_number_is_capped(
+def test_r3_f4_device_annotation_page_bound_covers_every_true_sqlite_page(
         session, monkeypatch):
     from cps import annotations, ub
 
@@ -672,8 +708,19 @@ def test_device_annotations_pagination_is_fixed_and_page_number_is_capped(
     assert len(first["annotations"]) == annotations.DEVICE_ANNOTATION_PAGE_SIZE == 50
     assert first["total"] == 51 and first["pages"] == 2
     assert len(second["annotations"]) == 1 and second["page"] == 2
+    assert annotations.MAX_DEVICE_ANNOTATION_PAGE == (
+        ((1 << 63) - 1) // annotations.DEVICE_ANNOTATION_PAGE_SIZE + 1
+    )
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/annotations?page=10001"):
+        reachable = annotations.annotation_device_annotations.__wrapped__(
+            device.public_id,
+        ).get_json()
+    assert reachable["page"] == 10001
+    assert reachable["annotations"] == []
+    assert reachable["total"] == 51
 
-    for value in ("0", "10001", "nope"):
+    for value in ("0", str(annotations.MAX_DEVICE_ANNOTATION_PAGE + 1), "nope"):
         with app.test_request_context(
                 f"/api/annotations/devices/{device.public_id}/annotations?page={value}"):
             response, status = annotations.annotation_device_annotations.__wrapped__(
@@ -973,15 +1020,42 @@ def test_r2_f2_preflight_delete_and_restore_responses_exclude_filtered_books(
 
 
 @pytest.mark.unit
-def test_r2_f3_missing_device_owner_fails_closed_and_logs(
-        session, filtered_library_stub, caplog):
-    from cps import annotations
+def test_r3_f2_missing_owner_is_loud_503_and_device_write_is_not_mutated(
+        session, filtered_library_stub, monkeypatch, caplog):
+    from cps import annotations, ub
+    from cps.db import FilteredBookVisibilityUnavailable
+
+    orphan = ub.Device(
+        user_id=99, kind="kobo", display_name="Orphan", active=True,
+        created_by="auto",
+    )
+    session.add(orphan)
+    session.commit()
+    commits = []
+    monkeypatch.setattr(annotations, "current_user", SimpleNamespace(id=99))
+    monkeypatch.setattr(ub, "session", session)
+    monkeypatch.setattr(ub, "session_commit", lambda: commits.append(True))
+    app = Flask(__name__)
 
     with caplog.at_level("ERROR"):
-        assert annotations._visible_books_for_owner(None, [5, 6]) == {}
-        assert annotations._visible_book_scope_for_owner(None, session) == frozenset()
-        assert filtered_library_stub([None], session) == {}
+        with pytest.raises(FilteredBookVisibilityUnavailable):
+            annotations._visible_books_for_owner(None, [5, 6])
+        with pytest.raises(FilteredBookVisibilityUnavailable):
+            annotations._visible_book_scope_for_owner(None, session, [5])
+        with pytest.raises(FilteredBookVisibilityUnavailable):
+            filtered_library_stub([None], session, {99: frozenset({5})})
+        with app.test_request_context(
+                f"/api/annotations/devices/{orphan.public_id}", method="DELETE"):
+            response, status = annotations.annotation_device_delete.__wrapped__(
+                orphan.public_id,
+            )
 
+    session.refresh(orphan)
+    assert status == 503
+    assert response.get_json()["error"] == "visibility_unavailable"
+    assert response.get_json()["retryable"] is True
+    assert orphan.active is True
+    assert commits == []
     assert "owner unavailable" in caplog.text
     assert "filtered views denied" in caplog.text
 
@@ -1084,66 +1158,200 @@ def test_r2_f4_annotation_rows_are_limited_in_sql_before_materialization(
 
 
 @pytest.mark.unit
-def test_r2_f5_admin_board_query_count_is_constant_as_devices_and_users_grow(
-        session, monkeypatch):
+def test_r3_f1_admin_candidate_scope_excludes_rows_without_page_device_data(session):
+    from datetime import datetime, timezone
+
+    from cps import annotations, ub
+
+    owner = _user(session, user_id=7)
+    outsider = _user(session, user_id=8)
+    page_device = _device(session, user_id=owner.id)
+    other_device = _device(session, user_id=outsider.id)
+    _annotation(session, "page", user_id=owner.id, book_id=5, origin=page_device.id)
+    _annotation(session, "other", user_id=outsider.id, book_id=50, origin=other_device.id)
+    now = datetime.now(timezone.utc)
+    session.add_all([
+        ub.DeviceReadingPosition(
+            device_id=page_device.id, book_id=8, progress_percent=10,
+            server_modified_at=now,
+        ),
+        ub.DeviceReadingPosition(
+            device_id=other_device.id, book_id=80, progress_percent=20,
+            server_modified_at=now,
+        ),
+        ub.KoboAnnotationBookState(
+            user_id=owner.id, book_id=9, content_id="owner-9",
+            authority_status="authoritative",
+        ),
+        ub.KoboAnnotationBookState(
+            user_id=outsider.id, book_id=90, content_id="outsider-90",
+            authority_status="authoritative",
+        ),
+    ])
+    old_report = ub.DeviceInventoryReport(
+        device_id=page_device.id, item_count=1, matched_count=1, observed_at=now,
+    )
+    latest_report = ub.DeviceInventoryReport(
+        device_id=page_device.id, item_count=1, matched_count=1, observed_at=now,
+    )
+    session.add_all([old_report, latest_report])
+    session.flush()
+    session.add_all([
+        ub.DeviceInventoryItem(
+            device_id=page_device.id, lpath="old.epub", checksum="1" * 32,
+            book_id=11, size=1, mtime=1, last_report_id=old_report.id,
+        ),
+        ub.DeviceInventoryItem(
+            device_id=page_device.id, lpath="latest.epub", checksum="2" * 32,
+            book_id=10, size=1, mtime=1, last_report_id=latest_report.id,
+        ),
+    ])
+    session.commit()
+
+    candidates = annotations._device_book_candidates(
+        [page_device], {owner.id: owner}, session,
+    )
+
+    assert candidates == {owner.id: frozenset({5, 8, 9, 10})}
+    assert 11 not in candidates[owner.id]  # Superseded inventory report.
+    assert not ({50, 80, 90} & candidates[owner.id])
+
+
+@pytest.mark.unit
+def test_r3_f2_missing_configured_restriction_returns_degraded_503(
+        session, monkeypatch, filtered_library_stub):
+    from cps import annotations, ub
+
+    owner = _user(session)
+    device = _device(session, user_id=owner.id)
+    _annotation(session, "restricted", user_id=owner.id, book_id=5, origin=device.id)
+    session.commit()
+    metadata_engine, metadata_session, cdb = _metadata_library(
+        restricted_column=999,
+    )
+    monkeypatch.setattr(
+        annotations, "_visible_book_scopes_for_owners", filtered_library_stub,
+    )
+    monkeypatch.setattr(annotations, "calibre_db", cdb)
+    monkeypatch.setattr(annotations, "current_user", SimpleNamespace(id=owner.id))
+    monkeypatch.setattr(ub, "session", session)
+    app = Flask(__name__)
+
+    try:
+        with app.test_request_context(
+                f"/api/annotations/devices/{device.public_id}/summary"):
+            response, status = annotations.annotation_device_summary.__wrapped__(
+                device.public_id,
+            )
+    finally:
+        metadata_session.close()
+        metadata_engine.dispose()
+
+    assert status == 503
+    assert response.get_json() == {
+        "error": "visibility_unavailable",
+        "message": "The filtered library view is temporarily unavailable.",
+        "retryable": True,
+    }
+
+
+@pytest.mark.unit
+def test_r3_f5_admin_real_visibility_helper_bounds_sql_on_both_engines(
+        session, monkeypatch, filtered_library_stub):
     from datetime import datetime, timezone
 
     from sqlalchemy import event
     from cps import admin, annotations, ub
 
-    first = _user(session, user_id=7)
-    first_device = _device(session, user_id=first.id)
-    _annotation(session, "first", user_id=first.id, origin=first_device.id,
-                annotation_type="highlight")
+    owner = _user(session, user_id=7)
+    device = _device(session, user_id=owner.id)
+    now = datetime.now(timezone.utc)
+    _annotation(
+        session, "candidate-annotation", user_id=owner.id, book_id=5,
+        origin=device.id, annotation_type="highlight",
+    )
+    session.add(ub.DeviceReadingPosition(
+        device_id=device.id, book_id=8, progress_percent=25,
+        server_modified_at=now,
+    ))
+    state = ub.KoboAnnotationBookState(
+        user_id=owner.id, book_id=9, content_id="candidate-authority",
+        authority_status="authoritative",
+    )
+    report = ub.DeviceInventoryReport(
+        device_id=device.id, item_count=1, matched_count=1, observed_at=now,
+    )
+    session.add_all([state, report])
+    session.flush()
+    session.add(ub.DeviceInventoryItem(
+        device_id=device.id, lpath="candidate.epub", checksum="a" * 32,
+        book_id=10, size=1, mtime=1, last_report_id=report.id,
+    ))
     session.commit()
+
+    metadata_engine, metadata_session, cdb = _metadata_library(book_count=5000)
+    monkeypatch.setattr(
+        annotations, "_visible_book_scopes_for_owners", filtered_library_stub,
+    )
+    monkeypatch.setattr(annotations, "calibre_db", cdb)
     monkeypatch.setattr(ub, "session", session)
     monkeypatch.setattr(admin, "current_user", SimpleNamespace(role_admin=lambda: True))
-    app = Flask(__name__)
+    app_statements = []
+    metadata_statements = []
 
-    def board_query_count():
-        statements = []
+    def capture_app(_connection, _cursor, statement, parameters, _context, _many):
+        if statement.lstrip().lower().startswith("select"):
+            app_statements.append((statement, parameters))
 
-        def capture(_connection, _cursor, statement, _parameters, _context, _many):
-            if statement.lstrip().lower().startswith("select"):
-                statements.append(statement)
+    def capture_metadata(_connection, _cursor, statement, parameters, _context, _many):
+        if statement.lstrip().lower().startswith("select"):
+            metadata_statements.append((statement, parameters))
 
-        event.listen(session.get_bind(), "before_cursor_execute", capture)
+    event.listen(session.get_bind(), "before_cursor_execute", capture_app)
+    event.listen(metadata_engine, "before_cursor_execute", capture_metadata)
+    try:
+        app = Flask(__name__)
+        with app.test_request_context("/api/admin/devices?limit=50"):
+            response = annotations.annotation_admin_devices()
+    finally:
+        event.remove(session.get_bind(), "before_cursor_execute", capture_app)
+        event.remove(metadata_engine, "before_cursor_execute", capture_metadata)
+
+    try:
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload["devices"][0]["highlights"] == 1
+        assert payload["devices"][0]["books_with_position"] == 1
+        assert len(metadata_statements) == 1
+        metadata_sql, metadata_parameters = metadata_statements[0]
+        normalized_sql = metadata_sql.lower()
+        assert "json_each" in normalized_sql
+        assert "group_concat" not in normalized_sql
+        assert "[5, 8, 9, 10]" in str(metadata_parameters)
+        assert len(app_statements) <= 16
+        candidate_queries = [
+            statement.lower() for statement, _parameters in app_statements
+            if "device_book_candidates" in statement.lower()
+        ]
+        assert len(candidate_queries) == 1
+        assert "annotation.origin_device_id in" in candidate_queries[0]
+        assert "device_reading_position.device_id in" in candidate_queries[0]
+        assert "kobo_annotation_book_state.user_id in" in candidate_queries[0]
+        assert "device_inventory_item.last_report_id in" in candidate_queries[0]
+
+        raw_connection = metadata_engine.raw_connection()
         try:
-            with app.test_request_context("/api/admin/devices?limit=200"):
-                response = annotations.annotation_admin_devices()
-            assert response.status_code == 200
+            plan = raw_connection.execute(
+                "EXPLAIN QUERY PLAN " + metadata_sql, metadata_parameters,
+            ).fetchall()
         finally:
-            event.remove(session.get_bind(), "before_cursor_execute", capture)
-        return len(statements)
-
-    small_count = board_query_count()
-    now = datetime.now(timezone.utc)
-    for user_id in range(8, 28):
-        owner = _user(session, user_id=user_id)
-        device = _device(session, user_id=owner.id)
-        _annotation(
-            session, f"annotation-{user_id}", user_id=owner.id,
-            book_id=user_id, origin=device.id, annotation_type="note",
-        )
-        session.add(ub.DeviceReadingPosition(
-            device_id=device.id, book_id=user_id,
-            progress_percent=50, server_modified_at=now,
-        ))
-        state = ub.KoboAnnotationBookState(
-            user_id=owner.id, book_id=user_id, content_id=f"book-{user_id}",
-            authority_status="authoritative",
-        )
-        session.add(state)
-        session.flush()
-        session.add(ub.KoboAnnotationSeedCapture(
-            book_state_id=state.id, device_id=device.id,
-            result="accepted", completed_at=now,
-        ))
-    session.commit()
-    large_count = board_query_count()
-
-    assert small_count == large_count
-    assert large_count <= 15
+            raw_connection.close()
+        plan_text = " ".join(str(row).lower() for row in plan)
+        assert "search books using integer primary key" in plan_text
+        assert "scan books" not in plan_text
+    finally:
+        metadata_session.close()
+        metadata_engine.dispose()
 
 
 @pytest.mark.unit

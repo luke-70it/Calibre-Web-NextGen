@@ -52,6 +52,10 @@ from .unicode_collation import unicode_initial, unicode_sort_key
 
 log = logger.create()
 
+
+class FilteredBookVisibilityUnavailable(RuntimeError):
+    """The configured filtered-library policy could not be resolved safely."""
+
 # Rate-limit author-sort drift diagnostics. Books.author_sort is denormalized
 # from Authors.sort and can drift after an Authors edit; the divergence is
 # visual-only (within-book ordering falls back to Authors.id), but the log
@@ -1513,16 +1517,18 @@ class CalibreDB:
                 ))
                 .first())
 
-    def get_filtered_book_ids_for_users(self, users, visibility_state):
-        """Resolve several users' current filtered views in one metadata query.
+    def get_filtered_book_ids_for_users(self, users, visibility_state,
+                                        candidates_by_user):
+        """Resolve candidate books in several users' current filtered views.
 
         ``common_filters`` intentionally performs app-database lookups for one
         user.  A cross-user board must not repeat those lookups per account, so
         its caller supplies the archived/hidden/membership rows prefetched once
         per table.  The predicates below are the same policy expressed against
         that immutable request snapshot; the metadata query is one UNION ALL
-        execution and returns one comma-delimited scalar per owner, not one row
-        per visible book.
+        execution.  Every branch is constrained to IDs that already have
+        device data, so the admin board never evaluates an owner's policy over
+        the entire Calibre library.
         """
         self.ensure_session()
         users = list(users)
@@ -1534,6 +1540,13 @@ class CalibreDB:
         branches = []
         for filter_user in users:
             user_id = int(filter_user.id)
+            candidate_ids = tuple(sorted({
+                int(book_id)
+                for book_id in candidates_by_user.get(user_id, ())
+                if book_id is not None
+            }))
+            if not candidate_ids:
+                continue
             state = visibility_state.get(user_id, {})
             archived_ids = tuple(state.get("archived", ()))
             hidden_ids = (
@@ -1576,13 +1589,12 @@ class CalibreDB:
                         else column.any(values.value.in_(denied_values))
                     )
                 except (KeyError, AttributeError, IndexError):
-                    # Match ``common_filters``' fail-closed custom-column
-                    # behavior without flashing once per owner on an admin GET.
-                    allowed_column_filter = false()
-                    denied_column_filter = true()
                     log.error(
                         "Custom Column No.%s does not exist in calibre database",
                         self.config.config_restricted_column,
+                    )
+                    raise FilteredBookVisibilityUnavailable(
+                        "configured restricted column is unavailable"
                     )
             else:
                 allowed_column_filter = true()
@@ -1592,10 +1604,15 @@ class CalibreDB:
             if bool(getattr(filter_user, "has_own_library", False)):
                 membership_filter = Books.id.in_(membership_ids)
 
+            candidate_values = func.json_each(
+                json.dumps(candidate_ids),
+            ).table_valued("value").alias()
+
             branches.append(select(
                 literal(user_id).label("user_id"),
                 Books.id.label("book_id"),
             ).where(and_(
+                Books.id.in_(select(candidate_values.c.value)),
                 language_filter,
                 allowed_tags_filter,
                 ~denied_tags_filter,
@@ -1606,16 +1623,21 @@ class CalibreDB:
                 membership_filter,
             )))
 
+        result = {int(user.id): frozenset() for user in users}
+        if not branches:
+            return result
         visible = union_all(*branches).subquery("device_visible_books")
         rows = self.session.execute(select(
             visible.c.user_id,
-            func.group_concat(visible.c.book_id, ",").label("book_ids"),
-        ).group_by(visible.c.user_id)).all()
-        result = {int(user.id): frozenset() for user in users}
-        for user_id, raw_ids in rows:
-            result[int(user_id)] = frozenset(
-                int(value) for value in str(raw_ids or "").split(",") if value
-            )
+            visible.c.book_id,
+        )).all()
+        mutable = {user_id: set() for user_id in result}
+        for user_id, book_id in rows:
+            mutable[int(user_id)].add(int(book_id))
+        result = {
+            user_id: frozenset(book_ids)
+            for user_id, book_ids in mutable.items()
+        }
         return result
 
     def get_book_read_archived(
