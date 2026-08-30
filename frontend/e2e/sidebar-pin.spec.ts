@@ -137,8 +137,26 @@ test.describe('#1839 desktop sidebar pin', () => {
     // Settling the width fixes (1) and the explicit reset fixes (2), so this is
     // correct either way -- we never established which one fired, and the test
     // does not need to care. Nothing about the product is masked: no assertion
-    // here ever described pin-time scroll behaviour.
+    // here ever described pin-time scroll behaviour -- EXCEPT the assertion being
+    // replaced, which was the suite's only guard on pin-time scroll position.
+    // That is why `settledScrollTop` is recorded rather than discarded: the claim
+    // is deferred to a follow-up with data, not dropped.
     await expect.poll(() => railWidth(page)).toBe('220px');
+    // Record the settled position BEFORE resetting it. Applying both remedies
+    // blind would make whichever one was load-bearing permanently unknowable,
+    // and would drop the pin-time claim silently. This runs in CI on every
+    // execution at no cost and decides it:
+    //   settled === 0  -> the width settle did the work; mechanism (1) is real,
+    //                     and the reset below can be replaced by restoring
+    //                     `expect(scrollTop).toBe(0)` as a genuine assertion.
+    //   settled !== 0  -> the click itself moved the rail; mechanism (2) is real,
+    //                     the reset is load-bearing, and the ~18px jump is a real
+    //                     pin-time behaviour that deserves its own product test.
+    const settledScrollTop = await nav.evaluate((element) => element.scrollTop);
+    testInfo.annotations.push({
+      type: 'pin-settled-scrolltop',
+      description: String(settledScrollTop),
+    });
     await nav.evaluate((element) => { element.scrollTop = 0; });
 
     const metricsBefore = await nav.evaluate((element) => ({
