@@ -96,7 +96,7 @@ test('device detail exposes typed tabs, assignment view, inventory, and position
 
   await notes.press('End');
   await expect(page.getByRole('tab', { name: 'Device library' })).toBeFocused();
-  await expect(page.getByRole('status')).toContainText('Showing 1 of 1 books');
+  await expect(page.getByRole('status').filter({ hasText: 'Showing' })).toContainText('Showing 1 of 1 books');
 
   const results = await new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag22aa'])
