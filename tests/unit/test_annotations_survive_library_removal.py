@@ -7,7 +7,8 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from flask import Flask
+from flask import Flask, g
+from flask_babel import Babel
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -64,10 +65,14 @@ def _user(session, name, *, browse_global=False):
         user_library_seeded=True,
         default_language="all",
     )
+    session.add(user)
+    # Commit before touching role: the column default is applied on INSERT, so
+    # `user.role |= ...` on an unflushed instance ORs against None. This is the
+    # same order test_my_library_backend_1939._mode_user uses.
+    session.commit()
     if browse_global:
         user.role |= constants.ROLE_BROWSE_GLOBAL
-    session.add(user)
-    session.commit()
+        session.commit()
     return user
 
 
@@ -313,8 +318,19 @@ def test_removed_book_remains_readable_in_annotations_view_and_all_exports(
     )
     user_library.remove_book(user, 1, app_session=app_session)
     app = Flask(__name__)
+    # annotations_view calls gettext, which resolves app.extensions['babel'],
+    # and builds url_for links to its sibling export endpoints, which needs the
+    # blueprint registered.
+    Babel(app)
+    app.register_blueprint(annotations.annotations_bp)
 
     with app.test_request_context("/annotations/1"):
+        # These views resolve cps.cw_login's current_user proxy. _get_user()
+        # returns g._login_user when it is set and only falls back to
+        # current_app.login_manager otherwise (cps/cw_login/utils.py:392), so
+        # seeding it is the supported way to run the view as this user without
+        # a session cookie.
+        g._login_user = user
         view = annotations.annotations_view.__wrapped__(1)
         markdown = annotations.annotations_export_markdown.__wrapped__(1)
         csv = annotations.annotations_export_csv.__wrapped__(1)
