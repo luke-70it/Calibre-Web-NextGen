@@ -157,6 +157,13 @@ test.describe('#1839 desktop sidebar pin', () => {
       type: 'pin-settled-scrolltop',
       description: String(settledScrollTop),
     });
+    // Print it too. The annotation alone is NOT readable in this project's CI:
+    // the reporters are list/html/github with no json reporter, and the html
+    // report does not surface annotations for a PASSING test -- verified by
+    // downloading the playwright-report artifact from this PR's own green run
+    // and finding no trace of the annotation in it. stdout is what the list
+    // reporter and the Actions log actually show.
+    console.log(`[pin-settled-scrolltop] ${settledScrollTop}`);
     await nav.evaluate((element) => { element.scrollTop = 0; });
 
     const metricsBefore = await nav.evaluate((element) => ({
