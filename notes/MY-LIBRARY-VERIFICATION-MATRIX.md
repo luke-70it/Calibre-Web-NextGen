@@ -1,10 +1,9 @@
 # My Library (#1939/#1947) — verification matrix
 
-**Why this file exists.** On 2026-08-30 the project owner set the handover bar:
-a feature does not reach them to test until it has been driven through the real
-UI on a real container, in every account state it can be in, **including across
-subsystem boundaries**. This file is what makes that auditable — it says what is
-proven, by what, and what is not.
+**Why this file exists.** A feature is not handed over for acceptance testing
+until it has been driven through the real UI on a real container, in every
+account state it can be in, **including across subsystem boundaries**. This file
+is what makes that auditable — it says what is proven, by what, and what is not.
 
 It exists because the previous handover failed exactly there. My Library was
 tested. Annotations were tested. **Their intersection never was**, and that is
@@ -20,9 +19,9 @@ A row query is not a test of a read path. A unit test is not a test of a UI.
 ## Account states
 
 Membership behaviour is a function of BOTH the mode and the role, and the two
-gates compose. This is also why the owner could not find Global Library on
-2026-08-30: `Sidebar.tsx:111` requires `personalLibrary && me.role.browse_global`
-and their household account had neither.
+gates compose. This is also why Global Library can appear to be missing:
+`Sidebar.tsx:111` requires `personalLibrary && me.role.browse_global`, so an
+account holding neither sees no entry point — which is correct, not a bug.
 
 | id | `library_mode` | `browse_global` | who this is |
 |----|----------------|-----------------|-------------|
@@ -69,7 +68,7 @@ boundary can silently eat user-owned data.
 | **My Library × annotations, end to end in a browser** | `my-library.spec.ts` — UI removal, device view, annotation page, md/csv/json downloads | **proven (e2e; #2057 red-tested)** |
 | **My Library × Kobo sync set after removal** | `my-library.spec.ts` — real delivery/ack, UI removal, archived `ChangedEntitlement` | **proven (e2e wire + UI; sync-scope red-tested)** |
 | **state B (managed, no browse_global) in any e2e** | `my-library.spec.ts` — composed mode/role, no Global Library, exact last-book refusal | **proven (e2e; guard red-tested)** |
-| **empty-library UX in a browser** (the operator's step 3) | `my-library.spec.ts` — final UI removal, empty state, recovery link, re-add | **proven (e2e; desktop + mobile; last-removal red-tested)** |
+| **empty-library UX in a browser** (emptying a curated library completely) | `my-library.spec.ts` — final UI removal, empty state, recovery link, re-add | **proven (e2e; desktop + mobile; last-removal red-tested)** |
 
 ## Open decision
 
