@@ -99,14 +99,15 @@ test('device detail exposes typed tabs, assignment view, inventory, and position
 });
 
 test('admin device board reuses the device summaries', async ({ page }) => {
-  await page.route('**/api/admin/devices', (route) => route.fulfill({ json: {
+  await page.route('**/api/admin/devices*', (route) => route.fulfill({ json: {
     devices: [{ ...device, user: { id: 7, name: 'e2e' } }],
     limit: 50, offset: 0, total: 1,
   } }));
   await page.goto('/app/admin/devices');
   await expect(page.getByRole('heading', { name: 'Device administration' })).toBeVisible();
-  const card = page.getByTestId('admin-device-list').getByRole('listitem');
-  await expect(card).toContainText('Libra Colour');
+  const card = page.getByTestId('admin-device-list').getByRole('listitem')
+    .filter({ hasText: 'Libra Colour' });
+  await expect(card).toHaveCount(1);
   await expect(card).toContainText('Account: e2e');
   await expect(card).toContainText('Partially seeded books');
 });

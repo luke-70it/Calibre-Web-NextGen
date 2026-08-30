@@ -199,7 +199,12 @@ export function DeviceDetail({ publicId }: { publicId: string }) {
   const selectTab = (next: Tab, focus = false) => {
     setTab(next);
     setPage(1);
-    if (focus) tabRefs.current[TABS.findIndex((item) => item.id === next)]?.focus();
+    if (focus) {
+      // Focus after the commit that applies the roving tabindex: focusing the
+      // ref synchronously can be undone when React re-renders the tablist.
+      const index = TABS.findIndex((item) => item.id === next);
+      requestAnimationFrame(() => tabRefs.current[index]?.focus());
+    }
   };
   const onTabKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const current = TABS.findIndex((item) => item.id === tab);
