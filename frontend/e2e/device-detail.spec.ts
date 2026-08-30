@@ -105,7 +105,7 @@ test('admin device board reuses the device summaries', async ({ page }) => {
   } }));
   await page.goto('/app/admin/devices');
   await expect(page.getByRole('heading', { name: 'Device administration' })).toBeVisible();
-  const card = page.getByRole('listitem');
+  const card = page.getByTestId('admin-device-list').getByRole('listitem');
   await expect(card).toContainText('Libra Colour');
   await expect(card).toContainText('Account: e2e');
   await expect(card).toContainText('Partially seeded books');

@@ -102,6 +102,14 @@ test('device inventory renders one bounded window and reports the true total', a
   );
   await expect(inventory.getByRole('listitem')).toHaveCount(200);
   await expect(inventory.getByRole('link')).toHaveCount(200);
+  const deleteGeometry = await inventory.getByRole('button', { name: 'Delete from device' })
+    .evaluateAll((buttons) => {
+      const first = buttons[0].getBoundingClientRect();
+      const second = buttons[1].getBoundingClientRect();
+      return { height: first.height, neighborGap: second.top - first.bottom };
+    });
+  expect(deleteGeometry.height).toBeGreaterThanOrEqual(44);
+  expect(deleteGeometry.neighborGap).toBeGreaterThanOrEqual(24);
   expect(inventoryRequestUrl?.searchParams.get('limit')).toBe('200');
   expect(inventoryRequestUrl?.searchParams.get('offset')).toBe('0');
   await inventory.getByRole('button', { name: 'Next' }).click();

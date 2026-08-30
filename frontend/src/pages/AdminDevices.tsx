@@ -61,7 +61,7 @@ export function AdminDevices() {
             page: Math.floor(offset / ADMIN_DEVICE_PAGE_SIZE) + 1,
             pages: Math.max(1, Math.ceil((data?.total ?? 0) / ADMIN_DEVICE_PAGE_SIZE)),
           })}</p>
-          <ul className={styles.list} role="list">
+          <ul className={styles.list} role="list" data-testid="admin-device-list">
             {devices.map((device) => (
               <li key={device.public_id} className={styles.card}>
                 <header>

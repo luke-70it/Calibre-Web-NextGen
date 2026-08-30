@@ -11,7 +11,7 @@
 .cardMain p { color: var(--text-muted); margin: var(--sp-1) 0 0; overflow-wrap: anywhere; }
 .inventoryToggle { min-height: 44px; margin-top: var(--sp-2); color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
 .inventory { margin-top: var(--sp-2); }
-.inventoryList { display: grid; gap: var(--sp-2); margin: 0; padding-left: var(--sp-5); }
+.inventoryList { display: grid; gap: var(--sp-5); margin: 0; padding-left: var(--sp-5); }
 .inventoryList li { overflow-wrap: anywhere; }
 .inventoryRow { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--sp-3); }
 .inventoryRow > div { min-width: 0; }
