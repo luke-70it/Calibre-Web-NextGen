@@ -66,10 +66,10 @@ boundary can silently eat user-owned data.
 | seed under `NETWORK_SHARE_MODE=true` | `test_my_library_backend_1939.py` (F-be8891) | **proven** |
 | two accounts see independent selections; discovery filter | `my-library.spec.ts` | **proven (e2e)** |
 | classic-theme parity of library/global/add/remove | `my-library.spec.ts` | **proven (e2e)** |
-| **My Library × annotations, end to end in a browser** | — | **NOT COVERED** |
-| **My Library × Kobo sync set after removal** | — | **NOT COVERED** |
-| **state B (managed, no browse_global) in any e2e** | — | **NOT COVERED** |
-| **empty-library UX in a browser** (the operator's step 3) | — | **NOT COVERED** |
+| **My Library × annotations, end to end in a browser** | `my-library.spec.ts` — UI removal, device view, annotation page, md/csv/json downloads | **proven (e2e; #2057 red-tested)** |
+| **My Library × Kobo sync set after removal** | `my-library.spec.ts` — real delivery/ack, UI removal, archived `ChangedEntitlement` | **proven (e2e wire + UI; sync-scope red-tested)** |
+| **state B (managed, no browse_global) in any e2e** | `my-library.spec.ts` — composed mode/role, no Global Library, exact last-book refusal | **proven (e2e; guard red-tested)** |
+| **empty-library UX in a browser** (the operator's step 3) | `my-library.spec.ts` — final UI removal, empty state, recovery link, re-add | **proven (e2e; desktop + mobile; last-removal red-tested)** |
 
 ## Open decision
 
