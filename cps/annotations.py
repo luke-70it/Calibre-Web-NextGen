@@ -673,12 +673,14 @@ def _aggregate_device_rows(*, devices, owners_by_id, scopes, session):
             ).filter(
                 ub.DeviceInventoryItem.device_id.in_(device_ids),
                 ub.DeviceInventoryItem.last_report_id.in_(report_ids),
-                ub.DeviceInventoryItem.book_id.isnot(None),
-                _device_book_in_scope(
-                    ub.DeviceInventoryItem.device_id,
-                    ub.DeviceInventoryItem.book_id,
-                    devices,
-                    scopes,
+                or_(
+                    ub.DeviceInventoryItem.book_id.is_(None),
+                    _device_book_in_scope(
+                        ub.DeviceInventoryItem.device_id,
+                        ub.DeviceInventoryItem.book_id,
+                        devices,
+                        scopes,
+                    ),
                 ),
             ).group_by(ub.DeviceInventoryItem.device_id).all():
             inventory_counts[device_id] = int(count)
@@ -1230,8 +1232,10 @@ def annotation_device_inventory(public_id):
             ub.session.query(ub.DeviceInventoryItem)
             .filter_by(device_id=device.id, last_report_id=report.id)
             .filter(
-                ub.DeviceInventoryItem.book_id.isnot(None),
-                _book_in_scope(ub.DeviceInventoryItem.book_id, visible_ids),
+                or_(
+                    ub.DeviceInventoryItem.book_id.is_(None),
+                    _book_in_scope(ub.DeviceInventoryItem.book_id, visible_ids),
+                ),
             )
         )
         total = items_query.count()
@@ -1245,7 +1249,10 @@ def annotation_device_inventory(public_id):
                 .all()
             )
         books = _visible_books_for_owner(owner, (item.book_id for item in items))
-        items = [item for item in items if item.book_id in books]
+        items = [
+            item for item in items
+            if item.book_id is None or item.book_id in books
+        ]
         return jsonify({
             "device": _device_json(
                 device, inventory_report=report, storage_snapshot=storage,
@@ -1292,13 +1299,13 @@ def annotation_device_inventory_delete(public_id, item_id):
             raise device_capabilities.CapabilityValidationError()
         item, device = item_and_device
         owner = _device_owner(device, ub.session)
-        if item.book_id is None:
-            raise device_capabilities.CapabilityValidationError()
-        visible_ids = _visible_book_scope_for_owner(owner, ub.session, [item.book_id])
-        if (
-            item.book_id not in visible_ids
-            or calibre_db.get_filtered_book(item.book_id, user=owner) is None
-        ):
+        candidate_ids = [] if item.book_id is None else [item.book_id]
+        visible_ids = _visible_book_scope_for_owner(
+            owner, ub.session, candidate_ids,
+        )
+        if item.book_id is not None and (
+                item.book_id not in visible_ids
+                or calibre_db.get_filtered_book(item.book_id, user=owner) is None):
             raise device_capabilities.CapabilityValidationError()
         deletion = device_capabilities.queue_named_deletion(
             session=ub.session, user_id=current_user.id,

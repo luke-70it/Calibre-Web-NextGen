@@ -918,7 +918,7 @@ def test_admin_device_board_is_gated_filtered_and_never_invents_null_origin_devi
 
 
 @pytest.mark.unit
-def test_r2_f1_inventory_rows_counts_and_named_deletions_use_the_live_owner_view(
+def test_pr2033_unmatched_inventory_keeps_named_deletion_without_exposing_excluded_book(
         session, monkeypatch):
     from datetime import datetime, timezone
 
@@ -949,12 +949,7 @@ def test_r2_f1_inventory_rows_counts_and_named_deletions_use_the_live_owner_view
     _allow_books(monkeypatch, annotations, hidden={99})
     monkeypatch.setattr(annotations, "current_user", SimpleNamespace(id=7))
     monkeypatch.setattr(ub, "session", session)
-    queued = []
-    monkeypatch.setattr(
-        annotations.device_capabilities,
-        "queue_named_deletion",
-        lambda **kwargs: queued.append(kwargs),
-    )
+    monkeypatch.setattr(ub, "session_commit", session.commit)
     app = Flask(__name__)
 
     with app.test_request_context(
@@ -962,21 +957,96 @@ def test_r2_f1_inventory_rows_counts_and_named_deletions_use_the_live_owner_view
         payload = annotations.annotation_device_inventory.__wrapped__(
             device.public_id,
         ).get_json()
-    assert payload["total"] == payload["device"]["inventory_count"] == 1
-    assert [book["book_id"] for book in payload["books"]] == [5]
+    assert payload["total"] == payload["device"]["inventory_count"] == 2
+    assert {book["book_id"] for book in payload["books"]} == {None, 5}
+    assert {book["lpath"] for book in payload["books"]} == {
+        "Books/Unmatched.epub", "Books/Visible.epub",
+    }
     assert "Excluded.epub" not in str(payload)
-    assert "Unmatched.epub" not in str(payload)
 
-    for item in (excluded, unmatched):
-        with app.test_request_context(
-                f"/api/annotations/devices/{device.public_id}/inventory/{item.id}/delete",
-                method="POST"):
-            response, status = annotations.annotation_device_inventory_delete.__wrapped__(
-                device.public_id, item.id,
-            )
-        assert status == 404
-        assert response.get_json() == {"error": "inventory_item_not_found"}
-    assert queued == []
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/inventory/{excluded.id}/delete",
+            method="POST"):
+        response, status = annotations.annotation_device_inventory_delete.__wrapped__(
+            device.public_id, excluded.id,
+        )
+    assert status == 404
+    assert response.get_json() == {"error": "inventory_item_not_found"}
+    assert session.query(ub.DeviceBookDeletion).count() == 0
+
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/inventory/{unmatched.id}/delete",
+            method="POST"):
+        response, status = annotations.annotation_device_inventory_delete.__wrapped__(
+            device.public_id, unmatched.id,
+        )
+    assert status == 202
+    assert response.get_json()["lpath"] == "Books/Unmatched.epub"
+    deletion = annotations.device_capabilities.claim_next_deletion(
+        session=session, user_id=7, device_id=device.id,
+    )
+    assert deletion is not None
+    assert deletion.inventory_item_id == unmatched.id
+    assert session.get(ub.DeviceInventoryItem, unmatched.id) is not None
+
+    completed = annotations.device_capabilities.complete_deletion(
+        session=session, user_id=7, device_id=device.id,
+        deletion_id=deletion.id, claim_token=deletion.claim_token,
+        deleted=True,
+    )
+    session.commit()
+    assert completed.state == annotations.device_capabilities.COMPLETED
+    assert session.get(ub.DeviceInventoryItem, unmatched.id) is None
+
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/inventory"):
+        remaining = annotations.annotation_device_inventory.__wrapped__(
+            device.public_id,
+        ).get_json()
+    assert remaining["total"] == remaining["device"]["inventory_count"] == 1
+    assert [book["book_id"] for book in remaining["books"]] == [5]
+    assert "Excluded.epub" not in str(remaining)
+
+
+@pytest.mark.unit
+def test_pr2033_unmatched_named_delete_still_fails_loud_without_device_owner(
+        session, monkeypatch):
+    from datetime import datetime, timezone
+
+    from cps import annotations, ub
+
+    device = ub.Device(
+        user_id=99, kind="koreader", display_name="Orphan", active=True,
+        created_by="auto",
+    )
+    session.add(device)
+    session.flush()
+    report = ub.DeviceInventoryReport(
+        device_id=device.id, item_count=1, matched_count=0,
+        observed_at=datetime.now(timezone.utc),
+    )
+    session.add(report)
+    session.flush()
+    item = ub.DeviceInventoryItem(
+        device_id=device.id, lpath="Books/Unmatched.epub", checksum="3" * 32,
+        book_id=None, size=3, mtime=3, last_report_id=report.id,
+    )
+    session.add(item)
+    session.commit()
+    monkeypatch.setattr(annotations, "current_user", SimpleNamespace(id=99))
+    monkeypatch.setattr(ub, "session", session)
+    app = Flask(__name__)
+
+    with app.test_request_context(
+            f"/api/annotations/devices/{device.public_id}/inventory/{item.id}/delete",
+            method="POST"):
+        response, status = annotations.annotation_device_inventory_delete.__wrapped__(
+            device.public_id, item.id,
+        )
+
+    assert status == 503
+    assert response.get_json()["error"] == "visibility_unavailable"
+    assert session.query(ub.DeviceBookDeletion).count() == 0
 
 
 @pytest.mark.unit

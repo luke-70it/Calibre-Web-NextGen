@@ -16,8 +16,9 @@
   views instead of relying on older sync or queue state.
 - **Inventory, removal counts, restore counts, and named deletion requests use
   that same live owner view and fail closed when its owner is unavailable.**
-  Unmatched or newly excluded inventory rows cannot be exposed as device data or
-  queued for deletion through these endpoints.
+  Matched books that become excluded cannot be exposed or queued through these
+  endpoints. Unmatched device files remain visible for explicit named deletion
+  without being treated as books in the owner's library.
 
 ### Changed
 
