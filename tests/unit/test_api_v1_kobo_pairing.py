@@ -25,7 +25,11 @@ def _ub(*, target_exists=True):
     value = SimpleNamespace(id=1) if target_exists else None
     session = MagicMock()
     session.query.return_value.filter.return_value.first.return_value = value
-    return SimpleNamespace(session=session, User=MagicMock())
+    return SimpleNamespace(
+        session=session,
+        session_commit=MagicMock(return_value=True),
+        User=MagicMock(),
+    )
 
 
 def _ctx(path, method="GET", host="books.example.test"):
@@ -201,16 +205,19 @@ def test_create_commit_failure_returns_500_without_putting_token_in_error():
 
 @pytest.mark.unit
 @pytest.mark.parametrize("committed,status", [(True, 204), (False, 500)])
-def test_delete_reports_whether_revocation_landed(committed, status):
+def test_delete_reports_whether_revocation_commit_landed(committed, status):
     from cps.api import kobo_pairing as mod
+    fake_ub = _ub()
+    fake_ub.session_commit.return_value = committed
     with _ctx("/api/v1/account/kobo-sync-token", method="DELETE"), \
             patch.object(mod, "current_user", _user()), \
-            patch.object(mod, "ub", _ub()), \
+            patch.object(mod, "ub", fake_ub), \
             patch.object(mod, "config", SimpleNamespace(config_kobo_sync=True)), \
-            patch.object(mod, "revoke_auth_token", return_value=committed) as revoke:
+            patch.object(mod, "revoke_auth_token") as revoke:
         response = inspect.unwrap(mod.delete_kobo_sync_token)()
     assert response[1] == status
     revoke.assert_called_once_with(1)
+    fake_ub.session_commit.assert_called_once_with()
 
 
 @pytest.mark.unit

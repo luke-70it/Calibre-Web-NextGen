@@ -95,11 +95,15 @@ def create_or_view_auth_token(user_id):
 
 
 def revoke_auth_token(user_id):
-    """Delete every Kobo sync token for a user and report commit success."""
+    """Stage deletion of every Kobo sync token for a user.
+
+    The HTTP caller owns the commit because it also owns the success status.
+    Keeping that check in each route makes a rolled-back credential revocation
+    impossible to report as successful.
+    """
     ub.session.query(ub.RemoteAuthToken).filter(
         ub.RemoteAuthToken.user_id == user_id
     ).filter(ub.RemoteAuthToken.token_type == 1).delete()
-    return ub.session_commit()
 
 
 @kobo_auth.route("/generate_auth_token/<int:user_id>")
@@ -145,7 +149,8 @@ def delete_auth_token(user_id):
     # #1318: returning the helper's value used to answer 200 whether or not the
     # revocation landed. Telling someone their Kobo token is gone when it is
     # still valid is the wrong way round to be wrong about a credential.
-    if not revoke_auth_token(user_id):
+    revoke_auth_token(user_id)
+    if not ub.session_commit():
         return "", 500
     return ""
 

@@ -100,6 +100,7 @@ def delete_kobo_sync_token(user_id=None):
     target_id, error = _target_user_id(user_id)
     if error:
         return error
-    if not revoke_auth_token(target_id):
+    revoke_auth_token(target_id)
+    if not ub.session_commit():
         return _err("db_error", "Could not delete the Kobo sync URL", 500)
     return "", 204
