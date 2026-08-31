@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import flask
 import pytest
+from flask_wtf.csrf import CSRFProtect
 
 
 def _user(*, user_id=1, authenticated=True, anonymous=False, admin=False):
@@ -85,7 +86,7 @@ def test_missing_admin_target_is_404_without_minting():
 
 
 @pytest.mark.unit
-def test_disabled_kobo_sync_refuses_token_lifecycle():
+def test_disabled_kobo_sync_refuses_token_creation():
     from cps.api import kobo_pairing as mod
     with _ctx("/api/v1/account/kobo-sync-token", method="POST"), \
             patch.object(mod, "current_user", _user()), \
@@ -94,6 +95,35 @@ def test_disabled_kobo_sync_refuses_token_lifecycle():
         response = inspect.unwrap(mod.create_kobo_sync_token)()
     assert response[1] == 409
     assert _json(response)["error"]["code"] == "kobo_sync_disabled"
+
+
+@pytest.mark.unit
+def test_disabled_kobo_sync_still_exposes_an_existing_token():
+    from cps.api import kobo_pairing as mod
+    row = SimpleNamespace(auth_token="d" * 32)
+    with _ctx("/api/v1/account/kobo-sync-token"), \
+            patch.object(mod, "current_user", _user()), \
+            patch.object(mod, "ub", _ub()), \
+            patch.object(mod, "config", SimpleNamespace(config_kobo_sync=False)), \
+            patch.object(mod, "find_auth_token", return_value=row) as find:
+        response = inspect.unwrap(mod.get_kobo_sync_token)()
+    status = response[1] if isinstance(response, tuple) else response.status_code
+    assert status == 200
+    assert _json(response)["sync_url"] == f"https://books.example.test/kobo/{'d' * 32}"
+    find.assert_called_once_with(1)
+
+
+@pytest.mark.unit
+def test_disabled_kobo_sync_still_allows_revocation():
+    from cps.api import kobo_pairing as mod
+    with _ctx("/api/v1/account/kobo-sync-token", method="DELETE"), \
+            patch.object(mod, "current_user", _user()), \
+            patch.object(mod, "ub", _ub()), \
+            patch.object(mod, "config", SimpleNamespace(config_kobo_sync=False)), \
+            patch.object(mod, "revoke_auth_token", return_value=True) as revoke:
+        response = inspect.unwrap(mod.delete_kobo_sync_token)()
+    assert response[1] == 204
+    revoke.assert_called_once_with(1)
 
 
 @pytest.mark.unit
@@ -184,8 +214,15 @@ def test_delete_reports_whether_revocation_landed(committed, status):
 
 
 @pytest.mark.unit
-def test_http_contract_keeps_reads_safe_and_mutations_csrf_eligible():
-    """Global CSRFProtect applies to POST/DELETE; GET must never mint a token."""
+@pytest.mark.parametrize("host", ["localhost", "127.0.0.1", "[::1]", "[::1]:8083"])
+def test_localhost_detection_uses_the_parsed_hostname(host):
+    from cps.api import kobo_pairing as mod
+    with _ctx("/api/v1/account/kobo-sync-token", host=host):
+        assert mod._is_localhost() is True
+
+
+@pytest.mark.unit
+def test_http_contract_exposes_read_create_and_delete_methods_separately():
     from cps.api import api_v1
     app = flask.Flask(__name__)
     app.register_blueprint(api_v1)
@@ -197,6 +234,56 @@ def test_http_contract_keeps_reads_safe_and_mutations_csrf_eligible():
     assert methods["/api/v1/admin/users/<int:user_id>/kobo-sync-token"] >= {
         "GET", "POST", "DELETE",
     }
+
+
+@pytest.mark.unit
+def test_tokenless_post_is_rejected_by_real_csrf_middleware():
+    from cps.api import api_v1
+    app = flask.Flask(__name__)
+    app.config.update(
+        SECRET_KEY="unit-test-only",
+        WTF_CSRF_ENABLED=True,
+    )
+    CSRFProtect(app)
+    app.register_blueprint(api_v1)
+    with patch("cps.api.current_user", _user()), \
+            patch("cps.api.config", SimpleNamespace(
+                config_allow_reverse_proxy_header_login=False,
+                config_anonbrowse=0,
+            )):
+        response = app.test_client().post("/api/v1/account/kobo-sync-token")
+    assert response.status_code == 400
+
+
+@pytest.mark.unit
+def test_device_json_serializes_naive_database_timestamps_as_utc():
+    from cps.annotations import _device_json
+    observed = datetime(2026, 8, 30, 14, 15, 16)
+    device = SimpleNamespace(
+        public_id="device-1",
+        display_name="Kitchen Kobo",
+        kind="kobo",
+        model="Libra",
+        firmware_version="4.43",
+        first_seen_at=observed,
+        last_seen_at=observed,
+        active=True,
+    )
+    inventory = SimpleNamespace(item_count=2, observed_at=observed)
+    storage = SimpleNamespace(free_bytes=1, total_bytes=2, observed_at=observed)
+
+    payload = _device_json(
+        device,
+        inventory_report=inventory,
+        storage_snapshot=storage,
+        last_position_at=observed,
+    )
+
+    for field in (
+        "first_seen", "last_seen", "inventory_observed",
+        "storage_observed", "last_position_at",
+    ):
+        assert payload[field] == "2026-08-30T14:15:16+00:00"
 
 
 @pytest.mark.unit

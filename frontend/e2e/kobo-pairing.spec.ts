@@ -85,3 +85,34 @@ test('account links directly to the SPA pairing section', async ({ page }) => {
   await expect(page.getByRole('link', { name: 'Pair a Kobo or KOReader' }))
     .toHaveAttribute('href', '/app/account/devices#kobo-pairing');
 });
+
+test('KOReader setup remains discoverable without stock Kobo sync or a token', async ({ page }) => {
+  await page.route('**/api/v1/auth/me', async (route) => {
+    const response = await route.fetch();
+    const me = await response.json();
+    await route.fulfill({ response, json: {
+      ...me,
+      features: { ...(me.features ?? {}), kobo_sync: false },
+    } });
+  });
+  await page.route('**/api/v1/account/kobo-sync-token', (route) => route.fulfill({ json: {
+    user_id: 1,
+    configured: false,
+    sync_url: null,
+    server_url: serverUrl,
+    is_localhost: false,
+  } }));
+  await page.route('**/api/annotations/devices?*', (route) => route.fulfill({ json: {
+    devices: [], limit: 100, offset: 0, total: 0,
+  } }));
+
+  await page.goto('/app/account/devices#kobo-pairing');
+  const pairing = page.getByRole('region', { name: 'Pair a Kobo or KOReader' });
+  await expect(pairing.getByRole('heading', { name: 'KOReader' })).toBeVisible();
+  await expect(pairing.getByRole('link', { name: 'Install or update the NextGen Sync plugin.' }))
+    .toHaveAttribute('href', '/kosync');
+  await expect(pairing.getByText(serverUrl, { exact: true })).toBeVisible();
+  await expect(pairing.getByRole('button', { name: 'Copy server address' })).toBeVisible();
+  await expect(pairing.getByRole('button', { name: 'Generate sync URL' })).toHaveCount(0);
+  await expect(pairing.getByRole('status')).toContainText('Kobo sync is not enabled on this server.');
+});

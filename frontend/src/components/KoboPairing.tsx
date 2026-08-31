@@ -5,7 +5,9 @@ import { apiUrl, ApiError } from '../lib/api';
 import {
   useCreateKoboSyncToken, useDeleteKoboSyncToken, useKoboSyncToken,
 } from '../lib/queries';
-import { koboConfigLine, latestPairingDevice } from '../lib/koboPairing';
+import {
+  koboConfigLine, latestPairingDevice, pairingVisibility,
+} from '../lib/koboPairing';
 import { relativeWhen } from '../lib/relativeTime';
 import { useAnnouncer } from '../lib/a11y/announcer';
 import { useT } from '../lib/i18n';
@@ -33,13 +35,19 @@ export function KoboPairing({ devices, enabled }: { devices: Device[]; enabled: 
   const t = useT();
   const announce = useAnnouncer();
   const queryClient = useQueryClient();
-  const token = useKoboSyncToken(enabled);
+  // Viewing and revoking an existing credential remain available if an admin
+  // later disables stock-Kobo sync. Only token creation follows that flag.
+  const token = useKoboSyncToken();
   const createToken = useCreateKoboSyncToken();
   const deleteToken = useDeleteKoboSyncToken();
   const [copied, setCopied] = useState<'kobo' | 'koreader' | null>(null);
   const [copyError, setCopyError] = useState('');
   const seen = latestPairingDevice(devices);
   const mutationError = createToken.error ?? deleteToken.error;
+  const configured = !!token.data?.configured && !!token.data.sync_url;
+  const visibility = pairingVisibility(enabled, configured);
+  const serverUrl = token.data?.server_url
+    ?? new URL(apiUrl('/'), window.location.origin).toString().replace(/\/$/, '');
 
   // The Devices route first renders a loader, so the browser's initial hash
   // scroll happens before this target exists. Re-apply it when the pairing
@@ -96,51 +104,41 @@ export function KoboPairing({ devices, enabled }: { devices: Device[]; enabled: 
         </p>
       )}
 
-      {!enabled ? (
-        <p role="status" className={styles.pairingStatus}>{t('Kobo sync is not enabled on this server.')}</p>
-      ) : token.isLoading ? (
-        <p role="status" className={styles.pairingStatus}>{t('Loading pairing details…')}</p>
-      ) : token.error ? (
-        <div>
-          <p role="alert" className={styles.pairingAlert}>
-            {token.error instanceof ApiError ? token.error.message : t('Could not load pairing details.')}
-          </p>
-          <button type="button" className={styles.primaryButton} onClick={() => void token.refetch()}>
-            {t('Try again')}
-          </button>
-        </div>
-      ) : !token.data?.configured || !token.data.sync_url ? (
-        <div className={styles.pairingStart}>
-          <p>{t('Generate a private sync URL for this account. You can delete it at any time.')}</p>
-          <button type="button" className={styles.primaryButton}
-            disabled={createToken.isPending} onClick={() => createToken.mutate(undefined, {
-              onSuccess: () => announce(t('Kobo sync URL ready.')),
-            })}>
-            {createToken.isPending ? t('Generating…') : t('Generate sync URL')}
-          </button>
-        </div>
-      ) : (
-        <>
-          {token.data.is_localhost && (
-            <p role="alert" className={styles.pairingAlert}>
-              {t('Open NextGen using an address your e-reader can reach before copying these settings. Localhost only points back to the device itself.')}
-            </p>
-          )}
+      {token.data?.is_localhost && (
+        <p role="alert" className={styles.pairingAlert}>
+          {t('Open NextGen using an address your e-reader can reach before copying these settings. Localhost only points back to the device itself.')}
+        </p>
+      )}
 
-          <div className={styles.pairingUrlBlock}>
-            <p className={styles.pairingLabel}>{t('Stock Kobo sync URL')}</p>
-            <div className={styles.pairingUrlRow}>
-              <code>{token.data.sync_url}</code>
-              <button type="button" onClick={() => void copy('kobo', token.data!.sync_url!)}>
-                <Copy size={16} aria-hidden="true" focusable={false} />
-                {copied === 'kobo' ? t('Copied') : t('Copy sync URL')}
+      <div className={styles.pairingColumns}>
+        <div>
+          <h3>{t('Stock Kobo')}</h3>
+          {token.isLoading ? (
+            <p role="status" className={styles.pairingStatus}>{t('Loading pairing details…')}</p>
+          ) : token.error && !token.data ? (
+            <div>
+              <p role="alert" className={styles.pairingAlert}>
+                {token.error instanceof ApiError ? token.error.message : t('Could not load pairing details.')}
+              </p>
+              <button type="button" className={styles.primaryButton} onClick={() => void token.refetch()}>
+                {t('Try again')}
               </button>
             </div>
-          </div>
-
-          <div className={styles.pairingColumns}>
-            <div>
-              <h3>{t('Stock Kobo')}</h3>
+          ) : visibility.showStockSetup && token.data?.sync_url ? (
+            <>
+              {!enabled && (
+                <p role="status" className={styles.pairingStatus}>{t('Kobo sync is not enabled on this server.')}</p>
+              )}
+              <div className={styles.pairingUrlBlock}>
+                <p className={styles.pairingLabel}>{t('Stock Kobo sync URL')}</p>
+                <div className={styles.pairingUrlRow}>
+                  <code>{token.data.sync_url}</code>
+                  <button type="button" onClick={() => void copy('kobo', token.data!.sync_url!)}>
+                    <Copy size={16} aria-hidden="true" focusable={false} />
+                    {copied === 'kobo' ? t('Copied') : t('Copy sync URL')}
+                  </button>
+                </div>
+              </div>
               <ol>
                 <li>{t('Connect the Kobo to a computer and open .kobo/Kobo/Kobo eReader.conf in a text editor.')}</li>
                 <li>{t('Add or replace this line in the [OneStoreServices] section:')}</li>
@@ -150,36 +148,49 @@ export function KoboPairing({ devices, enabled }: { devices: Device[]; enabled: 
                 <li>{t('Save the file, safely eject the Kobo, then restart it.')}</li>
                 <li>{t('Tap Sync on the Kobo. Your NextGen books should appear.')}</li>
               </ol>
+              <button type="button" className={styles.deleteTokenButton}
+                disabled={deleteToken.isPending} onClick={revoke}>
+                <Trash2 size={16} aria-hidden="true" focusable={false} />
+                {deleteToken.isPending ? t('Deleting…') : t('Delete sync URL')}
+              </button>
+            </>
+          ) : visibility.canGenerateStockToken ? (
+            <div className={styles.pairingStart}>
+              <p>{t('Generate a private sync URL for this account. You can delete it at any time.')}</p>
+              <button type="button" className={styles.primaryButton}
+                disabled={createToken.isPending} onClick={() => createToken.mutate(undefined, {
+                  onSuccess: () => announce(t('Kobo sync URL ready.')),
+                })}>
+                {createToken.isPending ? t('Generating…') : t('Generate sync URL')}
+              </button>
             </div>
+          ) : (
+            <p role="status" className={styles.pairingStatus}>{t('Kobo sync is not enabled on this server.')}</p>
+          )}
+        </div>
 
-            <div>
-              <h3>{t('KOReader')}</h3>
-              <ol>
-                <li><a href={apiUrl('/kosync')}>{t('Install or update the NextGen Sync plugin.')}</a></li>
-                <li>{t('In KOReader, open NextGen Progress Sync and choose Set NextGen Server.')}</li>
-                <li>{t('Paste this server address (the plugin adds /kosync itself):')}</li>
-              </ol>
-              <div className={styles.pairingUrlRow}>
-                <code>{token.data.server_url}</code>
-                <button type="button" onClick={() => void copy('koreader', token.data!.server_url)}>
-                  <Copy size={16} aria-hidden="true" focusable={false} />
-                  {copied === 'koreader' ? t('Copied') : t('Copy server address')}
-                </button>
-              </div>
-              <ol start={4}>
-                <li>{t('Choose Login and sign in with this NextGen account or one of its app passwords.')}</li>
-                <li>{t('Run a sync from the plugin.')}</li>
-              </ol>
+        {visibility.showKoreader && (
+          <div>
+            <h3>{t('KOReader')}</h3>
+            <ol>
+              <li><a href={apiUrl('/kosync')}>{t('Install or update the NextGen Sync plugin.')}</a></li>
+              <li>{t('In KOReader, open NextGen Progress Sync and choose Set NextGen Server.')}</li>
+              <li>{t('Paste this server address (the plugin adds /kosync itself):')}</li>
+            </ol>
+            <div className={styles.pairingUrlRow}>
+              <code>{serverUrl}</code>
+              <button type="button" onClick={() => void copy('koreader', serverUrl)}>
+                <Copy size={16} aria-hidden="true" focusable={false} />
+                {copied === 'koreader' ? t('Copied') : t('Copy server address')}
+              </button>
             </div>
+            <ol start={4}>
+              <li>{t('Choose Login and sign in with this NextGen account or one of its app passwords.')}</li>
+              <li>{t('Run a sync from the plugin.')}</li>
+            </ol>
           </div>
-
-          <button type="button" className={styles.deleteTokenButton}
-            disabled={deleteToken.isPending} onClick={revoke}>
-            <Trash2 size={16} aria-hidden="true" focusable={false} />
-            {deleteToken.isPending ? t('Deleting…') : t('Delete sync URL')}
-          </button>
-        </>
-      )}
+        )}
+      </div>
 
       <div className={seen ? styles.deviceSeen : styles.deviceWaiting}>
         {seen ? <CheckCircle2 size={20} aria-hidden="true" focusable={false} /> : null}

@@ -3,6 +3,7 @@
 """Kobo sync-token lifecycle for the SPA device-pairing surface."""
 
 from flask import jsonify, request, url_for
+from werkzeug.urls import urlsplit
 
 from . import api_v1
 from .. import config, ub
@@ -28,10 +29,11 @@ def _target_user_id(user_id):
 
 
 def _is_localhost():
-    host = request.host.rsplit(":")
-    host = ":".join(host if len(host) == 1 else host[:-1])
-    return (host.startswith("127.") or host.lower() == "localhost"
-            or host.startswith("[::ffff:7f") or host == "[::1]")
+    # Let Werkzeug split the authority. Hand-removing a trailing ``:port``
+    # mistakes the colons in a bare IPv6 literal for a port separator.
+    host = (urlsplit(request.host_url).hostname or "").lower()
+    return (host.startswith("127.") or host == "localhost"
+            or host.startswith("::ffff:7f") or host == "::1")
 
 
 def _payload(user_id, auth_token):
@@ -74,9 +76,6 @@ def get_kobo_sync_token(user_id=None):
     target_id, error = _target_user_id(user_id)
     if error:
         return error
-    disabled = _require_kobo_enabled()
-    if disabled:
-        return disabled
     return _json_payload(target_id, find_auth_token(target_id))
 
 
@@ -101,9 +100,6 @@ def delete_kobo_sync_token(user_id=None):
     target_id, error = _target_user_id(user_id)
     if error:
         return error
-    disabled = _require_kobo_enabled()
-    if disabled:
-        return disabled
     if not revoke_auth_token(target_id):
         return _err("db_error", "Could not delete the Kobo sync URL", 500)
     return "", 204

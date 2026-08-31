@@ -5,7 +5,7 @@ import { ChevronLeft, MoreHorizontal, Pencil, Smartphone } from 'lucide-react';
 import { apiDelete, apiGet, apiPatch, apiPost } from '../lib/api';
 import { useMe } from '../lib/queries';
 import { clampOffset } from '../lib/pagination';
-import { relativeWhen } from '../lib/relativeTime';
+import { parseApiTimestamp, relativeWhen } from '../lib/relativeTime';
 import { useAnnouncer } from '../lib/a11y/announcer';
 import { useT } from '../lib/i18n';
 import { EmptyState } from '../components/EmptyState';
@@ -23,6 +23,12 @@ function formatStorage(bytes: number): string {
   const gibibytes = bytes / (1024 ** 3);
   if (gibibytes >= 1) return `${gibibytes.toFixed(1)} GB`;
   return `${(bytes / (1024 ** 2)).toFixed(1)} MB`;
+}
+
+function isDeviceStale(lastSeen: string | null): boolean {
+  if (!lastSeen) return false;
+  const timestamp = parseApiTimestamp(lastSeen);
+  return timestamp !== null && Date.now() - timestamp > 30 * 86400000;
 }
 
 function RemoveDialog({ device, counts, onCancel, onRemove }: {
@@ -148,7 +154,7 @@ export function Devices() {
                 ) : <h2><Link href={`/account/devices/${device.public_id}`}>{device.label}</Link></h2>}
                 <p className={styles.deviceMeta}>{[device.model, device.firmware && `FW ${device.firmware}`].filter(Boolean).join(' · ')}</p>
                 <p className={styles.deviceStats}>{t('{n} highlights and notes', { n: device.annotation_count })} · {t('Last seen {when}', { when: relativeWhen(device.last_seen) })}
-                  {device.last_seen && Date.now() - new Date(device.last_seen).getTime() > 30 * 86400000 && <> <span className={styles.stalePill}>{t('Not seen lately')}</span></>}</p>
+                  {isDeviceStale(device.last_seen) && <> <span className={styles.stalePill}>{t('Not seen lately')}</span></>}</p>
                 <p className={styles.deviceMeta}>{t('{n} books in latest inventory', { n: device.inventory_count })}</p>
                 {device.storage_free !== null && device.storage_total !== null && (
                   <p className={styles.storage}>
