@@ -129,7 +129,12 @@
 .pairingColumns li + li { margin-top: var(--sp-2); }
 .pairingColumns a { color: var(--accent-text); text-decoration: underline; text-underline-offset: 3px; }
 .configLine { margin: var(--sp-3) 0; }
-.deleteTokenButton { margin-top: var(--sp-4); color: var(--danger); border-color: var(--danger-border); }
+.deleteTokenButton {
+  /* --danger is 4.15:1 on this card's --surface-2 in the dark palette, so it
+     remains the non-text destructive cue while the small label uses AA text. */
+  margin-top: var(--sp-4); color: var(--text); border-color: var(--danger);
+}
+.deleteTokenButton svg { color: var(--danger); }
 .deleteTokenButton:hover { background: var(--danger-soft); border-color: var(--danger); }
 .deviceSeen, .deviceWaiting {
   display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center;

@@ -108,11 +108,15 @@ test('KOReader setup remains discoverable without stock Kobo sync or a token', a
 
   await page.goto('/app/account/devices#kobo-pairing');
   const pairing = page.getByRole('region', { name: 'Pair a Kobo or KOReader' });
-  await expect(pairing.getByRole('heading', { name: 'KOReader' })).toBeVisible();
+  await expect(pairing.getByRole('heading', {
+    level: 3, name: 'KOReader', exact: true,
+  })).toBeVisible();
   await expect(pairing.getByRole('link', { name: 'Install or update the NextGen Sync plugin.' }))
     .toHaveAttribute('href', '/kosync');
   await expect(pairing.getByText(serverUrl, { exact: true })).toBeVisible();
   await expect(pairing.getByRole('button', { name: 'Copy server address' })).toBeVisible();
   await expect(pairing.getByRole('button', { name: 'Generate sync URL' })).toHaveCount(0);
-  await expect(pairing.getByRole('status')).toContainText('Kobo sync is not enabled on this server.');
+  await expect(pairing.getByRole('status').filter({
+    hasText: /^Kobo sync is not enabled on this server\.$/,
+  })).toHaveText('Kobo sync is not enabled on this server.');
 });
