@@ -4,8 +4,14 @@
   "created": "2026-09-01",
   "id": "F-5822aa",
   "refs": [],
+  "resolution": {
+    "commit": "",
+    "date": "2026-09-01",
+    "note": "Main/concurrency E2E resolver checks the exact SHA producer run and jobs before each 30-second retry, fails immediately for absent/terminal producers with the Actions URL, and caps live-producer polling at 95 minutes.",
+    "release": ""
+  },
   "severity": "correctness",
   "source": "audit",
-  "status": "open",
+  "status": "resolved",
   "title": "Test Suite E2E blind-polls 2h for a sha tag whose producer already failed, and because main's concurrency group does not cancel, one such run wedges every later main verdict"
 }
