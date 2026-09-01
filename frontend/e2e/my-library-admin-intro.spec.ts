@@ -3,15 +3,18 @@ import { test, expect } from '@playwright/test';
 /*
  * The server-wide "Try My Library" intro card on /app/admin.
  *
- * State hygiene: enabling deliberately mutates EVERY non-guest account —
- * including the shared admin session and any account another worker just
- * created — so this spec asserts through the intro endpoint's own payload
- * (snapshot_accounts / restored_accounts) rather than other users' rows, keeps
- * each enabled window to a few hundred milliseconds, and ALWAYS ends at
- * not_enabled via a finally-guarded undo (which also clears dismissal).
- * Per-account snapshot/restore semantics (role bits both directions, dormant
- * selections, Guest exclusion) are owned by tests/unit/test_my_library_admin_intro.py.
- * A crashed run self-heals: the arrange step undoes leftover enabled state.
+ * LANE: this spec flips every non-guest account's mode at once, so it lives in
+ * the env-gated `server-state-chromium` project (playwright.config.ts) and runs
+ * as its own invocation — `E2E_SERVER_STATE=1 npx playwright test
+ * --project=server-state-chromium` — never interleaved with the parallel lanes.
+ *
+ * State hygiene: the spec asserts through the intro endpoint's own payload
+ * (snapshot_accounts / restored_accounts) rather than other users' rows, and
+ * ALWAYS ends at not_enabled via a finally-guarded undo (which also clears
+ * dismissal). Per-account snapshot/restore semantics (role bits both
+ * directions, dormant selections, Guest exclusion) are owned by
+ * tests/unit/test_my_library_admin_intro.py. A crashed run self-heals: the
+ * arrange step undoes leftover enabled state.
  */
 
 async function csrf(page: import('@playwright/test').Page) {
@@ -39,15 +42,6 @@ async function undoIfEnabled(page: import('@playwright/test').Page) {
 test.describe('My Library admin intro card', () => {
   test('try → enabled with undo, undo restores, close dismisses permanently', async ({ page }) => {
     await undoIfEnabled(page);
-    // While this spec holds the shared admin in personal mode (the two enable
-    // windows), the announcement queue would promote library-intro-v1 above
-    // the banners other specs assert on. The queue entry requires the admin's
-    // own per-user intro to be undismissed, so dismissing it here (one-way,
-    // per-account, and no spec depends on the shared admin seeing it) keeps
-    // this spec's global mutation invisible to the banner lane.
-    await page.request.post('/api/v1/account/my-library-intro/dismiss', {
-      headers: { 'X-CSRFToken': await csrf(page) },
-    });
 
     try {
       await page.goto('/app/admin');
