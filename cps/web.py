@@ -160,7 +160,7 @@ def add_security_headers(resp):
         csp += " *"
     if reader_like:
         csp += " blob: ; style-src-elem 'self' blob: 'unsafe-inline'"
-    # #60: the "Back to the classic view" feedback popup (layout.html) POSTs to our
+    # #60: the switched-back-to-Classic feedback popup (layout.html) POSTs to our
     # first-party feedback endpoint (a Cloudflare Worker on a different origin).
     # Without an explicit connect-src, fetch()/XHR fall back to default-src 'self'
     # and the browser blocks the cross-origin POST, so feedback never leaves the

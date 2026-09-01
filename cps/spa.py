@@ -20,7 +20,7 @@ from werkzeug.datastructures import MIMEAccept
 from werkzeug.http import parse_accept_header
 
 from . import logger, constants, config
-from .cw_login.signals import user_logged_in
+from .cw_login.signals import user_loaded_from_cookie, user_logged_in
 
 log = logger.create()
 
@@ -145,13 +145,13 @@ def clear_prefer_spa_cookie(resp):
 def prefer_classic_for_session():
     """Keep preference-routed browser pages on Classic for this browser session.
 
-    ``login_user(..., remember=True)`` makes the Flask session permanent through
-    its private ``_permanent`` key. Force the session back to a browser-session
-    cookie while this flag is live; the separate remember token can restore the
-    login next time, but it cannot restore the Classic escape hatch.
+    Do not change ``session.permanent`` here. Flask-Login owns that state for
+    remembered logins, and changing it underneath strong session protection can
+    invalidate the authenticated session and delete the remember cookie. A
+    browser-session restart is detected through the remember-cookie load signal
+    below, which clears this escape hatch without touching login bookkeeping.
     """
     flask_session[CLASSIC_SESSION_KEY] = True
-    flask_session.permanent = False
 
 
 def clear_prefer_classic_session():
@@ -180,13 +180,17 @@ def migrate_legacy_prefer_classic_cookie(resp):
 
 
 @user_logged_in.connect
-def clear_classic_escape_hatch_after_login(_sender, **_extra):
-    """Every successful login starts on the new UI, across all auth methods.
+@user_loaded_from_cookie.connect
+def clear_classic_escape_hatch_after_auth(_sender, **_extra):
+    """Every login or remember-cookie restoration starts on the new UI.
 
     A no-JS login may therefore make one additional capability-detection pass:
     login -> `/` -> `/app` -> the shell's fixed feedback marker -> Classic.
     That chain terminates because the marker re-enables Classic for the session;
     clearing here still guarantees that a normal JavaScript browser enters SPA.
+    Remember-cookie restoration is the explicit new-browser-session boundary for
+    remembered users; it clears only the UI flag and leaves Flask-Login's session
+    permanence and remember-token bookkeeping untouched.
     """
     if has_request_context():
         clear_prefer_classic_session()

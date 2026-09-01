@@ -97,6 +97,37 @@ def _sticky_app(tmp_path):
     return app, monkey
 
 
+def _remembered_sticky_app(tmp_path):
+    """Sticky marker app using the production login/session-protection stack."""
+    from cps.MyLoginManager import MyLoginManager
+    from cps.cw_login import current_user, login_user
+
+    app, monkey = _sticky_app(tmp_path)
+    app.config["SESSION_PROTECTION"] = "strong"
+    login_manager = MyLoginManager(app)
+    user = MagicMock()
+    user.is_authenticated = True
+    user.is_active = True
+    user.is_anonymous = False
+    user.get_id.return_value = "7"
+    user.nickname = "remembered-user"
+
+    @login_manager.user_loader
+    def _load_user(user_id, _random, _session_key):
+        return user if user_id == "7" else None
+
+    @app.route("/test-remember-login")
+    def _test_remember_login():
+        assert login_user(user, remember=True)
+        return "LOGGED IN"
+
+    @app.route("/test-auth-state")
+    def _test_auth_state():
+        return flask.jsonify(authenticated=current_user.is_authenticated)
+
+    return app, user, monkey
+
+
 def _login_app(tmp_path):
     """App with the real SPA and web blueprints for anonymous /login routing.
 
@@ -395,13 +426,11 @@ def test_b_legacy_spa_cookie_still_redirects(tmp_path):
 
 @pytest.mark.unit
 def test_c_feedback_sets_session_scoped_classic_escape_hatch(tmp_path):
-    """The capability fallback renders Classic for this browser session only."""
+    """The fallback marks Classic without changing login-owned permanence."""
     app, monkey = _sticky_app(tmp_path)
     try:
         client = app.test_client()
         client.set_cookie(spa_mod.PREFER_SPA_COOKIE, "1")
-        # Remember-me logins make Flask's session permanent. The Classic setter
-        # must deliberately turn it back into a browser-session cookie.
         with client.session_transaction() as sess:
             sess.permanent = True
         resp = client.get("/?cwng_feedback=newui", headers=_HTML_ACCEPT)
@@ -410,12 +439,92 @@ def test_c_feedback_sets_session_scoped_classic_escape_hatch(tmp_path):
         assert any(value.startswith("cwng_prefer_spa=") for value in cookies)
         assert not any(value.startswith("cwng_prefer_classic=1") for value in cookies)
         session_cookie = next(value for value in cookies if value.startswith("session="))
-        assert "Expires=" not in session_cookie
+        assert "Expires=" in session_cookie
         assert "Max-Age=" not in session_cookie
         with client.session_transaction() as sess:
             assert sess[spa_mod.CLASSIC_SESSION_KEY] is True
-            assert sess.permanent is False
+            assert sess.permanent is True
     finally:
+        monkey.undo()
+
+
+@pytest.mark.unit
+def test_feedback_marker_preserves_real_remembered_login(tmp_path):
+    """Regression: choosing Classic must not silently sign the user out.
+
+    Use the real ``login_user(..., remember=True)`` and ``MyLoginManager``
+    response hook. Changing the marker request's address exercises production
+    strong-session-protection bookkeeping; the next request would clear both
+    authentication and ``remember_token`` if the marker flipped permanence.
+    """
+    from cps import ub
+
+    app, _user, monkey = _remembered_sticky_app(tmp_path)
+    try:
+        client = app.test_client()
+        with patch.object(ub, "check_user_session", return_value=True):
+            login_response = client.get("/test-remember-login")
+        assert login_response.status_code == 200
+        assert client.get_cookie("remember_token") is not None
+
+        marker = client.get(
+            "/?cwng_feedback=newui",
+            headers=_HTML_ACCEPT,
+            environ_overrides={"REMOTE_ADDR": "203.0.113.7"},
+        )
+        assert marker.status_code == 200
+        assert not any(
+            value.startswith("remember_token=;")
+            for value in marker.headers.getlist("Set-Cookie")
+        )
+        assert client.get_cookie("remember_token") is not None
+
+        authenticated = client.get(
+            "/test-auth-state",
+            environ_overrides={"REMOTE_ADDR": "203.0.113.7"},
+        )
+        assert authenticated.get_json() == {"authenticated": True}
+        assert not any(
+            value.startswith("remember_token=;")
+            for value in authenticated.headers.getlist("Set-Cookie")
+        )
+        assert client.get_cookie("remember_token") is not None
+    finally:
+        monkey.undo()
+
+
+@pytest.mark.unit
+def test_remember_cookie_restore_clears_classic_escape_hatch(tmp_path):
+    """A remember-cookie load is the fresh browser-session boundary."""
+    from cps import ub
+    from cps.cw_login.signals import user_loaded_from_cookie
+
+    app, user, monkey = _remembered_sticky_app(tmp_path)
+    restored_users = []
+
+    def _observe_cookie_restore(_sender, **extra):
+        restored_users.append(extra["user"])
+
+    user_loaded_from_cookie.connect(_observe_cookie_restore, sender=app, weak=False)
+    try:
+        login_client = app.test_client()
+        with patch.object(ub, "check_user_session", return_value=True):
+            assert login_client.get("/test-remember-login").status_code == 200
+        remember_cookie = login_client.get_cookie("remember_token")
+        assert remember_cookie is not None
+
+        restored_client = app.test_client()
+        restored_client.set_cookie("remember_token", remember_cookie.value)
+        with restored_client.session_transaction() as sess:
+            sess[spa_mod.CLASSIC_SESSION_KEY] = True
+
+        restored = restored_client.get("/test-auth-state")
+        assert restored.get_json() == {"authenticated": True}
+        assert restored_users == [user]
+        with restored_client.session_transaction() as sess:
+            assert spa_mod.CLASSIC_SESSION_KEY not in sess
+    finally:
+        user_loaded_from_cookie.disconnect(_observe_cookie_restore, sender=app)
         monkey.undo()
 
 
