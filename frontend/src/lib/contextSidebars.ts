@@ -53,7 +53,7 @@ const ADMIN_CONTEXT: ContextSidebarDefinition = {
         {
           key: 'users',
           href: '/admin#user-administration',
-          label: 'User admin',
+          label: 'Users',
           icon: Users,
           spa: true,
           defaultForPath: true,
@@ -61,7 +61,7 @@ const ADMIN_CONTEXT: ContextSidebarDefinition = {
         {
           key: 'devices',
           href: '/admin/devices',
-          label: 'Device admin',
+          label: 'Devices',
           icon: Smartphone,
           spa: true,
         },
@@ -74,7 +74,7 @@ const ADMIN_CONTEXT: ContextSidebarDefinition = {
         {
           key: 'library-settings',
           href: '/admin#library-settings',
-          label: 'Library settings',
+          label: 'Library',
           icon: Settings,
           spa: true,
         },

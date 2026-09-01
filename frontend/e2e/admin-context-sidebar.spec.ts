@@ -93,7 +93,7 @@ test('desktop swaps the catalog rail for fixed admin navigation and restores it 
   await expect(adminNav).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Browse' })).toHaveCount(0);
   await expect(page.locator('main')).toHaveCount(1);
-  await expect(adminNav.getByRole('link', { name: 'User admin' })).toHaveAttribute('aria-current', 'page');
+  await expect(adminNav.getByRole('link', { name: 'Users' })).toHaveAttribute('aria-current', 'page');
   await expect(adminNav.locator('[aria-current="page"]')).toHaveCount(1);
   await expect(adminNav.getByRole('list')).toHaveCount(3);
   await expect(adminNav.getByRole('button', { name: /pin sidebar/i })).toHaveCount(0);
@@ -101,9 +101,9 @@ test('desktop swaps the catalog rail for fixed admin navigation and restores it 
   await expect(adminNav.getByRole('link', { name: 'Back to library' })).toBeVisible();
   expect(await page.locator('[data-context-sidebar="admin"]').evaluate((node) => getComputedStyle(node).width)).toBe('240px');
 
-  await adminNav.getByRole('link', { name: 'Library settings' }).click();
+  await adminNav.getByRole('link', { name: 'Library', exact: true }).click();
   await expect(page).toHaveURL(/\/app\/admin#library-settings$/);
-  await expect(adminNav.getByRole('link', { name: 'Library settings' })).toHaveAttribute('aria-current', 'page');
+  await expect(adminNav.getByRole('link', { name: 'Library', exact: true })).toHaveAttribute('aria-current', 'page');
   await expect(page.locator('#library-settings')).toBeVisible();
 
   // A fresh direct section URL must resolve after the async admin forms mount.
@@ -113,7 +113,7 @@ test('desktop swaps the catalog rail for fixed admin navigation and restores it 
 
   await page.goto('/app/admin');
   await expect(page.getByRole('heading', { name: 'User administration' })).toBeVisible();
-  await expect(adminNav.getByRole('link', { name: 'User admin' })).toHaveAttribute('aria-current', 'page');
+  await expect(adminNav.getByRole('link', { name: 'Users' })).toHaveAttribute('aria-current', 'page');
   for (const theme of ['dark', 'light'] as const) {
     await setTheme(page, theme);
     await assertThemeTokensApplied(adminNav);
@@ -121,9 +121,9 @@ test('desktop swaps the catalog rail for fixed admin navigation and restores it 
     await attachEvidence(page, testInfo, `admin-desktop-${theme}`);
   }
 
-  await adminNav.getByRole('link', { name: 'Device admin' }).click();
+  await adminNav.getByRole('link', { name: 'Devices' }).click();
   await expect(page).toHaveURL(/\/app\/admin\/devices$/);
-  await expect(adminNav.getByRole('link', { name: 'Device admin' })).toHaveAttribute('aria-current', 'page');
+  await expect(adminNav.getByRole('link', { name: 'Devices' })).toHaveAttribute('aria-current', 'page');
   await expect(page.locator('main')).toHaveCount(1);
 
   await adminNav.getByRole('link', { name: 'Back to library' }).click();
@@ -189,7 +189,7 @@ test('mobile admin drawer stays reachable, locked, inert, and keyboard dismissib
   await expect.poll(() => page.evaluate(() => document.body.style.overflow)).toBe('hidden');
   await expect.poll(() => adminNav.evaluate((node) => node.contains(document.activeElement))).toBeTruthy();
   await expect(adminNav.getByRole('link', { name: 'Back to library' })).toBeVisible();
-  await expect(adminNav.getByRole('link', { name: 'User admin' })).toHaveAttribute('aria-current', 'page');
+  await expect(adminNav.getByRole('link', { name: 'Users' })).toHaveAttribute('aria-current', 'page');
   await expect(adminNav.locator('[aria-current="page"]')).toHaveCount(1);
   await expect(adminNav.getByRole('list')).toHaveCount(3);
   await expect(adminNav.getByRole('button', { name: /pin sidebar/i })).toHaveCount(0);
