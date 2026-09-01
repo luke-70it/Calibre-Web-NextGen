@@ -4799,6 +4799,10 @@ msgid "Authentication & security"
 msgstr "Authentification et sécurité"
 
 #: cps/spa_strings.py
+msgid "Security"
+msgstr "Sécurité"
+
+#: cps/spa_strings.py
 msgid "Author A–Z"
 msgstr "Auteur A–Z"
 
@@ -4845,6 +4849,10 @@ msgstr "DN de base"
 #: cps/spa_strings.py
 msgid "Basic configuration"
 msgstr "Configuration de base"
+
+#: cps/spa_strings.py
+msgid "Basic settings"
+msgstr "Réglages de base"
 
 #: cps/spa_strings.py
 msgid "Beta"
@@ -4920,6 +4928,10 @@ msgstr "Chemin du certificat d’autorité"
 #: cps/spa_strings.py
 msgid "CWA settings (ingest/convert)"
 msgstr "Paramètres CWA (import/conversion)"
+
+#: cps/spa_strings.py
+msgid "CWA settings"
+msgstr "Réglages CWA"
 
 #: cps/spa_strings.py
 msgid "Can upload books"
@@ -5359,6 +5371,10 @@ msgstr "Colonnes personnalisées"
 msgid "Database & library path"
 msgstr "Chemin de la base de données et de la bibliothèque"
 
+#: cps/spa_strings.py
+msgid "Database path"
+msgstr "Chemin base"
+
 #: cps/spa_strings.py cps/templates/detail.html
 msgid "Date added"
 msgstr "Date d'ajout"
@@ -5492,6 +5508,10 @@ msgstr "Mise en forme de la description"
 #: cps/spa_strings.py
 msgid "Device administration"
 msgstr "Administration des appareils"
+
+#: cps/spa_strings.py
+msgid "Device admin"
+msgstr "Admin. appareils"
 
 #: cps/spa_strings.py
 msgid "Device data"
@@ -5663,6 +5683,10 @@ msgid "Email (SMTP) server"
 msgstr "Serveur de messagerie (SMTP)"
 
 #: cps/spa_strings.py
+msgid "Email server"
+msgstr "Serveur e-mail"
+
+#: cps/spa_strings.py
 msgid "Email (optional)"
 msgstr "Adresse mail (facultative)"
 
@@ -5820,6 +5844,10 @@ msgstr "Plein écran"
 #: cps/spa_strings.py
 msgid "Full user table & restrictions"
 msgstr "Tableau complet des utilisateurs et restrictions"
+
+#: cps/spa_strings.py
+msgid "User restrictions"
+msgstr "Restrictions"
 
 #: cps/spa_strings.py
 msgid "Generate a new link"
@@ -7639,6 +7667,10 @@ msgstr "Utilisateur"
 #: cps/spa_strings.py
 msgid "User administration"
 msgstr "Administration des utilisateurs"
+
+#: cps/spa_strings.py
+msgid "User admin"
+msgstr "Admin. utilisateurs"
 
 #: cps/spa_strings.py
 msgid "User object filter"

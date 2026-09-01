@@ -4676,6 +4676,10 @@ msgid "Authentication & security"
 msgstr "Authenticatie & beveiliging"
 
 #: cps/spa_strings.py
+msgid "Security"
+msgstr "Beveiliging"
+
+#: cps/spa_strings.py
 msgid "Author A–Z"
 msgstr "Auteur A–Z"
 
@@ -4722,6 +4726,10 @@ msgstr "Basis DN"
 #: cps/spa_strings.py
 msgid "Basic configuration"
 msgstr "Basisconfiguratie"
+
+#: cps/spa_strings.py
+msgid "Basic settings"
+msgstr "Basisinstellingen"
 
 #: cps/spa_strings.py
 msgid "Beta"
@@ -4797,6 +4805,10 @@ msgstr "CA-certificaatpad"
 #: cps/spa_strings.py
 msgid "CWA settings (ingest/convert)"
 msgstr "CWA-instellingen (importeren/converteren)"
+
+#: cps/spa_strings.py
+msgid "CWA settings"
+msgstr "CWA-instellingen"
 
 #: cps/spa_strings.py
 msgid "Can upload books"
@@ -5235,6 +5247,10 @@ msgstr "Aangepaste kolommen"
 msgid "Database & library path"
 msgstr "Database- & bibliotheekpad"
 
+#: cps/spa_strings.py
+msgid "Database path"
+msgstr "Databasepad"
+
 #: cps/spa_strings.py cps/templates/detail.html
 msgid "Date added"
 msgstr "Datum toegevoegd"
@@ -5365,6 +5381,10 @@ msgstr "Opmaak van beschrijving"
 
 #: cps/spa_strings.py
 msgid "Device administration"
+msgstr "Apparaatbeheer"
+
+#: cps/spa_strings.py
+msgid "Device admin"
 msgstr "Apparaatbeheer"
 
 #: cps/spa_strings.py
@@ -5536,6 +5556,10 @@ msgid "Email (SMTP) server"
 msgstr "E-mail (SMTP)-server"
 
 #: cps/spa_strings.py
+msgid "Email server"
+msgstr "E-mailserver"
+
+#: cps/spa_strings.py
 msgid "Email (optional)"
 msgstr "E-mail (optioneel)"
 
@@ -5692,6 +5716,10 @@ msgstr "Volledig scherm"
 #: cps/spa_strings.py
 msgid "Full user table & restrictions"
 msgstr "Volledige gebruikerstabel & beperkingen"
+
+#: cps/spa_strings.py
+msgid "User restrictions"
+msgstr "Beperkingen"
 
 #: cps/spa_strings.py
 msgid "Generate a new link"
@@ -7494,6 +7522,10 @@ msgstr "Gebruiker"
 
 #: cps/spa_strings.py
 msgid "User administration"
+msgstr "Gebruikersbeheer"
+
+#: cps/spa_strings.py
+msgid "User admin"
 msgstr "Gebruikersbeheer"
 
 #: cps/spa_strings.py
