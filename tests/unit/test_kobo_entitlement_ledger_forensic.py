@@ -11,6 +11,7 @@ evidence that any entitlement crossed the wire on the acknowledging request.
 
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 
 import pytest
 
@@ -224,10 +225,126 @@ def _stale_valid_token():
     return kobo.SyncToken.SyncToken().build_sync_token()
 
 
-def test_forensic_no_sync_token_restamps_all_and_emits_new(
+def _partial_token_with_book_cursor(cursor):
+    """Build the parser shape that preserves books but omits archive state."""
+    from cps.services import SyncToken
+
+    encoded_cursor = SyncToken.to_epoch_timestamp(cursor)
+    return SyncToken.b64encode_json({
+        "version": "1-0-0",
+        "data": {
+            "raw_kobo_store_token": "",
+            "books_last_modified": encoded_cursor,
+            "books_last_created": encoded_cursor,
+            # archive_last_modified is deliberately absent. The permissive
+            # parser resets it to datetime.min and marks this token partial.
+            "reading_state_last_modified": encoded_cursor,
+            "tags_last_modified": encoded_cursor,
+        },
+    })
+
+
+def _establish_partial_cursor_shape(sync_harness, monkeypatch):
+    """Create 23 recent rows, one older row, and three old tombstones."""
+    from cps import db, kobo, ub
+
+    monkeypatch.setattr(
+        kobo.config, "config_kobo_suppress_replayed_entitlements", True,
+    )
+    books = _add_incident_shape(sync_harness)
+    shelf = sync_harness.session.query(ub.Shelf).filter_by(
+        user_id=sync_harness.user.id,
+        uuid="forensic-kobo-shelf",
+    ).one()
+    modified = sync_harness.book.last_modified
+    for number in range(_HELD_BOOK_COUNT + 1, 24):
+        book_modified = modified - timedelta(days=number)
+        book = db.Books(
+            f"Cursor Book {number}",
+            f"Cursor Book {number}",
+            "Author",
+            book_modified,
+            db.Books.DEFAULT_PUBDATE,
+            "1.0",
+            book_modified,
+            f"cursor-book-{number}",
+            0,
+            [],
+            [],
+        )
+        sync_harness.session.add(book)
+        sync_harness.session.flush()
+        book.uuid = f"00000000-0000-0000-0001-{number:012d}"
+        sync_harness.session.add(db.Data(
+            book.id, "EPUB", 2_000_000 + number, f"cursor-book-{number}",
+        ))
+        link = ub.BookShelf(
+            book_id=book.id,
+            shelf=shelf.id,
+            order=number,
+            date_added=modified - timedelta(days=30),
+        )
+        link.ub_shelf = shelf
+        sync_harness.session.add(link)
+        books.append(book)
+
+    old_modified = modified - timedelta(days=60)
+    old_book = db.Books(
+        "Older Cursor Sentinel",
+        "Older Cursor Sentinel",
+        "Author",
+        old_modified,
+        db.Books.DEFAULT_PUBDATE,
+        "1.0",
+        old_modified,
+        "older-cursor-sentinel",
+        0,
+        [],
+        [],
+    )
+    sync_harness.session.add(old_book)
+    sync_harness.session.flush()
+    old_book.uuid = "00000000-0000-0000-0001-000000000024"
+    sync_harness.session.add(db.Data(
+        old_book.id, "EPUB", 2_000_024, "older-cursor-sentinel",
+    ))
+    old_link = ub.BookShelf(
+        book_id=old_book.id,
+        shelf=shelf.id,
+        order=24,
+        date_added=modified - timedelta(days=60),
+    )
+    old_link.ub_shelf = shelf
+    sync_harness.session.add(old_link)
+    books.append(old_book)
+
+    sync_harness.session.add_all([
+        ub.KoboDeletedBook(
+            user_id=sync_harness.user.id,
+            book_uuid="00000000-0000-0000-0000-000000009998",
+            deleted_at=datetime(2026, 7, 18, 4, 42, 25),
+        ),
+        ub.KoboDeletedBook(
+            user_id=sync_harness.user.id,
+            book_uuid="00000000-0000-0000-0000-000000009997",
+            deleted_at=datetime(2026, 8, 18, 4, 42, 25),
+        ),
+    ])
+    sync_harness.session.commit()
+
+    initial = sync_harness.sync()
+    assert _wire_counts(initial) == {
+        "NewEntitlement": 24,
+        "ChangedEntitlement": 3,
+        "IsRemoved": 3,
+    }
+    return books, modified - timedelta(days=24)
+
+
+def test_forensic_no_sync_token_suppresses_exact_same_device_rows(
     sync_harness, monkeypatch,
 ):
-    """A known device without a token is deliberately ineligible to suppress."""
+    """An absent token cannot override acknowledged same-device evidence."""
     _establish_acknowledged_ledgers(sync_harness, monkeypatch)
     before = _snapshot(sync_harness)
 
@@ -239,16 +356,150 @@ def test_forensic_no_sync_token_restamps_all_and_emits_new(
     signature = _signature(before, after)
     _print_result("no_sync_token", page, ack, signature)
 
-    assert _matches_incident_signature(signature)
+    assert after == before
     assert _wire_counts(page) == {
-        "NewEntitlement": _HELD_BOOK_COUNT,
-        "ChangedEntitlement": 1,
-        "IsRemoved": 1,
+        "NewEntitlement": 0,
+        "ChangedEntitlement": 0,
+        "IsRemoved": 0,
     }
     assert _wire_counts(ack) == {
         "NewEntitlement": 0,
         "ChangedEntitlement": 0,
         "IsRemoved": 0,
+    }
+
+
+def test_partial_token_honours_book_cursor_but_suppresses_same_device_replays(
+    sync_harness, monkeypatch, caplog,
+):
+    """A partial token selects 23 recent rows and all old tombstones safely."""
+    from cps.services import SyncToken
+
+    books, cursor = _establish_partial_cursor_shape(
+        sync_harness, monkeypatch,
+    )
+    before = _snapshot(sync_harness)
+    partial_token = _partial_token_with_book_cursor(cursor)
+    parsed = SyncToken.SyncToken.from_headers({
+        SyncToken.SyncToken.SYNC_TOKEN_HEADER: partial_token,
+    })
+    assert parsed.books_last_modified == cursor
+    assert parsed.archive_last_modified == datetime.min
+    assert parsed.is_cwng_token is False
+
+    caplog.set_level(logging.DEBUG, logger="cps.kobo")
+    page = sync_harness.sync(partial_token, acknowledge=False)
+    ack = sync_harness.sync(
+        page.headers[sync_harness.token_header], acknowledge=False,
+    )
+    after = _snapshot(sync_harness)
+
+    # The first five selected books represent the held subset from the
+    # hardware reproduction. The server does not store download status; exact
+    # same-device fingerprints protect them together with every other exact
+    # row in the selected page.
+    held_book_ids = {book.id for book in books[:5]}
+    assert len(held_book_ids) == 5
+    assert any(
+        record.getMessage() == "Kobo Sync: selected to sync: 23"
+        for record in caplog.records
+    )
+    assert _wire_counts(page) == {
+        "NewEntitlement": 0,
+        "ChangedEntitlement": 0,
+        "IsRemoved": 0,
+    }
+    assert _wire_counts(ack) == {
+        "NewEntitlement": 0,
+        "ChangedEntitlement": 0,
+        "IsRemoved": 0,
+    }
+    assert after == before
+
+
+def test_missing_same_device_ledger_row_is_recovered_as_new(
+    sync_harness, monkeypatch,
+):
+    """A missing ledger row bypasses even an advanced partial book cursor."""
+    from cps import ub
+
+    books, _token = _establish_acknowledged_ledgers(
+        sync_harness, monkeypatch,
+    )
+    missing_book = books[0]
+    sync_harness.session.query(ub.KoboDeviceBookEntitlement).filter_by(
+        device_id=sync_harness.device.id,
+        book_id=missing_book.id,
+    ).delete(synchronize_session=False)
+    sync_harness.session.commit()
+
+    page = sync_harness.sync(
+        _partial_token_with_book_cursor(datetime(2027, 1, 1)),
+        acknowledge=False,
+    )
+
+    assert _wire_counts(page) == {
+        "NewEntitlement": 1,
+        "ChangedEntitlement": 0,
+        "IsRemoved": 0,
+    }
+
+
+def test_new_device_without_ledger_receives_books_as_new(
+    sync_harness, monkeypatch,
+):
+    """One device's fingerprints never suppress a newly paired reader."""
+    from cps import ub
+
+    _establish_acknowledged_ledgers(sync_harness, monkeypatch)
+    new_device = ub.Device(
+        user_id=sync_harness.user.id,
+        kind="kobo",
+        display_name="New Regression Reader",
+        model="Kobo Reader",
+        active=True,
+        created_by="auto",
+    )
+    sync_harness.session.add(new_device)
+    sync_harness.session.commit()
+
+    page = sync_harness.sync(
+        _partial_token_with_book_cursor(datetime(2027, 1, 1)),
+        internal_device_id=new_device.id,
+        raw_device_id="b" * 64,
+        acknowledge=False,
+    )
+
+    assert _wire_counts(page) == {
+        "NewEntitlement": _HELD_BOOK_COUNT,
+        "ChangedEntitlement": 1,
+        "IsRemoved": 1,
+    }
+
+
+def test_explicit_full_sync_clears_ledger_and_redelivers_new(
+    sync_harness, monkeypatch,
+):
+    """Full Sync remains the deliberate escape from exact suppression."""
+    from cps import admin
+
+    _establish_acknowledged_ledgers(sync_harness, monkeypatch)
+    monkeypatch.setattr(admin, "_", lambda value: value)
+    with sync_harness.app.test_request_context(
+        "/ajax/fullsync/17", method="POST",
+    ):
+        response = admin.do_full_kobo_sync(sync_harness.user.id)
+    assert response.status_code == 200
+
+    page = sync_harness.sync(
+        _partial_token_with_book_cursor(datetime(2027, 1, 1)),
+        acknowledge=False,
+    )
+
+    assert _wire_counts(page) == {
+        "NewEntitlement": _HELD_BOOK_COUNT,
+        "ChangedEntitlement": 1,
+        "IsRemoved": 1,
     }
 
 

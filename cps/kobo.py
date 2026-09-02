@@ -1280,13 +1280,17 @@ def HandleSyncRequest():
     rehydrate_request_cutoff = device_positions.rehydrate_request_cutoff()
     replay_suppression_enabled = bool(getattr(
         config, "config_kobo_suppress_replayed_entitlements", True))
-    # Layer 2 deliberately cannot suppress a tokenless request. A factory
-    # reset normally preserves the hardware id but clears both the library and
-    # CWNG token; treating that as a replay would strand the entire library.
+    # The acknowledged ledger belongs to the resolved physical device, so its
+    # exact fingerprints remain authoritative even when Nickel returns no
+    # token or a partial/foreign token. In particular, USB mass-storage eject
+    # can preserve book cursors while dropping other token fields; allowing
+    # token provenance to disable suppression re-emits held books and makes
+    # Nickel mark their local files as not downloaded. A newly paired or
+    # explicitly server-reset device has no ledger rows, and the missing-row
+    # recovery arm below still announces those books New.
     replay_suppression_eligible = bool(
         replay_suppression_enabled
         and requesting_device_id
-        and sync_token.is_cwng_token
     )
     log.info("Kobo library sync request received")
     log.debug("SyncToken: {}".format(sync_token))
@@ -1489,15 +1493,17 @@ def HandleSyncRequest():
     cursor_id = sync_token.books_last_id
     composite_keyset_books_only = books_keyset_after_cursor(cursor_lm, cursor_id)
     device_entitlement_recovery_filter = None
-    if requesting_device_id and sync_token.is_cwng_token:
+    if requesting_device_id:
         delivered_to_requesting_device = select(
             ub.KoboDeviceBookEntitlement.book_id,
         ).where(
             ub.KoboDeviceBookEntitlement.device_id == int(requesting_device_id),
         )
-        # This arm is deliberately independent of the timestamp cursor. An old
-        # poisoned cursor may be past the entire library, but a missing physical-
-        # device ledger row still means the entitlement must be announced New.
+        # This arm is deliberately independent of both timestamp cursor and
+        # token provenance. An old/partial cursor may be past the entire
+        # library, but a missing physical-device ledger row still means the
+        # entitlement must be announced New. Full Sync and per-book resend use
+        # this same invariant after deliberately clearing the target rows.
         device_entitlement_recovery_filter = ~db.Books.id.in_(
             delivered_to_requesting_device,
         )
@@ -1778,22 +1784,17 @@ def HandleSyncRequest():
         reading_state.id for reading_state in reading_state_page
     }
 
-    if requesting_device_id and sync_token.is_cwng_token:
-        known_entitlement_fingerprints = \
-            kobo_sync_status.get_device_entitlement_fingerprints(
+    known_entitlement_fingerprints = (
+        kobo_sync_status.get_device_entitlement_fingerprints(
             requesting_device_id,
             [book.Books.id for book in books_list],
         )
-    else:
-        known_entitlement_fingerprints = _diagnostic_ledger_lookup(
-            kobo_sync_status.get_device_entitlement_fingerprints,
-            requesting_device_id,
-            [book.Books.id for book in books_list],
-            scope="live_non_cwng_reset",
-        )
-    prior_entitlement_fingerprints = (
-        known_entitlement_fingerprints if sync_token.is_cwng_token else {}
+        if requesting_device_id else {}
     )
+    # Same-device acknowledged fingerprints are delivery state, not optional
+    # diagnostics. They suppress an exact replay even when Nickel presents an
+    # absent, partial, malformed, or foreign token after USB mass storage.
+    prior_entitlement_fingerprints = known_entitlement_fingerprints
     entitlement_fingerprint_updates = {}
     entitlement_change_basis_updates = {}
     suppressed_unchanged_book_ids = set()
@@ -1811,11 +1812,12 @@ def HandleSyncRequest():
             "BookMetadata": get_metadata(book.Books),
         }
 
-        # A device may return a valid but stale CWNG cursor after an interrupted
-        # sync. The cursor then selects already-emitted books again. Layer 2
-        # suppresses only an exact payload replay to that physical device; a
-        # tokenless request is ineligible, another device has its own ledger,
-        # and any real metadata/last_modified/archive change alters this hash.
+        # A device may return a stale, partial, foreign, or absent token after
+        # an interrupted sync or USB eject. Its cursors can then select books
+        # already emitted to this same physical device. Layer 2 suppresses only
+        # an exact payload replay from that device's acknowledged ledger;
+        # another device has its own ledger, and any real metadata,
+        # last_modified, or archive change alters this hash.
         entitlement_fingerprint = (
             _entitlement_fingerprint(entitlement)
             if requesting_device_id else None

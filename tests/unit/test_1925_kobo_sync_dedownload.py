@@ -788,10 +788,10 @@ def test_interrupted_sync_token_loss_does_not_redeliver_unchanged_entitlement(
     first = sync_harness.sync()
     assert len(_entitlements(first)) == 1
 
-    # Model the safely distinguishable interrupted-sync case: the device sends
-    # a valid CWNG token, but its local book cursors are behind the payload the
-    # server already delivered. An entirely absent token is deliberately not
-    # eligible because it is also the factory-reset signature.
+    # Model an interrupted-sync case where the device sends a valid CWNG token,
+    # but its local book cursors are behind the payload already delivered. The
+    # acknowledged same-device ledger is equally authoritative for absent,
+    # foreign, and partial tokens; dedicated regressions cover those shapes.
     stale_cwng_token = kobo.SyncToken.SyncToken().build_sync_token()
     second = sync_harness.sync(stale_cwng_token)
 
@@ -3001,22 +3001,24 @@ def test_rehydrate_latch_survives_checked_sync_commit_failure(
 def test_payload_stabilization_replays_byte_identically_with_layer2_off(
     sync_harness,
 ):
-    """Layer 1 is default-safe: replay unchanged, byte-identical payloads."""
+    """Classification changes New to Changed without changing payload bytes."""
     from cps import ub
 
     first = _entitlements(sync_harness.sync())
     second = _entitlements(sync_harness.sync())
 
     assert len(first) == len(second) == 1
-    assert first == second
+    assert set(first[0]) == {"NewEntitlement"}
+    assert set(second[0]) == {"ChangedEntitlement"}
+    assert first[0]["NewEntitlement"] == second[0]["ChangedEntitlement"]
     assert sync_harness.session.query(ub.KoboDeviceBookEntitlement).count() == 1
 
 
 @pytest.mark.parametrize("reset_token", [None, "not-a-token", "store.part"])
-def test_factory_reset_escape_never_suppresses_without_valid_cwng_token(
+def test_known_device_exact_replay_is_suppressed_for_any_token_shape(
     sync_harness, monkeypatch, reset_token,
 ):
-    """Known hardware with an empty library must receive a complete replay."""
+    """Token shape cannot override an acknowledged same-device fingerprint."""
     from cps import kobo, ub
 
     monkeypatch.setattr(
@@ -3027,7 +3029,7 @@ def test_factory_reset_escape_never_suppresses_without_valid_cwng_token(
 
     reset_response = sync_harness.sync(reset_token)
 
-    assert len(_entitlements(reset_response)) == 1
+    assert _entitlements(reset_response) == []
 
 
 def test_entitlement_replay_state_is_per_device(sync_harness, monkeypatch):
@@ -3839,8 +3841,8 @@ def test_replay_suppression_config_migrates_and_defaults_on():
         engine.dispose()
 
 
-def test_layer2_provenance_requires_cwng_core_cursor_fields():
-    """Permissive legacy-token fallback is not suppression authorization."""
+def test_pending_page_provenance_requires_cwng_core_cursor_fields():
+    """Only a complete cursor set proves a token belongs to a CWNG page chain."""
     from cps.services import SyncToken
 
     emitted = SyncToken.SyncToken().build_sync_token()
@@ -3888,7 +3890,7 @@ def test_legacy_token_missing_additive_fields_keeps_old_cursors_sane():
 
 
 def test_partial_legacy_and_store_tokens_degrade_without_exception():
-    """Missing legacy cursors and official-store tokens are tolerant but unsafe to suppress."""
+    """Partial legacy and official-store shapes preserve tolerant cursor parsing."""
     from cps.services import SyncToken
 
     partial = SyncToken.b64encode_json({
