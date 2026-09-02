@@ -4,8 +4,14 @@
   "created": "2026-09-02",
   "id": "F-ea81b6",
   "refs": [],
+  "resolution": {
+    "commit": "416bf2e90f784e55ca52f33b0c6670ce07b468a1",
+    "date": "2026-09-02",
+    "note": "Fixed by one bounded confirmation echo after the acknowledged pre-download repair; firmware-shaped regression covers replay, termination, and retryable failure atomicity.",
+    "release": ""
+  },
   "severity": "data-integrity",
   "source": "audit",
-  "status": "open",
+  "status": "resolved",
   "title": "A reading-state repair can be acknowledged before a Kobo materializes its download"
 }
