@@ -47,6 +47,18 @@ ORDERABLE_SIDEBAR_KEYS = [
     "shelves",
 ]
 
+# Calibre's identifiers table also carries CWNG-private bookkeeping. These
+# values must remain available to backend jobs, but they are not book metadata:
+# exposing them through detail/edit APIs renders a 64-byte digest as a user
+# identifier and lets an ordinary metadata edit delete the retry marker.
+INTERNAL_IDENTIFIER_PREFIXES = ("cwng_ingest_sha256_",)
+
+
+def is_internal_identifier_type(identifier_type):
+    """Return whether an identifier type is reserved for CWNG bookkeeping."""
+    normalized = str(identifier_type or "").strip().lower()
+    return normalized.startswith(INTERNAL_IDENTIFIER_PREFIXES)
+
 
 def serialize_sidebar_visibility(user):
     """Return {key: bool} for each configurable sidebar entry, using the same
@@ -324,6 +336,8 @@ def serialize_book_detail(book, read=False, archived=False, favorited=False, hid
     # plain text (url=None).
     identifiers = []
     for i in (getattr(book, "identifiers", None) or []):
+        if is_internal_identifier_type(getattr(i, "type", None)):
+            continue
         try:
             link = repr(i)
         except Exception:

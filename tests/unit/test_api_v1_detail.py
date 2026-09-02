@@ -79,6 +79,23 @@ def test_serialize_book_detail_full():
 
 
 @pytest.mark.unit
+def test_serialize_book_detail_hides_internal_ingest_retry_marker():
+    """The retry digest is backend state, not user-visible book metadata."""
+    from cps.api.serializers import serialize_book_detail
+
+    marker = "cwng_ingest_sha256_" + "a" * 64
+    book = _make_book(identifiers=[
+        Identifiers("9780441013593", "isbn", 1),
+        Identifiers("a" * 64, marker, 1),
+    ])
+
+    assert serialize_book_detail(book)["identifiers"] == [{
+        "type": "isbn", "val": "9780441013593",
+        "url": "https://www.worldcat.org/isbn/9780441013593", "label": "ISBN",
+    }]
+
+
+@pytest.mark.unit
 def test_serialize_book_detail_empty():
     from cps.api.serializers import serialize_book_detail
     book = SimpleNamespace(

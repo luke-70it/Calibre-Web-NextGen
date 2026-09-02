@@ -52,6 +52,68 @@ def test_editable_metadata_includes_identifiers():
     ]
 
 
+def test_editable_metadata_hides_internal_ingest_retry_marker():
+    from cps.api import edit as mod
+    marker = SimpleNamespace(type="cwng_ingest_sha256_" + "a" * 64, val="a" * 64)
+    book = _fake_book([SimpleNamespace(type="isbn", val="123"), marker])
+
+    assert mod._editable_metadata(book)["identifiers"] == [
+        {"type": "isbn", "val": "123"},
+    ]
+
+
+def test_update_metadata_preserves_internal_ingest_retry_marker():
+    from cps.api import edit as mod
+    session = MagicMock()
+    marker = SimpleNamespace(type="cwng_ingest_sha256_" + "a" * 64, val="a" * 64)
+    isbn = SimpleNamespace(type="isbn", val="old")
+    book = _fake_book([isbn, marker])
+    captured = {}
+
+    def fake_modify(inp, dbids, sess):
+        captured["dbids"] = dbids
+        return False, False
+
+    with _ctx("/api/v1/books/5/metadata", body={
+        "identifiers": [{"type": "isbn", "val": "old"}],
+    }):
+        with patch.object(mod, "current_user", _editor()), \
+             patch.object(mod, "calibre_db",
+                          SimpleNamespace(get_filtered_book=lambda *a, **k: book, session=session,
+                                          get_cc_columns=lambda *a, **k: [])), \
+             patch.object(mod, "modify_identifiers", side_effect=fake_modify), \
+             patch.object(mod, "get_locale", return_value="en"):
+            resp = inspect.unwrap(mod.update_metadata)(5)
+
+    assert captured["dbids"] == [isbn]
+    session.delete.assert_not_called()
+    assert resp.status_code == 200
+
+
+def test_update_metadata_rejects_internal_ingest_retry_marker():
+    from cps.api import edit as mod
+    session = MagicMock()
+    marker_type = "cwng_ingest_sha256_" + "a" * 64
+    book = _fake_book([])
+
+    with _ctx("/api/v1/books/5/metadata", body={
+        "identifiers": [{"type": marker_type, "val": "a" * 64}],
+    }):
+        with patch.object(mod, "current_user", _editor()), \
+             patch.object(mod, "calibre_db",
+                          SimpleNamespace(get_filtered_book=lambda *a, **k: book, session=session,
+                                          get_cc_columns=lambda *a, **k: [])), \
+             patch.object(mod, "modify_identifiers",
+                          side_effect=AssertionError("reserved marker must not be editable")), \
+             patch.object(mod, "get_locale", return_value="en"):
+            resp = inspect.unwrap(mod.update_metadata)(5)
+
+    payload = json.loads(resp.get_data())
+    assert payload["errors"]["identifiers"] == "Reserved identifier type."
+    session.rollback.assert_called_once()
+    session.commit.assert_not_called()
+
+
 def test_update_metadata_persists_identifiers_lowercased_and_skips_blank_rows():
     from cps.api import edit as mod
     session = MagicMock()

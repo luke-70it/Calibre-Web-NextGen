@@ -15,7 +15,11 @@ from flask import jsonify, request, Response
 from flask_babel import get_locale
 
 from . import api_v1
-from .serializers import serialize_book_detail, cover_url_for
+from .serializers import (
+    cover_url_for,
+    is_internal_identifier_type,
+    serialize_book_detail,
+)
 from .. import calibre_db, config, db, ub, isoLanguages, logger
 from ..cw_login import current_user
 from ..usermanagement import login_required_if_no_ano
@@ -362,6 +366,7 @@ def _editable_metadata(book):
         "identifiers": [
             {"type": i.type, "val": i.val}
             for i in (getattr(book, "identifiers", None) or [])
+            if not is_internal_identifier_type(getattr(i, "type", None))
         ],
         # User-defined calibre columns (#pages, #status, …). The SPA has shown
         # these on the book page since v4.1.11 but had no way to change one, so
@@ -499,6 +504,7 @@ def update_metadata(book_id):
     if "identifiers" in data:
         raw_ids = data.get("identifiers") or []
         input_identifiers = []
+        reserved_identifier_submitted = False
         for entry in raw_ids if isinstance(raw_ids, list) else []:
             if not isinstance(entry, dict):
                 continue
@@ -506,14 +512,26 @@ def update_metadata(book_id):
             id_val = str(entry.get("val") or "").strip()
             if not id_type or not id_val:
                 continue  # skip blank rows (a half-filled row isn't an error)
+            if is_internal_identifier_type(id_type):
+                reserved_identifier_submitted = True
+                continue
             input_identifiers.append(db.Identifiers(id_val, id_type, book_id))
-        changed, id_error = modify_identifiers(
-            input_identifiers, book.identifiers, calibre_db.session)
+        editable_db_identifiers = [
+            identifier for identifier in book.identifiers
+            if not is_internal_identifier_type(getattr(identifier, "type", None))
+        ]
+        if reserved_identifier_submitted:
+            changed, id_error = False, True
+            identifier_error = "Reserved identifier type."
+        else:
+            changed, id_error = modify_identifiers(
+                input_identifiers, editable_db_identifiers, calibre_db.session)
+            identifier_error = "Duplicate identifier type — each type may appear once."
         if id_error:
             # A duplicate type may have already queued partial add/deletes on the
             # session — discard them so a rejected payload never persists partially.
             calibre_db.session.rollback()
-            errors["identifiers"] = "Duplicate identifier type — each type may appear once."
+            errors["identifiers"] = identifier_error
         elif changed:
             try:
                 calibre_db.session.commit()
