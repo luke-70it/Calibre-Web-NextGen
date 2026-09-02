@@ -419,7 +419,15 @@ def test_failure_after_pending_echo_reset_rolls_back_before_503(
         sync_harness.device.id,
     )
     pending_token = pending_echo.outgoing_token
-    pending_body = pending_echo.response_body
+    pending_snapshot = (
+        pending_echo.device_id,
+        pending_echo.incoming_token_hash,
+        pending_echo.outgoing_token,
+        pending_echo.response_body,
+        pending_echo.response_headers_json,
+        pending_echo.confirmation_json,
+        pending_echo.created_at,
+    )
     partial = _degrade_outgoing_to_partial(pending_token)
     assert len(_changed_reading_states(echo)) == 1
     assert sync_harness.session.query(
@@ -441,8 +449,15 @@ def test_failure_after_pending_echo_reset_rolls_back_before_503(
         sync_harness.device.id,
     )
     assert retained is not None
-    assert retained.outgoing_token == pending_token
-    assert retained.response_body == pending_body
+    assert (
+        retained.device_id,
+        retained.incoming_token_hash,
+        retained.outgoing_token,
+        retained.response_body,
+        retained.response_headers_json,
+        retained.confirmation_json,
+        retained.created_at,
+    ) == pending_snapshot
     assert sync_harness.session.query(
         ub.DeviceReadingPosition.rehydrate_needed,
     ).scalar() is False
