@@ -3,6 +3,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from tests.unit.test_1925_kobo_sync_dedownload import (
+    _add_kobo_shelf,
     _add_reading_state,
     _changed_reading_states,
     _entitlements,
@@ -342,3 +343,122 @@ def test_echo_rearm_failure_retains_pending_page_and_returns_503(
     assert sync_harness.session.query(
         ub.DeviceReadingPosition.rehydrate_needed,
     ).scalar() is False
+
+
+@pytest.mark.parametrize("replacement", ["partial", "foreign"])
+def test_pending_echo_reset_does_not_cross_entitlement_removal(
+        sync_harness, monkeypatch, replacement):
+    from cps import kobo_sync_status, ub
+
+    sync_harness.user.kobo_only_shelves_sync = True
+    _shelf, link = _add_kobo_shelf(
+        sync_harness,
+        date_added=datetime(2026, 8, 28, 12, 5, 0),
+    )
+    _prepare_latched_state(sync_harness, monkeypatch)
+    repair = sync_harness.sync(
+        _partial_after(datetime(2027, 1, 1)), acknowledge=False,
+    )
+    echo = sync_harness.sync(
+        repair.headers[sync_harness.token_header], acknowledge=False,
+    )
+    pending_echo = kobo_sync_status.get_pending_sync_page(
+        sync_harness.device.id,
+    )
+    assert len(_changed_reading_states(echo)) == 1
+    assert sync_harness.session.query(
+        ub.DeviceReadingPosition.rehydrate_needed,
+    ).scalar() is False
+
+    sync_harness.session.delete(link)
+    sync_harness.session.commit()
+    reset_token = {
+        "partial": _degrade_outgoing_to_partial(
+            pending_echo.outgoing_token,
+        ),
+        "foreign": "removal.reset.fragment",
+    }[replacement]
+    removed = sync_harness.sync(reset_token, acknowledge=False)
+
+    [envelope] = _entitlements(removed)
+    assert set(envelope) == {"ChangedEntitlement"}
+    assert envelope["ChangedEntitlement"]["BookEntitlement"][
+        "IsRemoved"
+    ] is True
+    assert _changed_reading_states(removed) == []
+
+    after_removal_ack = sync_harness.sync(
+        removed.headers[sync_harness.token_header], acknowledge=False,
+    )
+    assert _entitlements(after_removal_ack) == []
+    assert _changed_reading_states(after_removal_ack) == []
+    assert sync_harness.session.query(
+        ub.DeviceReadingPosition,
+    ).count() == 0
+
+    terminal = sync_harness.sync(
+        after_removal_ack.headers[sync_harness.token_header],
+        acknowledge=False,
+    )
+    assert _entitlements(terminal) == []
+    assert _changed_reading_states(terminal) == []
+
+
+def test_failure_after_pending_echo_reset_rolls_back_before_503(
+        sync_harness, monkeypatch):
+    from cps import kobo, kobo_sync_status, ub
+
+    _prepare_latched_state(sync_harness, monkeypatch)
+    repair = sync_harness.sync(
+        _partial_after(datetime(2027, 1, 1)), acknowledge=False,
+    )
+    echo = sync_harness.sync(
+        repair.headers[sync_harness.token_header], acknowledge=False,
+    )
+    pending_echo = kobo_sync_status.get_pending_sync_page(
+        sync_harness.device.id,
+    )
+    pending_token = pending_echo.outgoing_token
+    pending_body = pending_echo.response_body
+    partial = _degrade_outgoing_to_partial(pending_token)
+    assert len(_changed_reading_states(echo)) == 1
+    assert sync_harness.session.query(
+        ub.DeviceReadingPosition.rehydrate_needed,
+    ).scalar() is False
+
+    def fail_refresh():
+        raise RuntimeError("injected post-reset refresh failure")
+
+    monkeypatch.setattr(kobo.calibre_db, "refresh_for_new_data", fail_refresh)
+    failed = _sync_through_flask_error_pipeline(
+        sync_harness, token=partial,
+    )
+
+    assert failed.status_code == 503
+    assert b"Entitlement" not in failed.get_data()
+    sync_harness.session.expire_all()
+    retained = kobo_sync_status.get_pending_sync_page(
+        sync_harness.device.id,
+    )
+    assert retained is not None
+    assert retained.outgoing_token == pending_token
+    assert retained.response_body == pending_body
+    assert sync_harness.session.query(
+        ub.DeviceReadingPosition.rehydrate_needed,
+    ).scalar() is False
+
+    monkeypatch.setattr(
+        kobo.calibre_db, "refresh_for_new_data", lambda: None,
+    )
+    recovered = sync_harness.sync(partial, acknowledge=False)
+    assert recovered.status_code == 200
+    assert _entitlements(recovered) == []
+    assert len(_changed_reading_states(recovered)) == 1
+    assert sync_harness.session.query(
+        ub.DeviceReadingPosition.rehydrate_needed,
+    ).scalar() is True
+    replacement = kobo_sync_status.get_pending_sync_page(
+        sync_harness.device.id,
+    )
+    assert replacement is not None
+    assert replacement.outgoing_token != pending_token

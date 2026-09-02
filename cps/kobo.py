@@ -315,6 +315,19 @@ def _acknowledge_pending_page(
                 ub.KoboSyncedBooks.user_id == current_user.id,
                 ub.KoboSyncedBooks.book_id.in_(removed_book_ids),
             ).delete(synchronize_session=False)
+            # Once the device acknowledges that an entitlement is gone, its
+            # device-specific repair journal is no longer meaningful. In
+            # particular, a partial-token reset may have re-armed an
+            # unconfirmed position echo before the removal was calculated.
+            # The authoritative user reading state remains separate, and a
+            # future entitlement acknowledgment recreates this device row.
+            ub.session.query(ub.DeviceReadingPosition).filter(
+                ub.DeviceReadingPosition.device_id
+                == int(requesting_device_id),
+                ub.DeviceReadingPosition.book_id.in_(removed_book_ids),
+            ).delete(
+                synchronize_session=False,
+            )
 
         for emitted in confirmation.get("rehydrate_positions", []):
             position = ub.session.query(ub.DeviceReadingPosition).filter_by(
@@ -357,9 +370,10 @@ def _reset_pending_page_for_non_cwng_token(page, requesting_device_id):
     page so the reset request can regenerate the state through the normal
     bounded rehydrate path.
 
-    The re-arm and pending-page deletion share the caller's final checked
-    transaction. A failure leaves the old page intact and reaches the
-    retryable sync boundary instead of silently dropping the echo.
+    The re-arm and pending-page deletion remain staged in the caller's
+    transaction. Every explicit failure exit from HandleSyncRequest reaches
+    ``_abort_sync_with_observability``, which rolls that transaction back; a
+    successful request commits these writes with the replacement page.
     """
     try:
         confirmation = json.loads(page.confirmation_json or "{}")
@@ -976,11 +990,14 @@ def _abort_sync_with_observability(
 ):
     """Log and link a sync failure that has no entitlement response body.
 
-    The observability record is best-effort: this boundary exists so the
-    intended retryable status always reaches the device, even when the
-    logging backend itself is failing (a second ``log.warning`` inside the
-    summary fallback would otherwise escape as an HTTP 500).
+    First discard every staged sync-state mutation so a failure after pending
+    page acknowledgment/reset cannot leave the request half-applied. The
+    observability record is best-effort: this boundary exists so the intended
+    status always reaches the device, even when the logging backend itself is
+    failing (a second ``log.warning`` inside the summary fallback would
+    otherwise escape as an HTTP 500).
     """
+    _rollback_after_sync_failure()
     try:
         _log_sync_observability(
             requesting_device_id,
@@ -2268,9 +2285,14 @@ def HandleSyncRequest():
             )
             .order_by(ub.DeviceReadingPosition.book_id)
         )
-        if rehydrate_book_ids:
+        excluded_rehydrate_book_ids = (
+            set(rehydrate_book_ids) | set(books_to_delete_ids)
+        )
+        if excluded_rehydrate_book_ids:
             pending_rehydrates = pending_rehydrates.filter(
-                ub.DeviceReadingPosition.book_id.notin_(rehydrate_book_ids),
+                ub.DeviceReadingPosition.book_id.notin_(
+                    excluded_rehydrate_book_ids,
+                ),
             )
         pending_rehydrates = pending_rehydrates.limit(SYNC_ITEM_LIMIT).all()
         for position, kobo_reading_state in pending_rehydrates:
@@ -2305,6 +2327,7 @@ def HandleSyncRequest():
             book_id for book_id in acknowledged_rehydrate_book_ids
             if book_id not in reading_state_book_ids_emitted
             and book_id not in rehydrate_book_ids
+            and book_id not in books_to_delete_ids
         ]
         if echo_book_ids:
             try:

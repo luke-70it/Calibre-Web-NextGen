@@ -1,3 +1,3 @@
 ### Fixed
 
-- Kobo reading-position confirmations are retried when a partial or store sync token interrupts their pending page instead of being dropped.
+- Kobo reading-position confirmations interrupted by a partial or store sync token are retried for books that remain entitled, while an entitlement removal cancels the device's pending repair state.
