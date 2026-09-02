@@ -418,6 +418,29 @@ export function BookDetail() {
     });
   };
 
+  const coverPreferences = !me?.role?.anonymous ? (
+    <div className={styles.coverPreferences} data-testid="book-cover-preferences">
+      <p>{t('Your own cover is private to you and your e-reader deliveries. The library cover stays unchanged for everyone else.')}</p>
+      <div className={styles.coverPreferenceActions}>
+        <Link href={`/book/${book.id}/cover?personal=1`}>
+          <ImageIcon size={15} aria-hidden="true" focusable={false} />
+          {book.using_my_cover ? t('Change my cover') : t('Use my own cover')}
+        </Link>
+        {book.using_my_cover && (
+          <button type="button" disabled={clearMyCover.isPending}
+            onClick={() => clearMyCover.mutate()}>
+            {clearMyCover.isPending ? t('Restoring…') : t('Use the library cover')}
+          </button>
+        )}
+        {me?.role?.edit && (
+          <Link href={`/book/${book.id}/cover`}>
+            {t('Change library cover')}
+          </Link>
+        )}
+      </div>
+    </div>
+  ) : null;
+
   return (
     <main className={styles.container}>
       <Link href={bookBackTarget.href} className={styles.back}>
@@ -460,28 +483,12 @@ export function BookDetail() {
               </div>
             )}
           </div>
-          {!me?.role?.anonymous && (
-            <div className={styles.coverPreferences}>
-              <p>{t('Your own cover is private to you and your e-reader deliveries. The library cover stays unchanged for everyone else.')}</p>
-              <div className={styles.coverPreferenceActions}>
-                <Link href={`/book/${book.id}/cover?personal=1`}>
-                  <ImageIcon size={15} aria-hidden="true" focusable={false} />
-                  {book.using_my_cover ? t('Change my cover') : t('Use my own cover')}
-                </Link>
-                {book.using_my_cover && (
-                  <button type="button" disabled={clearMyCover.isPending}
-                    onClick={() => clearMyCover.mutate()}>
-                    {clearMyCover.isPending ? t('Restoring…') : t('Use the library cover')}
-                  </button>
-                )}
-                {me?.role?.edit && (
-                  <Link href={`/book/${book.id}/cover`}>
-                    {t('Change library cover')}
-                  </Link>
-                )}
-              </div>
-            </div>
-          )}
+          {/* Keep cover choices under the artwork on wide layouts. On narrow
+              layouts this block follows the ordinary action row instead: when
+              it lived in the cover grid cell, its prose and two 44px controls
+              made that first row tall enough to push #1828's delete target
+              below the viewport even though the button remained rendered. */}
+          {!narrowLayout && coverPreferences}
         </div>
 
         {/* RIGHT: info */}
@@ -772,6 +779,7 @@ export function BookDetail() {
             )}
 
           </div>
+          {narrowLayout && coverPreferences}
           <p className={reloadMessage ? styles.actionStatus : undefined} role="status">{reloadMessage}</p>
 
           {/* Whole-book deletion is intentionally separated from the wrapping row

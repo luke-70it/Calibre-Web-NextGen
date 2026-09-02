@@ -62,10 +62,11 @@ async function setManagedMode(
   userId: number,
   libraryMode: MePayload['library_mode'],
   browseGlobal = true,
+  roles: Record<string, boolean> = {},
 ) {
   const response = await adminPage.request.post(`/api/v1/admin/users/${userId}`, {
     headers: await csrfHeaders(adminPage),
-    data: { roles: { browse_global: browseGlobal }, library_mode: libraryMode },
+    data: { roles: { browse_global: browseGlobal, ...roles }, library_mode: libraryMode },
   });
   expect(response.ok(), await response.text()).toBeTruthy();
 }
@@ -199,19 +200,23 @@ async function expectNoSeriousAxeViolations(page: Page) {
     .analyze();
   const failures = results.violations
     .filter((violation) => violation.impact === 'critical' || violation.impact === 'serious')
-    .map((violation) => `${violation.id}: ${violation.help}`);
+    .map((violation) => {
+      const targets = violation.nodes.flatMap((node) => node.target).join(', ');
+      return `${violation.id}: ${violation.help}${targets ? ` (${targets})` : ''}`;
+    });
   expect(failures).toEqual([]);
 }
 
 test.describe('My Library', () => {
-  test('a non-member Global Library card loads the global cover', async ({ page }) => {
-    const me = (await page.request.get('/api/v1/auth/me').then((r) => r.json())) as MePayload;
-    const originalMode = me.library_mode;
-    const originalBrowseGlobal = !!me.role.browse_global;
+  test('a non-member Global Library card loads the global cover', async ({
+    page: adminPage,
+    secondaryUser,
+  }: { page: Page; secondaryUser: SecondaryUserSession }) => {
+    const page = secondaryUser.page;
     let coveredBook: GlobalBook | undefined;
 
     try {
-      await setManagedMode(page, me.id, 'personal_library');
+      await setManagedMode(adminPage, secondaryUser.id, 'personal_library');
       const books = await firstGlobalBooks(page);
       coveredBook = books.find((book) => !!book.cover_url);
       test.skip(!coveredBook, 'seed library needs at least one book with a cover');
@@ -232,20 +237,29 @@ test.describe('My Library', () => {
       await expect(page.getByRole('img', { name: coveredBook!.title })).toBeVisible();
     } finally {
       if (coveredBook) await addMembership(page, coveredBook.id).catch(() => undefined);
-      await setManagedMode(page, me.id, originalMode, originalBrowseGlobal);
     }
   });
 
-  test('a non-member Global Library card opens read-only personal state with global editing', async ({ page }) => {
-    const me = (await page.request.get('/api/v1/auth/me').then((r) => r.json())) as MePayload;
-    const originalMode = me.library_mode;
-    const originalBrowseGlobal = !!me.role.browse_global;
+  test('a non-member Global Library card opens read-only personal state with global editing', async ({
+    page: adminPage,
+    secondaryUser,
+  }: { page: Page; secondaryUser: SecondaryUserSession }) => {
+    const page = secondaryUser.page;
     let book: GlobalBook | undefined;
 
     try {
-      expect(me.role.edit, 'the primary e2e account must exercise the editor gate').toBe(true);
-      expect(me.role.delete_books, 'the primary e2e account must exercise the combined delete gate').toBe(true);
-      await setManagedMode(page, me.id, 'personal_library');
+      await setManagedMode(adminPage, secondaryUser.id, 'personal_library', true, {
+        edit: true,
+        delete_books: true,
+      });
+      // The fixture first loaded this account with viewer-only roles. A fresh
+      // document discards that pre-update React Query cache and exercises the
+      // same auth bootstrap a real role change receives on its next page load.
+      await page.goto('/app/global');
+      const me = (await page.request.get('/api/v1/auth/me').then((r) => r.json())) as MePayload;
+      expect(me.role.admin, 'global editing must not depend on the admin role').toBe(false);
+      expect(me.role.edit, 'the test account must exercise the editor gate').toBe(true);
+      expect(me.role.delete_books, 'the test account must exercise the combined delete gate').toBe(true);
       [book] = await firstGlobalBooks(page);
       test.skip(!book, 'seed library needs at least one book');
       await removeMembership(page, book!.id);
@@ -291,14 +305,13 @@ test.describe('My Library', () => {
       await expectNoSeriousAxeViolations(page);
     } finally {
       if (book) await addMembership(page, book.id).catch(() => undefined);
-      await setManagedMode(page, me.id, originalMode, originalBrowseGlobal);
     }
   });
 
   test('two real accounts see independent selections and can discover missing books', async ({
     page: adminPage,
     secondaryUser,
-  }: { page: Page; secondaryUser: SecondaryUserSession }) => {
+  }: { page: Page; secondaryUser: SecondaryUserSession }, testInfo) => {
     const adminMe = (await adminPage.request.get('/api/v1/auth/me').then((r) => r.json())) as MePayload;
     const originalMode = adminMe.library_mode;
     const originalBrowseGlobal = !!adminMe.role.browse_global;
@@ -309,11 +322,17 @@ test.describe('My Library', () => {
       await setManagedMode(adminPage, adminMe.id, 'personal_library');
       await setManagedMode(adminPage, secondaryUser.id, 'personal_library');
       books = await firstGlobalBooks(adminPage);
-      test.skip(books.length < 2, 'seed library needs at least two books');
-      const [adminBook, secondaryBook] = books;
+      const pairOffset = testInfo.project.name === 'mobile' ? 2 : 0;
+      test.skip(books.length < pairOffset + 2, 'seed library needs two books per viewport project');
+      const [adminBook, secondaryBook] = books.slice(pairOffset, pairOffset + 2);
 
-      // Seed-once initially gives both accounts every visible book. Curate each
-      // in the opposite direction so the same global records prove isolation.
+      // #2126 deliberately seeds each account once, but the assertion must not
+      // rely on whatever selection that account inherited. Establish both
+      // positive memberships before curating the opposite records away. Each
+      // viewport project owns a different pair because both projects run at the
+      // same time against one server-side primary account.
+      await addMembership(adminPage, adminBook.id);
+      await addMembership(secondaryPage, secondaryBook.id);
       await removeMembership(adminPage, secondaryBook.id);
       await removeMembership(secondaryPage, adminBook.id);
 
