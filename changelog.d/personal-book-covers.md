@@ -7,6 +7,11 @@
 
 ### Fixed
 
-- **Cover writes are now crash-safe.** New global and personal covers are
-  validated in a temporary sibling and published atomically only after their
-  metadata transaction succeeds, preserving the previous cover on failure.
+- **Cover writes are now crash-safe.** Global covers publish only after their
+  metadata transaction succeeds. Personal covers publish under an immutable
+  version name before the preference transaction points at them, so a failed
+  database commit cannot make a committed preference serve different bytes.
+- **Personal covers no longer re-download held Kobo books.** Changing the image
+  leaves the entitlement fingerprint and device ledger alone, while the
+  authenticated cover endpoint and EPUB/KEPUB delivery use the current user's
+  image without exposing it to another account.

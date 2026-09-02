@@ -538,7 +538,7 @@ def _read_current_cover_bytes(book) -> Optional[bytes]:
             from .services import user_cover
             override = user_cover.override_for_user(current_user.id, book.id)
             if override is not None:
-                with open(user_cover.cover_path(override.user_id, override.book_id), "rb") as fh:
+                with open(user_cover.path_for_row(override), "rb") as fh:
                     return fh.read()
         if not getattr(book, "has_cover", False):
             return None

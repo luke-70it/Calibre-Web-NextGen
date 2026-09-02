@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from flask import Flask, Response
 import pytest
+from werkzeug.exceptions import NotFound
 
 from cps.api.serializers import serialize_book_list_item
 
@@ -106,3 +107,41 @@ def test_cover_lookup_does_not_bypass_membership_without_global_role(monkeypatch
         "allow_show_hidden": True,
         "allow_show_global": False,
     })]
+
+
+def test_non_member_detail_does_not_turn_its_format_url_into_download_access(monkeypatch):
+    """Global metadata discovery does not widen the download policy funnel."""
+    from cps import helper
+
+    filtered = []
+    raw_lookup = []
+    monkeypatch.setattr(
+        helper.calibre_db,
+        "get_filtered_book",
+        lambda book_id, **options: filtered.append((book_id, options)),
+    )
+    monkeypatch.setattr(
+        helper.calibre_db,
+        "get_book",
+        lambda book_id: raw_lookup.append(book_id),
+    )
+    monkeypatch.setattr(
+        helper,
+        "current_user",
+        SimpleNamespace(
+            id=17,
+            is_authenticated=True,
+            is_anonymous=False,
+            role_admin=lambda: False,
+        ),
+    )
+    app = Flask(__name__)
+
+    with app.test_request_context("/download/42/epub/book"), pytest.raises(NotFound):
+        helper.get_download_link(42, "epub", "web")
+
+    assert filtered == [(42, {
+        "allow_show_archived": True,
+        "allow_show_hidden": True,
+    })]
+    assert raw_lookup == []

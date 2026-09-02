@@ -8,8 +8,6 @@ and the Jinja UI never diverge. All are per-user actions, so they require a real
 (non-anonymous) session — the anonymous-browse guest can't own favorites/hidden
 state or send mail.
 """
-from datetime import datetime, timezone
-
 from flask import jsonify, request
 
 from . import api_v1
@@ -114,9 +112,12 @@ def set_my_book_cover(book_id):
     if book is None:
         return _err("not_found", "Book not found", 404)
 
+    existing = user_cover.row_for_user(current_user.id, book_id)
+    updated_at = user_cover.next_updated_at(existing)
+
     if request.files.get("file"):
         staged, message = user_cover.stage_upload(
-            current_user.id, book_id, request.files["file"])
+            current_user.id, book_id, updated_at, request.files["file"])
     else:
         body = request.get_json(silent=True) or {}
         kind = body.get("kind") or "url"
@@ -124,59 +125,51 @@ def set_my_book_cover(book_id):
             url = (body.get("url") or "").strip()
             if not url:
                 return _err("invalid_request", "Provide a cover URL", 400)
-            staged, message = user_cover.stage_url(current_user.id, book_id, url)
+            staged, message = user_cover.stage_url(
+                current_user.id, book_id, updated_at, url)
         elif kind == "embedded":
             extracted = cover_extract.extract_embedded_cover(book)
             if extracted is None:
                 return _err("invalid_request", "This book has no embedded cover", 400)
             staged, message = user_cover.stage_bytes(
-                current_user.id, book_id, extracted.data)
+                current_user.id, book_id, updated_at, extracted.data)
         else:
             return _err("invalid_request", "Unknown cover source", 400)
     if staged is None:
         return _err("invalid_cover", str(message or "Cover could not be saved"), 400)
 
-    existing = user_cover.row_for_user(current_user.id, book_id)
+    previous_updated_at = getattr(existing, "updated_at", None)
+    # Publish an immutable, version-named file before making the row point to
+    # it. Existing readers keep resolving the old row/file until the commit;
+    # a crash or DB failure can leave only an unreferenced file, never a row
+    # whose version URL serves different bytes.
+    published, publish_error = staged.publish()
+    if not published:
+        staged.discard()
+        return _err("save_failed", "Personal cover image could not be published", 500,
+                    reason=publish_error)
+
     row = existing or ub.UserBookCover(
         user_id=int(current_user.id), book_id=int(book_id))
-    previous_updated_at = getattr(existing, "updated_at", None)
-    row.updated_at = datetime.now(timezone.utc)
+    row.updated_at = updated_at
     if existing is None:
         ub.session.add(row)
     try:
         ub.session.commit()
     except Exception:
+        row.updated_at = previous_updated_at
         ub.session.rollback()
-        staged.discard()
+        user_cover.remove_file(
+            current_user.id, book_id,
+            version=user_cover.version_token(updated_at),
+        )
         return _err("save_failed", "Personal cover preference could not be saved", 500)
 
-    published, publish_error = staged.publish()
-    if not published:
-        staged.discard()
-        if existing is None:
-            try:
-                ub.session.delete(row)
-                ub.session.commit()
-            except Exception:
-                ub.session.rollback()
-        else:
-            # The old file is still live because publish is atomic. Restore its
-            # version token too, so clients do not cache old bytes under a new
-            # URL after a failed replacement.
-            row.updated_at = previous_updated_at
-            try:
-                ub.session.commit()
-            except Exception:
-                ub.session.rollback()
-        return _err("save_failed", "Personal cover image could not be published", 500,
-                    reason=publish_error)
-
-    try:
-        remove_synced_book(book_id)
-    except Exception:
-        # The versioned CoverImageId below also makes Kobo refetch; this marker
-        # removal merely accelerates metadata delivery.
-        pass
+    if existing is not None and previous_updated_at is not None:
+        user_cover.remove_file(
+            current_user.id, book_id,
+            version=user_cover.version_token(previous_updated_at),
+        )
     return jsonify(_my_cover_payload(book, row))
 
 
@@ -198,11 +191,7 @@ def clear_my_book_cover(book_id):
         except Exception:
             ub.session.rollback()
             return _err("save_failed", "Personal cover preference could not be cleared", 500)
-        user_cover.remove_file(current_user.id, book_id)
-        try:
-            remove_synced_book(book_id)
-        except Exception:
-            pass
+        user_cover.remove_file(current_user.id, book_id, row=row)
     return jsonify(_my_cover_payload(book, None))
 
 

@@ -297,6 +297,41 @@ def test_detail_endpoint_not_found():
 
 
 @pytest.mark.unit
+def test_non_global_viewer_cannot_open_an_unowned_global_detail():
+    """The new deep link bypasses membership only for browse-global users."""
+    from cps.api import books as books_mod
+
+    viewer = SimpleNamespace(
+        id=17,
+        is_authenticated=True,
+        is_anonymous=False,
+        role_browse_global=lambda: False,
+    )
+    app = flask.Flask(__name__)
+    app.config["WTF_CSRF_ENABLED"] = False
+
+    with app.test_request_context("/api/v1/books/42"), \
+            patch.object(books_mod, "current_user", viewer), \
+            patch.object(books_mod.config, "config_read_column", 0, create=True), \
+            patch.object(
+                books_mod.calibre_db,
+                "get_book_read_archived",
+                return_value=None,
+            ) as lookup:
+        response, status = inspect.unwrap(books_mod.book_detail)(42)
+
+    assert status == 404
+    assert json.loads(response.get_data())["error"]["code"] == "not_found"
+    lookup.assert_called_once_with(
+        42,
+        0,
+        allow_show_archived=True,
+        allow_show_hidden=True,
+        allow_show_global=False,
+    )
+
+
+@pytest.mark.unit
 def test_detail_endpoint_archived_book():
     from cps.api import books as books_mod
     from cps import ub
