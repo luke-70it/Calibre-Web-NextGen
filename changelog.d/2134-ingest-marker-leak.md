@@ -1,0 +1,3 @@
+### Fixed
+
+- **A book's detail page no longer shows an internal ingest bookkeeping value as if it were book metadata.** Books imported since the ingest retry work landed carried a private `cwng_ingest_sha256_…` entry in Calibre's identifiers table, and the detail page and metadata editor listed it alongside real identifiers like ISBN. On a phone the 83-character value could not wrap, so it pushed the page sideways and left the buttons off screen. The value is still recorded and still used by ingest — it is simply no longer treated as something you wrote. Editing a book's identifiers now preserves it rather than deleting it, and the reserved name cannot be submitted by hand.
