@@ -1,13 +1,13 @@
 {
   "area": "kobo",
-  "body": "OBSERVED in the merged Kobo sync pipeline: acknowledging a rehydrate repair clears its device latch and stages a one-shot ChangedReadingState confirmation echo. If that echo page is still pending when the same reader presents a different partial, malformed, or store token, the non-CWNG reset path deletes the pending page. Entitlements can recover through acknowledged fingerprints, and ordinary repairs retain their latch, but the echo has neither once its predecessor acknowledgment committed. The unconfirmed state therefore disappears from the feed permanently. The resolution records echoed book IDs in the pending confirmation and re-arms only those IDs before a non-CWNG reset abandons the page; the reset request then uses the existing bounded rehydrate path, while exact acknowledgment remains terminal and non-chaining.",
+  "body": "OBSERVED in the merged Kobo sync pipeline: acknowledging a rehydrate repair clears its device latch and stages a one-shot ChangedReadingState confirmation echo. If that echo page is still pending when the same reader presents a different partial, malformed, or store token, the non-CWNG reset path deletes the pending page. Entitlements can recover through acknowledged fingerprints, and ordinary repairs retain their latch, but the echo has neither once its predecessor acknowledgment committed. The unconfirmed state therefore disappears from the feed permanently. The resolution records rendered echo IDs in the private pending confirmation and re-arms still-entitled IDs when a non-CWNG token resets that page. New or changed entitlements defer state until their normal repair cycle; removals suppress state and discard the device repair journal only when acknowledged. Every explicit failure exit rolls back the staged reset, while exact acknowledgment remains terminal and non-chaining.",
   "created": "2026-09-02",
   "id": "F-6b8f9f",
   "refs": [],
   "resolution": {
-    "commit": "9f57a7b519",
+    "commit": "c6dc870caa",
     "date": "2026-09-02",
-    "note": "Fixed by recording rendered confirmation-echo book IDs in the pending-page confirmation and re-arming only those IDs when a partial, malformed, or store token resets that unacknowledged page.",
+    "note": "Fixed by recording rendered echo IDs, retrying only still-entitled state across a non-CWNG reset, canceling repair on acknowledged removal, and rolling back staged reset work on every explicit failure exit.",
     "release": ""
   },
   "severity": "data-integrity",
