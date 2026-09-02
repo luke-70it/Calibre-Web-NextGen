@@ -772,6 +772,51 @@ def test_live_entitlement_ledger_read_failure_returns_retryable_503(
     assert "ChangedEntitlement" in delivered
 
 
+def test_ledger_read_failure_with_failed_logging_backend_still_returns_503(
+    sync_harness, monkeypatch,
+):
+    """A logger that stays broken through the failure path must not turn the
+    retryable 503 into a 500 (the failure-only boundary cannot rely on
+    logging to reach ``abort``)."""
+    from cps import kobo, kobo_sync_status, ub
+
+    monkeypatch.setattr(
+        kobo.config, "config_kobo_suppress_replayed_entitlements", True,
+    )
+    assert len(_entitlements(sync_harness.sync())) == 1
+    sync_harness.book.title = "Changed while logging is broken"
+    sync_harness.book.sort = "Changed while logging is broken"
+    sync_harness.book.last_modified += timedelta(minutes=1)
+    sync_harness.session.commit()
+
+    def broken_logging_backend(*_args, **_kwargs):
+        raise RuntimeError("injected persistent logging backend failure")
+
+    def fail_critical_read(*_args, **_kwargs):
+        # The backend dies at the moment of the ledger failure and stays dead
+        # through every log call on the failure path that follows.
+        for level in ("info", "warning", "error"):
+            monkeypatch.setattr(kobo.log, level, broken_logging_backend)
+        raise RuntimeError("injected live entitlement ledger failure")
+
+    monkeypatch.setattr(
+        kobo_sync_status,
+        "get_device_entitlement_fingerprints",
+        fail_critical_read,
+    )
+    failed = _sync_through_flask_error_pipeline(sync_harness)
+
+    assert failed.status_code == 503
+    assert b"Entitlement" not in failed.get_data()
+    assert kobo_sync_status.get_pending_sync_page(
+        sync_harness.device.id,
+    ) is None
+    sync_harness.session.expire_all()
+    assert sync_harness.session.query(
+        ub.KoboDeviceBookEntitlement,
+    ).count() == 1
+
+
 def test_deleted_entitlement_ledger_read_failure_returns_retryable_503(
     sync_harness, monkeypatch, caplog,
 ):

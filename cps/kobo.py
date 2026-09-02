@@ -910,15 +910,24 @@ def _abort_sync_with_observability(
     response_mode,
     capture_session,
 ):
-    """Log and link a sync failure that has no entitlement response body."""
-    _log_sync_observability(
-        requesting_device_id,
-        incoming_cursor,
-        incoming_cursor,
-        _empty_sync_observability(),
-        response_mode=response_mode,
-        capture_session=capture_session,
-    )
+    """Log and link a sync failure that has no entitlement response body.
+
+    The observability record is best-effort: this boundary exists so the
+    intended retryable status always reaches the device, even when the
+    logging backend itself is failing (a second ``log.warning`` inside the
+    summary fallback would otherwise escape as an HTTP 500).
+    """
+    try:
+        _log_sync_observability(
+            requesting_device_id,
+            incoming_cursor,
+            incoming_cursor,
+            _empty_sync_observability(),
+            response_mode=response_mode,
+            capture_session=capture_session,
+        )
+    except Exception:  # noqa: BLE001 - failure-only boundary; nothing to log with
+        pass
     return abort(status)
 
 
