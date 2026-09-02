@@ -8,7 +8,7 @@
     "#2131"
   ],
   "resolution": {
-    "commit": "945a49a761",
+    "commit": "fed3abe70f",
     "date": "2026-09-02",
     "note": "Preserve the incoming archive field as the outgoing floor; select tombstones by the original timestamp or a missing physical-device acknowledgment; retain the bounded deletion page cap.",
     "release": ""
