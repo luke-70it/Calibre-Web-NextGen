@@ -688,6 +688,23 @@ def _diagnostic_ledger_lookup(loader, device_id, identities, *, scope):
                 )
 
 
+def _log_delivery_ledger_read_failure(scope):
+    """Record a delivery-critical ledger failure without risking the 503.
+
+    Unlike ``_diagnostic_ledger_lookup``, these reads decide whether an
+    entitlement may safely be put on the wire. Their failure must abort the
+    sync, while a logging backend failure remains diagnostic-only.
+    """
+    try:
+        log.error(
+            "Kobo Sync failed reason=delivery_ledger_read_failed scope=%s",
+            scope,
+            exc_info=True,
+        )
+    except Exception:
+        pass
+
+
 def _sync_observability(
     sync_results,
     *,
@@ -1846,13 +1863,23 @@ def HandleSyncRequest():
             db.Books.id,
             lambda row: row.Books.id,
             SYNC_ITEM_LIMIT):
-        known_entitlement_fingerprints = (
-            kobo_sync_status.get_device_entitlement_fingerprints(
-                requesting_device_id,
-                [book.Books.id for book in candidate_page],
+        try:
+            known_entitlement_fingerprints = (
+                kobo_sync_status.get_device_entitlement_fingerprints(
+                    requesting_device_id,
+                    [book.Books.id for book in candidate_page],
+                )
+                if requesting_device_id else {}
             )
-            if requesting_device_id else {}
-        )
+        except Exception:
+            _log_delivery_ledger_read_failure("live_entitlement")
+            return _abort_sync_with_observability(
+                503,
+                requesting_device_id,
+                sync_cursor_in,
+                response_mode="live_entitlement_ledger_read_failed",
+                capture_session=capture_session,
+            )
         # Same-device acknowledged fingerprints are delivery state, not
         # optional diagnostics. They suppress exact absent/partial-token
         # replays and classify a genuine mismatch as Changed.
@@ -2282,11 +2309,21 @@ def HandleSyncRequest():
             # This ledger read decides wire behavior and therefore must not use
             # the diagnostic fail-open path. Exact acknowledged tombstones are
             # suppressed for every token shape, including absent/partial.
-            known_deleted_fingerprints = \
-                kobo_sync_status.get_device_deleted_entitlement_fingerprints(
-                requesting_device_id,
-                deletion_page_uuids,
-            )
+            try:
+                known_deleted_fingerprints = \
+                    kobo_sync_status.get_device_deleted_entitlement_fingerprints(
+                    requesting_device_id,
+                    deletion_page_uuids,
+                )
+            except Exception:
+                _log_delivery_ledger_read_failure("deleted_entitlement")
+                return _abort_sync_with_observability(
+                    503,
+                    requesting_device_id,
+                    sync_cursor_in,
+                    response_mode="deleted_entitlement_ledger_read_failed",
+                    capture_session=capture_session,
+                )
         else:
             known_deleted_fingerprints = _diagnostic_ledger_lookup(
                 kobo_sync_status.get_device_deleted_entitlement_fingerprints,
