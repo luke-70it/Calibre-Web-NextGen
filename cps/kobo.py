@@ -912,6 +912,8 @@ def _abort_sync_with_observability(
     *,
     response_mode,
     capture_session,
+    outgoing_cursor=None,
+    observability=None,
 ):
     """Log and link a sync failure that has no entitlement response body.
 
@@ -924,8 +926,9 @@ def _abort_sync_with_observability(
         _log_sync_observability(
             requesting_device_id,
             incoming_cursor,
-            incoming_cursor,
-            _empty_sync_observability(),
+            incoming_cursor if outgoing_cursor is None else outgoing_cursor,
+            _empty_sync_observability() if observability is None
+            else observability,
             response_mode=response_mode,
             capture_session=capture_session,
         )
@@ -2535,15 +2538,15 @@ def HandleSyncRequest():
     # delivery state was promoted at the beginning of this request (when its
     # predecessor token was presented) and lands atomically with this page.
     if ub.session_commit() is False:
-        _log_sync_observability(
+        return _abort_sync_with_observability(
+            503,
             requesting_device_id,
             sync_cursor_in,
-            sync_cursor_out,
-            observability,
             response_mode="commit_failed",
             capture_session=capture_session,
+            outgoing_cursor=sync_cursor_out,
+            observability=observability,
         )
-        return abort(503)
     _log_sync_observability(
         requesting_device_id,
         sync_cursor_in,

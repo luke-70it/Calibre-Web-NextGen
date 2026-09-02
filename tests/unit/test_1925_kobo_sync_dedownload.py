@@ -883,6 +883,30 @@ def test_pending_ack_failure_with_failed_logging_backend_still_returns_503(
     ) == pending_state
 
 
+def test_page_commit_failure_with_failed_logging_backend_still_returns_503(
+    sync_harness, monkeypatch,
+):
+    from cps import kobo, kobo_sync_status, ub
+
+    def broken_logging_backend(*_args, **_kwargs):
+        raise RuntimeError("injected persistent logging backend failure")
+
+    def reject_commit(*_args, **_kwargs):
+        for level in ("info", "warning", "error", "exception"):
+            monkeypatch.setattr(kobo.log, level, broken_logging_backend)
+        ub.session.rollback()
+        return False
+
+    monkeypatch.setattr(ub, "session_commit", reject_commit)
+    failed = _sync_through_flask_error_pipeline(sync_harness)
+
+    assert failed.status_code == 503
+    assert b"Entitlement" not in failed.get_data()
+    assert kobo_sync_status.get_pending_sync_page(
+        sync_harness.device.id,
+    ) is None
+
+
 def test_deleted_entitlement_ledger_read_failure_returns_retryable_503(
     sync_harness, monkeypatch, caplog,
 ):
