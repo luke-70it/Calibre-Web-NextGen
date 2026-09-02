@@ -227,6 +227,10 @@ export interface BookDetail {
   /** Density candidates for the detail cover (`sm` 1x, `md` 2x). Absent on
    *  older servers — fall back to `cover_url` alone. */
   cover_srcset?: string | null;
+  /** True when cover_url points at this viewer's private override. */
+  using_my_cover?: boolean;
+  /** The authoritative shared-library cover, unaffected by a private override. */
+  library_cover_url?: string | null;
   pubdate: string | null;
   date_added: string | null;
   last_modified: string | null;
@@ -507,6 +511,14 @@ export interface LibraryModePayload {
   show_my_library_intro: boolean;
   can_switch_library_mode: boolean;
   library_mode_managed: boolean;
+}
+
+/** Server-wide state of the admin "Try My Library" intro card — shared by all
+ *  administrators and persisted in app.db, so it survives sessions and browsers. */
+export interface MyLibraryIntroState {
+  status: 'not_enabled' | 'enabled';
+  dismissed: boolean;
+  snapshot_accounts: number;
 }
 
 export interface GlobalLibraryPage extends BooksPage {
