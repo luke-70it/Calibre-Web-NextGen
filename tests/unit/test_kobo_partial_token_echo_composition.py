@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 
 import pytest
+from flask import Flask
 
 from tests.unit.test_1925_kobo_sync_dedownload import (
     _add_kobo_shelf,
@@ -16,6 +17,39 @@ from tests.unit.test_kobo_entitlement_ledger_forensic import (
 
 
 pytestmark = pytest.mark.unit
+
+
+def test_production_sync_route_uses_pending_page_reset_boundary(monkeypatch):
+    """The public Blueprint route must retain the reset exception boundary."""
+    from cps import kobo
+
+    app = Flask("kobo-production-dispatch-regression")
+    app.register_blueprint(kobo.kobo)
+    [sync_rule] = [
+        rule for rule in app.url_map.iter_rules()
+        if rule.endpoint == "kobo.HandleSyncRequest"
+    ]
+    assert sync_rule.rule == "/kobo/<auth_token>/v1/library/sync"
+
+    production_view = app.view_functions[sync_rule.endpoint]
+    assert production_view is kobo._dispatch_sync_request
+    boundary_calls = []
+    sentinel = object()
+
+    def boundary(handler):
+        boundary_calls.append(handler)
+        return sentinel
+
+    def bypassed_handler():
+        pytest.fail("production sync dispatch bypassed reset boundary")
+
+    monkeypatch.setattr(
+        kobo, "_run_sync_with_pending_page_reset_boundary", boundary,
+    )
+    monkeypatch.setattr(kobo, "HandleSyncRequest", bypassed_handler)
+
+    assert production_view() is sentinel
+    assert boundary_calls == [bypassed_handler]
 
 
 def _prepare_latched_state(sync_harness, monkeypatch):

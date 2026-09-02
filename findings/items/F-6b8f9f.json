@@ -5,7 +5,7 @@
   "id": "F-6b8f9f",
   "refs": [],
   "resolution": {
-    "commit": "c6dc870caa",
+    "commit": "45583a626b",
     "date": "2026-09-02",
     "note": "Fixed by recording rendered echo IDs, retrying only still-entitled state across a non-CWNG reset, canceling repair on acknowledged removal, and rolling back staged reset work on both explicit aborts and escaping response-generation exceptions.",
     "release": ""
