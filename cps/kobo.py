@@ -345,6 +345,44 @@ def _acknowledge_pending_page(
         return False
 
 
+def _reset_pending_page_for_non_cwng_token(page, requesting_device_id):
+    """Abandon a serial page without losing its unconfirmed state echo.
+
+    A partial, malformed, or store token cannot prove that the device received
+    the exact pending page, so its entitlement confirmation must remain
+    unpromoted. Entitlements have their acknowledged fingerprint recovery
+    path, and ordinary repair pages retain their still-armed position latches.
+    A confirmation echo is different: acknowledging its predecessor already
+    cleared the latch. Re-arm only those echoed book IDs before discarding the
+    page so the reset request can regenerate the state through the normal
+    bounded rehydrate path.
+
+    The re-arm and pending-page deletion share the caller's final checked
+    transaction. A failure leaves the old page intact and reaches the
+    retryable sync boundary instead of silently dropping the echo.
+    """
+    try:
+        confirmation = json.loads(page.confirmation_json or "{}")
+        confirmation_echo_book_ids = confirmation.get(
+            "confirmation_echo_book_ids", [],
+        )
+        device_positions.mark_rehydrate_needed(
+            requesting_device_id, confirmation_echo_book_ids,
+        )
+        kobo_sync_status.delete_pending_sync_page(requesting_device_id)
+        return True
+    except Exception:
+        _rollback_after_sync_failure()
+        try:
+            log.exception(
+                "Kobo Sync: failed to reset pending page for device %s",
+                requesting_device_id,
+            )
+        except Exception:  # noqa: BLE001 - preserve retryable 503
+            pass
+        return False
+
+
 def _seed_existing_device_entitlement_ledgers(user_id):
     """Mark the conservative pre-ack upgrade boundary for known Kobos.
 
@@ -1345,8 +1383,18 @@ def HandleSyncRequest():
         if not sync_token.is_cwng_token:
             # An official-store/malformed token is a reset boundary.  The old
             # response remains unconfirmed, but it must not block a fresh
-            # device from starting a new serial page chain.
-            kobo_sync_status.delete_pending_sync_page(requesting_device_id)
+            # device from starting a new serial page chain. Preserve any
+            # confirmation echo whose predecessor acknowledgment already
+            # cleared its repair latch before abandoning the page.
+            if not _reset_pending_page_for_non_cwng_token(
+                    pending_page, requesting_device_id):
+                return _abort_sync_with_observability(
+                    503,
+                    requesting_device_id,
+                    sync_cursor_in,
+                    response_mode="pending_reset_failed",
+                    capture_session=capture_session,
+                )
         else:
             # One physical Kobo presents tokens serially. A different valid
             # CWNG token is not acknowledgment evidence and cannot safely
@@ -1429,6 +1477,7 @@ def HandleSyncRequest():
     sync_results = []
     books_to_delete_ids = set()
     rehydrate_positions_emitted = []
+    confirmation_echo_book_ids = []
     fingerprint_mismatch_reemitted = 0
     reemit_reasons = Counter()
 
@@ -2283,6 +2332,7 @@ def HandleSyncRequest():
                         },
                     })
                     reading_state_book_ids_emitted.append(book_id)
+                    confirmation_echo_book_ids.append(book_id)
             except Exception:
                 _rollback_after_sync_failure()
                 try:
@@ -2591,6 +2641,9 @@ def HandleSyncRequest():
                 }
                 for position in rehydrate_positions_emitted
             ],
+            "confirmation_echo_book_ids": sorted(
+                set(confirmation_echo_book_ids),
+            ),
         }
         stored_headers = {
             header_name: header_value
