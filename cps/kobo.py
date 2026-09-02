@@ -95,25 +95,43 @@ def _entitlement_fingerprint(entitlement):
     return hashlib.sha256(payload).hexdigest()
 
 
-def _bounded_query_pages(query, snapshot_count, page_size):
-    """Yield fixed-size query pages bounded by one captured row count.
+def _capture_query_identities(query, identity_column):
+    """Freeze one ordered candidate membership without rendering payloads."""
+    identity_rows = (
+        query.enable_eagerloads(False)
+        .with_entities(identity_column)
+        .all()
+    )
+    return tuple(row[0] for row in identity_rows)
 
-    Replay suppression happens after payload rendering, so the SQL query cannot
-    know which candidates are exact. Paging through at most ``snapshot_count``
-    rows lets callers top up past suppressed prefixes without an unbounded
-    ``while`` loop or Nickel's cursor-pinning ``x-kobo-sync: continue`` header.
-    Concurrent removals may exhaust the query early; concurrent additions wait
-    for the next request rather than extending this request's scan frontier.
+
+def _bounded_query_pages(
+        query, snapshot_identities, identity_column, row_identity, page_size):
+    """Yield fixed pages from one immutable candidate-identity frontier.
+
+    Replay suppression happens after payload rendering, so SQL cannot know
+    which candidates consume response capacity. Capture ordered identities
+    once, then refetch only each captured slice. Inserts after capture are not
+    members, and deletes cannot shift a later member past an OFFSET. A short
+    or empty slice therefore does not end the scan; later captured identities
+    still get their turn. Every fetch is limited to its remaining slice size.
     """
     if page_size <= 0:
         return
-    for offset in range(0, max(0, int(snapshot_count)), page_size):
-        page = query.offset(offset).limit(page_size).all()
-        if not page:
-            break
-        yield page
-        if len(page) < page_size:
-            break
+    for start in range(0, len(snapshot_identities), page_size):
+        identity_slice = snapshot_identities[start:start + page_size]
+        identity_order = {
+            identity: position
+            for position, identity in enumerate(identity_slice)
+        }
+        page = (
+            query.filter(identity_column.in_(identity_slice))
+            .limit(len(identity_slice))
+            .all()
+        )
+        page.sort(key=lambda row: identity_order[row_identity(row)])
+        if page:
+            yield page
 
 
 def _ledger_timestamp_component(value):
@@ -1750,12 +1768,14 @@ def HandleSyncRequest():
                            # uniquifies entity rows -- so this is a throughput
                            # and diagnostics defect, not data corruption.
                            .distinct())
-    # Capture a finite scan frontier once. Exact replay suppression requires
-    # rendered payloads, so it cannot be pushed safely into this SQL query.
-    # _bounded_query_pages will inspect no more than this many candidates while
-    # topping the response up to SYNC_ITEM_LIMIT candidates that produce wire
-    # work. Concurrent additions wait for the next request.
-    book_count = changed_entries.count()
+    # Freeze the ordered membership before rendering. A count plus OFFSET is
+    # not a snapshot: concurrent inserts can enter later offsets and concurrent
+    # deletes can shift a captured row out of them. Fetching only these IDs lets
+    # replay suppression top up safely without admitting or skipping rows.
+    book_snapshot_ids = _capture_query_identities(
+        changed_entries, db.Books.id,
+    )
+    book_count = len(book_snapshot_ids)
     log.debug("Kobo Sync: changed entries: {}".format(book_count))
 
     reading_state_book_ids_emitted = []
@@ -1821,7 +1841,11 @@ def HandleSyncRequest():
     scanned_magic_book_ids = []
 
     for candidate_page in _bounded_query_pages(
-            changed_entries, book_count, SYNC_ITEM_LIMIT):
+            changed_entries,
+            book_snapshot_ids,
+            db.Books.id,
+            lambda row: row.Books.id,
+            SYNC_ITEM_LIMIT):
         known_entitlement_fingerprints = (
             kobo_sync_status.get_device_entitlement_fingerprints(
                 requesting_device_id,
@@ -2235,7 +2259,10 @@ def HandleSyncRequest():
             ub.KoboDeletedBook.book_uuid,
         )
     )
-    deletion_candidate_count = pending_deletions.count()
+    deletion_snapshot_ids = _capture_query_identities(
+        pending_deletions, ub.KoboDeletedBook.id,
+    )
+    deletion_candidate_count = len(deletion_snapshot_ids)
     deleted_fingerprint_updates = {}
     deleted_change_basis_updates = {}
     deletion_candidates_scanned = 0
@@ -2243,7 +2270,11 @@ def HandleSyncRequest():
     deletion_selection_exhausted = deletion_candidate_count == 0
 
     for deletion_page in _bounded_query_pages(
-            pending_deletions, deletion_candidate_count, SYNC_ITEM_LIMIT):
+            pending_deletions,
+            deletion_snapshot_ids,
+            ub.KoboDeletedBook.id,
+            lambda tombstone: tombstone.id,
+            SYNC_ITEM_LIMIT):
         deletion_page_uuids = [
             str(tombstone.book_uuid) for tombstone in deletion_page
         ]

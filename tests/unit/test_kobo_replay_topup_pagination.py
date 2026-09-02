@@ -22,41 +22,72 @@ def _wire_entitlements(response):
     ]
 
 
-def _populate_library(sync_harness, count):
-    """Create a stable id-ordered candidate set of exactly ``count`` books."""
+def _add_library_book(sync_harness, sequence, modified):
     from cps import db
 
+    label = sequence + 1
+    book = db.Books(
+        f"Pagination Book {label}",
+        f"Pagination Book {label}",
+        "Author",
+        modified,
+        db.Books.DEFAULT_PUBDATE,
+        "1.0",
+        modified,
+        f"pagination-book-{label}",
+        0,
+        [],
+        [],
+    )
+    sync_harness.session.add(book)
+    sync_harness.session.flush()
+    book.uuid = f"00000000-0000-0000-0002-{book.id:012d}"
+    sync_harness.session.add(db.Data(
+        book.id,
+        "EPUB",
+        3_000_000 + sequence,
+        f"pagination-book-{label}",
+    ))
+    return book
+
+
+def _populate_library(sync_harness, count, *, tied=False):
+    """Create a stable id-ordered candidate set of exactly ``count`` books."""
     base = datetime(2026, 1, 1)
     sync_harness.book.timestamp = base
     sync_harness.book.last_modified = base
     books = [sync_harness.book]
-    for offset in range(1, count):
-        modified = base + timedelta(seconds=offset)
-        book = db.Books(
-            f"Top-up Book {offset + 1}",
-            f"Top-up Book {offset + 1}",
-            "Author",
-            modified,
-            db.Books.DEFAULT_PUBDATE,
-            "1.0",
-            modified,
-            f"top-up-book-{offset + 1}",
-            0,
-            [],
-            [],
+    books.extend(
+        _add_library_book(
+            sync_harness,
+            sequence,
+            base if tied else base + timedelta(seconds=sequence),
         )
-        sync_harness.session.add(book)
-        sync_harness.session.flush()
-        book.uuid = f"00000000-0000-0000-0002-{book.id:012d}"
-        sync_harness.session.add(db.Data(
-            book.id,
-            "EPUB",
-            3_000_000 + offset,
-            f"top-up-book-{offset + 1}",
-        ))
-        books.append(book)
+        for sequence in range(1, count)
+    )
     sync_harness.session.commit()
     return books
+
+
+def _mutate_after_first_candidate_page(monkeypatch, mutate):
+    """Run ``mutate`` after the real handler finishes its first query page."""
+    from cps import kobo
+
+    original_pages = kobo._bounded_query_pages
+    mutation_state = {"calls": 0, "page_sizes": []}
+
+    def pages_with_interleaved_mutation(*args, **kwargs):
+        for page in original_pages(*args, **kwargs):
+            mutation_state["page_sizes"].append(len(page))
+            yield page
+            if mutation_state["calls"] == 0:
+                mutate()
+                mutation_state["calls"] += 1
+
+    monkeypatch.setattr(
+        kobo, "_bounded_query_pages", pages_with_interleaved_mutation,
+    )
+    return mutation_state
 
 
 def _acknowledge_all_live_books(sync_harness, books):
@@ -196,3 +227,89 @@ def test_fully_suppressed_250_book_scan_is_bounded_and_terminal(
     assert response.get_json() == []
     assert response.headers.get("x-kobo-sync") is None
     assert len(rendered) == len(set(rendered)) == 250
+
+
+def test_candidate_growth_after_first_chunk_cannot_enter_captured_frontier(
+    sync_harness, monkeypatch,
+):
+    """Rows inserted after identity capture are deferred to another request."""
+    from cps import kobo
+
+    monkeypatch.setattr(
+        kobo.config, "config_kobo_suppress_replayed_entitlements", True,
+    )
+    books = _populate_library(sync_harness, 250)
+    _acknowledge_all_live_books(sync_harness, books)
+    captured_uuids = {str(book.uuid) for book in books}
+
+    original_fingerprint = kobo._entitlement_fingerprint
+    rendered = []
+
+    def counted_fingerprint(entitlement):
+        rendered.append(entitlement["BookEntitlement"]["Id"])
+        return original_fingerprint(entitlement)
+
+    monkeypatch.setattr(kobo, "_entitlement_fingerprint", counted_fingerprint)
+
+    def insert_later_candidates():
+        later = datetime(2027, 1, 1)
+        for sequence in range(10_000, 10_100):
+            _add_library_book(
+                sync_harness,
+                sequence,
+                later + timedelta(seconds=sequence),
+            )
+        sync_harness.session.commit()
+
+    mutation = _mutate_after_first_candidate_page(
+        monkeypatch, insert_later_candidates,
+    )
+    response = sync_harness.sync(None, acknowledge=False)
+
+    assert mutation["calls"] == 1
+    assert response.get_json() == []
+    assert response.headers.get("x-kobo-sync") is None
+    assert len(rendered) == len(set(rendered)) == 250
+    assert set(rendered) == captured_uuids
+    assert mutation["page_sizes"] == [100, 100, 50]
+
+
+def test_candidate_shrink_after_first_chunk_cannot_skip_captured_row(
+    sync_harness, monkeypatch,
+):
+    """Deleting an early candidate cannot shift row 101 past the next fetch."""
+    from cps import db, kobo, ub
+
+    monkeypatch.setattr(
+        kobo.config, "config_kobo_suppress_replayed_entitlements", True,
+    )
+    books = _populate_library(
+        sync_harness, kobo.SYNC_ITEM_LIMIT + 1, tied=True,
+    )
+    _acknowledge_all_live_books(sync_harness, books)
+    deliverable = books[-1]
+    deliverable_uuid = str(deliverable.uuid)
+    sync_harness.session.query(ub.KoboDeviceBookEntitlement).filter_by(
+        device_id=sync_harness.device.id,
+        book_id=deliverable.id,
+    ).delete(synchronize_session=False)
+    sync_harness.session.commit()
+
+    def remove_early_candidate():
+        sync_harness.session.query(db.Data).filter_by(
+            book=books[0].id,
+            format="EPUB",
+        ).delete(synchronize_session=False)
+        sync_harness.session.commit()
+
+    mutation = _mutate_after_first_candidate_page(
+        monkeypatch, remove_early_candidate,
+    )
+    response = sync_harness.sync(None, acknowledge=False)
+    entitlements = _wire_entitlements(response)
+
+    assert mutation["calls"] == 1
+    assert len(entitlements) == 1
+    assert entitlements[0][0] == "NewEntitlement"
+    assert entitlements[0][1]["Id"] == deliverable_uuid
+    assert mutation["page_sizes"] == [100, 1]
