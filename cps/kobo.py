@@ -1533,7 +1533,11 @@ def HandleSyncRequest():
     new_books_last_created = sync_token.books_last_created  # needed to distinguish between new and changed entitlement
     new_reading_state_last_modified = sync_token.reading_state_last_modified
 
-    new_archived_last_modified = datetime.min
+    # Archive/deletion progress is a persisted reader cursor, not a per-request
+    # accumulator. Preserve the incoming floor when this pass has no archive
+    # rows or tombstones; tombstone selection below still uses that incoming
+    # cursor directly so a newer archive row cannot mask an unseen deletion.
+    new_archived_last_modified = sync_token.archive_last_modified
     sync_results = []
     books_to_delete_ids = set()
     rehydrate_positions_emitted = []

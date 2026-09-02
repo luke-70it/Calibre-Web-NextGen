@@ -1,0 +1,14 @@
+{
+  "area": "kobo",
+  "body": "OBSERVED in cps/kobo.py and a real-handler regression: each request initialized its outgoing archive cursor to datetime.min, advanced it only for archive rows and tombstones inspected in that request, then unconditionally serialized it. With no ArchivedBook rows and five acknowledged deletion tombstones, one request advanced the cursor through all five deletions and the next empty pass reset it to datetime.min. Repeating the returned tokens reproduced an exact latest/epoch alternation. This is the server-side producer of the partial-token condition whose entitlement replay risk is mitigated by F-e0843b and #2131.\n\nOBSERVED fix: archive progress now starts at the incoming reader cursor, so an empty pass cannot move it backward. Tombstone selection deliberately remains bounded by the unmodified incoming cursor. A regression with a newer archive row and an unseen deletion between the incoming and outgoing cursors proves that the deletion is still delivered once, then is absent after exact acknowledgment. #2131 same-reader fingerprint suppression remains enabled and unchanged.\n\nASSUMED: the repeated live-instance alternation reported during investigation has this exact code cause. The handler sequence reproduces its token and tombstone pattern, but this change was not exercised against a physical reader in this implementation pass.",
+  "created": "2026-09-02",
+  "id": "F-2b37e5",
+  "refs": [
+    "F-e0843b",
+    "#2131"
+  ],
+  "severity": "data-integrity",
+  "source": "audit",
+  "status": "open",
+  "title": "Kobo archive cursor regresses on empty archive passes"
+}
