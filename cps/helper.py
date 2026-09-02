@@ -1767,7 +1767,23 @@ def get_book_cover(book_id, resolution=None):
     # OWN hidden books — they're shown in the /hidden/stored listing and
     # on the hidden book's detail page (#319 pushback @droM4X). Hidden
     # is a per-user listing exclusion, not an access revocation.
-    book = calibre_db.get_filtered_book(book_id, allow_show_archived=True, allow_show_hidden=True)
+    #
+    # A Global Library card is also allowed to render the book's GLOBAL cover
+    # before the viewer adds that book to My Library.  The list serializer has
+    # always emitted the global ``has_cover`` URL, but this resource lookup used
+    # the membership-scoped default filter and quietly served generic_cover.svg
+    # for non-members.  Keep the bypass tied to the same browse-global role as
+    # the list/detail APIs; knowing a cover URL does not grant archive access.
+    try:
+        allow_show_global = bool(current_user.role_browse_global())
+    except (AttributeError, RuntimeError):
+        allow_show_global = False
+    book = calibre_db.get_filtered_book(
+        book_id,
+        allow_show_archived=True,
+        allow_show_hidden=True,
+        allow_show_global=allow_show_global,
+    )
     return get_book_cover_internal(book, resolution=resolution)
 
 

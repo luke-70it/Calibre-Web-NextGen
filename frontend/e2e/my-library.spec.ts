@@ -15,6 +15,7 @@ interface GlobalBook {
   id: number;
   title: string;
   in_my_library: boolean;
+  cover_url?: string | null;
 }
 
 interface LibraryBook {
@@ -203,6 +204,38 @@ async function expectNoSeriousAxeViolations(page: Page) {
 }
 
 test.describe('My Library', () => {
+  test('a non-member Global Library card loads the global cover', async ({ page }) => {
+    const me = (await page.request.get('/api/v1/auth/me').then((r) => r.json())) as MePayload;
+    const originalMode = me.library_mode;
+    const originalBrowseGlobal = !!me.role.browse_global;
+    let coveredBook: GlobalBook | undefined;
+
+    try {
+      await setManagedMode(page, me.id, 'personal_library');
+      const books = await firstGlobalBooks(page);
+      coveredBook = books.find((book) => !!book.cover_url);
+      test.skip(!coveredBook, 'seed library needs at least one book with a cover');
+      await removeMembership(page, coveredBook!.id);
+
+      const listing = await page.request.get('/api/v1/library/global?sort=new&per_page=200');
+      expect(listing.ok(), await listing.text()).toBeTruthy();
+      const listed = ((await listing.json()) as { items: GlobalBook[] }).items
+        .find((book) => book.id === coveredBook!.id);
+      expect(listed?.in_my_library).toBe(false);
+      expect(listed?.cover_url).toBeTruthy();
+
+      const cover = await page.request.get(listed!.cover_url!);
+      expect(cover.ok(), await cover.text()).toBeTruthy();
+      expect(cover.headers()['content-type']).toMatch(/^image\/(jpeg|webp)/);
+
+      await page.goto('/app/global');
+      await expect(page.getByRole('img', { name: coveredBook!.title })).toBeVisible();
+    } finally {
+      if (coveredBook) await addMembership(page, coveredBook.id).catch(() => undefined);
+      await setManagedMode(page, me.id, originalMode, originalBrowseGlobal);
+    }
+  });
+
   test('two real accounts see independent selections and can discover missing books', async ({
     page: adminPage,
     secondaryUser,
