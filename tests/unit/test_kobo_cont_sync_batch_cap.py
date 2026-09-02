@@ -83,13 +83,15 @@ def test_handle_sync_has_one_false_local_continuation_writer():
 def test_books_stay_page_capped_but_never_request_local_continuation():
     """#248's batch cap remains while #1634 removes its unsafe signal."""
     source = _handle_sync_request_source()
-    page = "books_list = changed_entries.limit(SYNC_ITEM_LIMIT).all()"
     count = "book_count = changed_entries.count()"
+    page = (
+        "_bounded_query_pages(\n"
+        "            changed_entries, book_count, SYNC_ITEM_LIMIT)"
+    )
     terminal = "cont_sync = False"
     assert page in source
     assert count in source
-    assert terminal in source
-    assert source.index(page) < source.index(count) < source.index(terminal)
+    assert source.index(count) < source.index(page) < source.index(terminal)
     assert "cont_sync = bool(book_count" not in source
 
 
@@ -109,9 +111,14 @@ def test_deletions_stay_page_capped_without_continuation_writer():
     """Deletion tombstones page via the persisted archive cursor, not a pin."""
     source = _handle_sync_request_source()
     pending_start = source.index("pending_deletions = (")
-    pending_end = source.index("for tombstone in pending_deletions:")
+    pending_end = source.index("for deletion_page in _bounded_query_pages(")
     pending_query = source[pending_start:pending_end]
-    assert ".limit(SYNC_ITEM_LIMIT)" in pending_query
+    assert "deletion_candidate_count = pending_deletions.count()" in pending_query
+    assert (
+        "pending_deletions, deletion_candidate_count, SYNC_ITEM_LIMIT"
+        in source
+    )
+    assert "for tombstone in deletion_page:" in source
     assert "cont_sync = True" not in source
     assert "cont_sync |= " not in source
     assert "response = generate_sync_response(sync_token, sync_results)" in source

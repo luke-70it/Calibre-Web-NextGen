@@ -95,6 +95,27 @@ def _entitlement_fingerprint(entitlement):
     return hashlib.sha256(payload).hexdigest()
 
 
+def _bounded_query_pages(query, snapshot_count, page_size):
+    """Yield fixed-size query pages bounded by one captured row count.
+
+    Replay suppression happens after payload rendering, so the SQL query cannot
+    know which candidates are exact. Paging through at most ``snapshot_count``
+    rows lets callers top up past suppressed prefixes without an unbounded
+    ``while`` loop or Nickel's cursor-pinning ``x-kobo-sync: continue`` header.
+    Concurrent removals may exhaust the query early; concurrent additions wait
+    for the next request rather than extending this request's scan frontier.
+    """
+    if page_size <= 0:
+        return
+    for offset in range(0, max(0, int(snapshot_count)), page_size):
+        page = query.offset(offset).limit(page_size).all()
+        if not page:
+            break
+        yield page
+        if len(page) < page_size:
+            break
+
+
 def _ledger_timestamp_component(value):
     """Return one fixed-width UTC component for byte-comparable provenance."""
     if value is None:
@@ -1729,14 +1750,15 @@ def HandleSyncRequest():
                            # uniquifies entity rows -- so this is a throughput
                            # and diagnostics defect, not data corruption.
                            .distinct())
-    log.debug("Kobo Sync: changed entries: {}".format(changed_entries.count()))
+    # Capture a finite scan frontier once. Exact replay suppression requires
+    # rendered payloads, so it cannot be pushed safely into this SQL query.
+    # _bounded_query_pages will inspect no more than this many candidates while
+    # topping the response up to SYNC_ITEM_LIMIT candidates that produce wire
+    # work. Concurrent additions wait for the next request.
+    book_count = changed_entries.count()
+    log.debug("Kobo Sync: changed entries: {}".format(book_count))
 
     reading_state_book_ids_emitted = []
-    # Materialize the limited result set ONCE — the prior shape called .all()
-    # twice (once for the debug log, once for the for-loop) which round-tripped
-    # the joined-load query twice per sync request.
-    books_list = changed_entries.limit(SYNC_ITEM_LIMIT).all()
-    log.debug("Kobo Sync: selected to sync: {}".format(len(books_list)))
 
     # Establish one ordered reading-state frontier before rendering any
     # entitlements. Reading states can travel either embedded in an entitlement
@@ -1784,17 +1806,6 @@ def HandleSyncRequest():
         reading_state.id for reading_state in reading_state_page
     }
 
-    known_entitlement_fingerprints = (
-        kobo_sync_status.get_device_entitlement_fingerprints(
-            requesting_device_id,
-            [book.Books.id for book in books_list],
-        )
-        if requesting_device_id else {}
-    )
-    # Same-device acknowledged fingerprints are delivery state, not optional
-    # diagnostics. They suppress an exact replay even when Nickel presents an
-    # absent, partial, malformed, or foreign token after USB mass storage.
-    prior_entitlement_fingerprints = known_entitlement_fingerprints
     entitlement_fingerprint_updates = {}
     entitlement_change_basis_updates = {}
     suppressed_unchanged_book_ids = set()
@@ -1803,147 +1814,177 @@ def HandleSyncRequest():
     reseeded_shape_change_deleted_uuids = set()
     delivered_book_identities = []
     rehydrate_book_ids = set()
-    for book in books_list:
-        kobo_reading_state = book.KoboReadingState  # None when no record exists yet
-        entitlement = {
-            "BookEntitlement": create_book_entitlement(
-                book.Books, archived=bool(book.is_archived),
-            ),
-            "BookMetadata": get_metadata(book.Books),
-        }
+    book_candidates_scanned = 0
+    book_delivery_slots = 0
+    book_selection_exhausted = book_count == 0
+    last_scanned_book = None
+    scanned_magic_book_ids = []
 
-        # A device may return a stale, partial, foreign, or absent token after
-        # an interrupted sync or USB eject. Its cursors can then select books
-        # already emitted to this same physical device. Layer 2 suppresses only
-        # an exact payload replay from that device's acknowledged ledger;
-        # another device has its own ledger, and any real metadata,
-        # last_modified, or archive change alters this hash.
-        entitlement_fingerprint = (
-            _entitlement_fingerprint(entitlement)
-            if requesting_device_id else None
-        )
-        entitlement_change_basis = _book_entitlement_change_basis(
-            book.Books.last_modified,
-            book.last_modified,
-        )
-        if replay_suppression_eligible:
-            (
-                entitlement_is_unchanged,
-                shape_reseed,
-                refresh_fingerprint_record,
-            ) = _entitlement_replay_decision(
-                prior_entitlement_fingerprints.get(book.Books.id),
-                entitlement_fingerprint,
-                entitlement_change_basis,
+    for candidate_page in _bounded_query_pages(
+            changed_entries, book_count, SYNC_ITEM_LIMIT):
+        known_entitlement_fingerprints = (
+            kobo_sync_status.get_device_entitlement_fingerprints(
+                requesting_device_id,
+                [book.Books.id for book in candidate_page],
             )
-        else:
-            entitlement_is_unchanged = False
-            shape_reseed = False
-            refresh_fingerprint_record = False
+            if requesting_device_id else {}
+        )
+        # Same-device acknowledged fingerprints are delivery state, not
+        # optional diagnostics. They suppress exact absent/partial-token
+        # replays and classify a genuine mismatch as Changed.
+        prior_entitlement_fingerprints = known_entitlement_fingerprints
+        for book in candidate_page:
+            candidate_emitted_work = False
+            kobo_reading_state = book.KoboReadingState  # None when no record exists yet
+            entitlement = {
+                "BookEntitlement": create_book_entitlement(
+                    book.Books, archived=bool(book.is_archived),
+                ),
+                "BookMetadata": get_metadata(book.Books),
+            }
 
-        if (kobo_reading_state is not None
-                and kobo_reading_state.id in reading_state_page_ids):
-            reading_state = get_kobo_reading_state_response(
-                book.Books, kobo_reading_state)
-            new_reading_state_last_modified = max(
-                new_reading_state_last_modified,
-                kobo_reading_state.last_modified,
+            # A device may return a stale, partial, foreign, or absent token
+            # after an interrupted sync or USB eject. Its cursors can then
+            # select books already emitted to this same physical device. Layer
+            # 2 suppresses only an exact payload replay from that device's
+            # acknowledged ledger; another device has its own ledger, and any
+            # real metadata, last_modified, or archive change alters this hash.
+            entitlement_fingerprint = (
+                _entitlement_fingerprint(entitlement)
+                if requesting_device_id else None
             )
-            reading_state_book_ids_emitted.append(book.Books.id)
-            if entitlement_is_unchanged:
-                # Replay suppression applies only to the byte-identical base
-                # entitlement. A state admitted to this response's ordered
-                # frontier must still be emitted independently even when its
-                # unchanged entitlement envelope is suppressed.
-                sync_results.append({
-                    "ChangedReadingState": {"ReadingState": reading_state}
-                })
-            else:
-                entitlement["ReadingState"] = reading_state
-
-        ts_created = get_kobo_created_ts(book)
-
-        if entitlement_is_unchanged:
-            suppressed_unchanged_book_ids.add(book.Books.id)
-            if shape_reseed:
-                reseeded_shape_change_book_ids.add(book.Books.id)
-            if refresh_fingerprint_record:
-                entitlement_fingerprint_updates[book.Books.id] = \
-                    entitlement_fingerprint
-                entitlement_change_basis_updates[book.Books.id] = \
-                    entitlement_change_basis
-        else:
-            known_record = known_entitlement_fingerprints.get(book.Books.id)
-            if known_record is not None:
-                fingerprint_mismatch_reemitted += _observe_entitlement_reemit(
-                    reemit_reasons,
-                    known_record,
+            entitlement_change_basis = _book_entitlement_change_basis(
+                book.Books.last_modified,
+                book.last_modified,
+            )
+            if replay_suppression_eligible:
+                (
+                    entitlement_is_unchanged,
+                    shape_reseed,
+                    refresh_fingerprint_record,
+                ) = _entitlement_replay_decision(
+                    prior_entitlement_fingerprints.get(book.Books.id),
                     entitlement_fingerprint,
                     entitlement_change_basis,
-                    eligible=replay_suppression_eligible,
-                    is_cwng_token=sync_token.is_cwng_token,
-                    prefix="live_",
                 )
-            if book.Books.id not in prior_entitlement_fingerprints:
-                sync_results.append({"NewEntitlement": entitlement})
             else:
-                sync_results.append({"ChangedEntitlement": entitlement})
-            # Only a real delivery arms repair. A byte-identical replay that
-            # #1925 suppresses (including a declared #1953 shape reseed) must
-            # not mass-arm the user's position journal.
-            if requesting_device_id:
-                rehydrate_book_ids.add(book.Books.id)
-                # #1735: this ledger write is deliberately NOT gated on
-                # config_kobo_suppress_replayed_entitlements. The per-device
-                # ledger is now the New-vs-Changed classification source of
-                # truth, not merely a replay-suppression cache, and
-                # stage_device_entitlement_fingerprints below is its only
-                # writer on the delivery path. Under the old gate a deployment
-                # with suppression disabled writes no rows at all, so
-                # device_entitlement_recovery_filter matches every book
-                # forever and the device re-downloads the whole library on
-                # every sync. The tombstone loop's identical gate is correct
-                # and stays: KoboDeviceDeletedEntitlement feeds replay
-                # suppression only, and no classification arm reads it.
-                entitlement_fingerprint_updates[book.Books.id] = entitlement_fingerprint
-                entitlement_change_basis_updates[book.Books.id] = \
-                    entitlement_change_basis
+                entitlement_is_unchanged = False
+                shape_reseed = False
+                refresh_fingerprint_record = False
 
-        new_books_last_modified = max(
-            books_cursor_datetime(book.Books.last_modified), new_books_last_modified
-        )
+            if (kobo_reading_state is not None
+                    and kobo_reading_state.id in reading_state_page_ids):
+                reading_state = get_kobo_reading_state_response(
+                    book.Books, kobo_reading_state)
+                new_reading_state_last_modified = max(
+                    new_reading_state_last_modified,
+                    kobo_reading_state.last_modified,
+                )
+                reading_state_book_ids_emitted.append(book.Books.id)
+                if entitlement_is_unchanged:
+                    # Replay suppression applies only to the byte-identical
+                    # base entitlement. A state admitted to this response's
+                    # ordered frontier must still be emitted independently.
+                    sync_results.append({
+                        "ChangedReadingState": {"ReadingState": reading_state}
+                    })
+                    candidate_emitted_work = True
+                else:
+                    entitlement["ReadingState"] = reading_state
 
-        # Also advance the cursor by BookShelf.date_added when the row
-        # carries one (only_kobo_shelves branch selects it on line ~242).
-        # The filter at line ~258-261 matches a book when EITHER
-        # Books.last_modified OR BookShelf.date_added is past the
-        # cursor. Without this max() the cursor only tracks
-        # last_modified, so a book added to a kobo_sync shelf after its
-        # own last_modified re-matches every sync and traps the device
-        # in an infinite cont_sync loop (fork #220 — wire-confirmed
-        # 112 syncs in 60s during the 2026-05-17 MITM capture). Guard
-        # with getattr because the else branch's SELECT does not
-        # include date_added.
-        date_added = getattr(book, "date_added", None)
-        if date_added is not None:
-            if hasattr(date_added, "replace") and getattr(date_added, "tzinfo", None) is not None:
-                date_added = date_added.replace(tzinfo=None)
-            new_books_last_modified = max(date_added, new_books_last_modified)
+            ts_created = get_kobo_created_ts(book)
 
-        # Personal-library membership is a second delivery clock in sync-all
-        # mode. Fold it into the same device cursor that admitted the row so
-        # an old book selected from the global archive arrives once, then the
-        # added_at arm closes on the following request.
-        library_added_at = getattr(book, "library_added_at", None)
-        if library_added_at is not None:
-            if (hasattr(library_added_at, "replace")
-                    and getattr(library_added_at, "tzinfo", None) is not None):
-                library_added_at = library_added_at.replace(tzinfo=None)
+            if entitlement_is_unchanged:
+                suppressed_unchanged_book_ids.add(book.Books.id)
+                if shape_reseed:
+                    reseeded_shape_change_book_ids.add(book.Books.id)
+                if refresh_fingerprint_record:
+                    entitlement_fingerprint_updates[book.Books.id] = \
+                        entitlement_fingerprint
+                    entitlement_change_basis_updates[book.Books.id] = \
+                        entitlement_change_basis
+            else:
+                known_record = known_entitlement_fingerprints.get(
+                    book.Books.id,
+                )
+                if known_record is not None:
+                    fingerprint_mismatch_reemitted += \
+                        _observe_entitlement_reemit(
+                            reemit_reasons,
+                            known_record,
+                            entitlement_fingerprint,
+                            entitlement_change_basis,
+                            eligible=replay_suppression_eligible,
+                            is_cwng_token=sync_token.is_cwng_token,
+                            prefix="live_",
+                        )
+                if book.Books.id not in prior_entitlement_fingerprints:
+                    sync_results.append({"NewEntitlement": entitlement})
+                else:
+                    sync_results.append({"ChangedEntitlement": entitlement})
+                candidate_emitted_work = True
+                # Only a real delivery arms repair. A byte-identical replay
+                # that #1925 suppresses (including a declared #1953 shape
+                # reseed) must not mass-arm the user's position journal.
+                if requesting_device_id:
+                    rehydrate_book_ids.add(book.Books.id)
+                    # The per-device ledger is the New-vs-Changed
+                    # classification source even when suppression is disabled.
+                    entitlement_fingerprint_updates[book.Books.id] = \
+                        entitlement_fingerprint
+                    entitlement_change_basis_updates[book.Books.id] = \
+                        entitlement_change_basis
+
             new_books_last_modified = max(
-                library_added_at, new_books_last_modified)
+                books_cursor_datetime(book.Books.last_modified),
+                new_books_last_modified,
+            )
 
-        new_books_last_created = max(ts_created, new_books_last_created)
-        delivered_book_identities.append((book.Books.id, str(book.Books.uuid)))
+            # Shelf membership and personal-library membership are additional
+            # delivery clocks and must advance with every inspected candidate,
+            # including an exact replay skipped while topping up this page.
+            date_added = getattr(book, "date_added", None)
+            if date_added is not None:
+                if (hasattr(date_added, "replace")
+                        and getattr(date_added, "tzinfo", None) is not None):
+                    date_added = date_added.replace(tzinfo=None)
+                new_books_last_modified = max(
+                    date_added, new_books_last_modified)
+
+            library_added_at = getattr(book, "library_added_at", None)
+            if library_added_at is not None:
+                if (hasattr(library_added_at, "replace")
+                        and getattr(library_added_at, "tzinfo", None) is not None):
+                    library_added_at = library_added_at.replace(tzinfo=None)
+                new_books_last_modified = max(
+                    library_added_at, new_books_last_modified)
+
+            new_books_last_created = max(ts_created, new_books_last_created)
+            delivered_book_identities.append(
+                (book.Books.id, str(book.Books.uuid)))
+            if (magic_shelf_book_ids
+                    and book.Books.id in magic_shelf_book_ids):
+                scanned_magic_book_ids.append(book.Books.id)
+            last_scanned_book = book
+            book_candidates_scanned += 1
+
+            if candidate_emitted_work:
+                book_delivery_slots += 1
+                if book_delivery_slots >= SYNC_ITEM_LIMIT:
+                    break
+        if book_delivery_slots >= SYNC_ITEM_LIMIT:
+            break
+    else:
+        book_selection_exhausted = True
+
+    log.debug(
+        "Kobo Sync: candidate scan total=%d scanned=%d deliverable=%d "
+        "exhausted=%s",
+        book_count,
+        book_candidates_scanned,
+        book_delivery_slots,
+        book_selection_exhausted,
+    )
 
     # Delivery state is deliberately not promoted here.  The exact page and
     # these bounded confirmation inputs are persisted below; the next request
@@ -1963,13 +2004,9 @@ def HandleSyncRequest():
     # advanced to match, and subsequent syncs never re-trigger the rebuild
     # detection — leaving low-id magic books undelivered (Greptile P on
     # PR #368).
-    magic_book_ids_emitted = [
-        b.Books.id for b in books_list
-        if magic_shelf_book_ids and b.Books.id in magic_shelf_book_ids
-    ]
-    if magic_book_ids_emitted:
+    if scanned_magic_book_ids:
         new_magic_shelf_last_id = max(magic_shelf_last_id,
-                                       max(magic_book_ids_emitted))
+                                       max(scanned_magic_book_ids))
     else:
         new_magic_shelf_last_id = magic_shelf_last_id
 
@@ -1984,8 +2021,8 @@ def HandleSyncRequest():
     #     reset id to -1 — there are no books at the new ts in this batch, so any
     #     valid id passes the next sync's keyset arm.
     #   - If the batch was empty, keep the existing cursor id (no emission).
-    if books_list:
-        last_book = books_list[-1]
+    if last_scanned_book is not None:
+        last_book = last_scanned_book
         last_book_lm = books_cursor_datetime(last_book.Books.last_modified)
         last_library_added_at = getattr(last_book, "library_added_at", None)
         if last_library_added_at is not None:
@@ -2006,19 +2043,12 @@ def HandleSyncRequest():
     # cache.created_at advances cursor past the batch's max book ts, reset id to -1
     # (no books at the new ts in this batch).
     #
-    # CRITICAL: only fire the fold when the batch is PARTIAL (len(books_list) <
-    # SYNC_ITEM_LIMIT). Greptile-surfaced bug: when the batch is full, there may
-    # be pending regular books whose Books.last_modified falls between the batch's
-    # max_lm and magic_shelf_membership_added_at. Advancing the cursor to T_magic
-    # silently drops them on every subsequent sync (their lm < cursor.lm, the
-    # composite keyset fails, the magic-shelf arm gate goes False because cache
-    # no longer > cursor). Deferring the fold until the batch is partial means
-    # the next round walks the remaining ties via the composite keyset; the
-    # magic-shelf arm continues to fire so already-emitted magic books re-emit
-    # (idempotent on device — bandwidth waste only, no data loss). Once all
-    # pending books are drained (batch < limit), the fold fires, cursor jumps
-    # past T_magic, arm goes False, termination achieved.
-    batch_drained = len(books_list) < SYNC_ITEM_LIMIT
+    # CRITICAL: only fire the fold when the bounded candidate snapshot was
+    # exhausted. A response may inspect more than SYNC_ITEM_LIMIT candidates
+    # while topping up past exact replays, so raw scan length no longer says
+    # whether regular books remain. Deferring until exhaustion preserves the
+    # same no-skip guarantee as the old partial-batch test.
+    batch_drained = book_selection_exhausted
     if magic_shelf_arm_active and batch_drained:
         if magic_shelf_membership_added_at > new_books_last_modified:
             new_books_last_modified = magic_shelf_membership_added_at
@@ -2027,7 +2057,8 @@ def HandleSyncRequest():
             # rebuild (which advances cache.created_at > cursor.lm again)
             # starts walking the magic books from id=0.
             new_magic_shelf_last_id = -1
-        elif magic_shelf_membership_added_at == new_books_last_modified and not books_list:
+        elif (magic_shelf_membership_added_at == new_books_last_modified
+              and last_scanned_book is None):
             # Cache rebuilt but no books actually changed past the old cursor — still
             # advance to prevent the arm from firing again (idempotent re-trigger).
             new_books_last_id = -1
@@ -2041,8 +2072,6 @@ def HandleSyncRequest():
 
     new_archived_last_modified = max(new_archived_last_modified, max_change)
 
-    # no. of books returned
-    book_count = changed_entries.count()
     # PR #248 established that Kobo firmware pins the request cursor whenever
     # `x-kobo-sync: continue` is present.  Comparing against the page cap fixed
     # partial pages, but a full page still formed a closed loop: firmware kept
@@ -2050,7 +2079,9 @@ def HandleSyncRequest():
     # local session so the advanced composite cursor is persisted; the device
     # starts the next session with that returned token and drains the next page.
     cont_sync = False
-    log.debug("Kobo Sync: remaining books to sync: {}".format(book_count))
+    log.debug(
+        "Kobo Sync: candidate rows after incoming cursor: %d", book_count,
+    )
     # Do not set local continuation for a full reading-state page.  It has the
     # same firmware cursor-pinning semantics as the books signal above; ending
     # the session is what lets the returned reading-state cursor take effect.
@@ -2199,83 +2230,117 @@ def HandleSyncRequest():
         ub.session.query(ub.KoboDeletedBook)
         .filter(ub.KoboDeletedBook.user_id == current_user.id)
         .filter(ub.KoboDeletedBook.deleted_at > cursor_archive_lm)
-        .order_by(ub.KoboDeletedBook.deleted_at)
-        .limit(SYNC_ITEM_LIMIT)
-        .all()
-    )
-    if replay_suppression_eligible:
-        known_deleted_fingerprints = \
-            kobo_sync_status.get_device_deleted_entitlement_fingerprints(
-            requesting_device_id,
-            [str(tombstone.book_uuid) for tombstone in pending_deletions],
+        .order_by(
+            ub.KoboDeletedBook.deleted_at,
+            ub.KoboDeletedBook.book_uuid,
         )
-    else:
-        known_deleted_fingerprints = _diagnostic_ledger_lookup(
-            kobo_sync_status.get_device_deleted_entitlement_fingerprints,
-            requesting_device_id,
-            [str(tombstone.book_uuid) for tombstone in pending_deletions],
-            scope="removed_non_suppressing",
-        )
-    prior_deleted_fingerprints = (
-        known_deleted_fingerprints if sync_token.is_cwng_token else {}
     )
+    deletion_candidate_count = pending_deletions.count()
     deleted_fingerprint_updates = {}
     deleted_change_basis_updates = {}
-    for tombstone in pending_deletions:
-        book_uuid = str(tombstone.book_uuid)
-        entitlement = {
-            "BookEntitlement": create_deleted_book_entitlement(
-                book_uuid, tombstone.deleted_at),
-            "BookMetadata": create_deleted_book_metadata(book_uuid),
-        }
-        fingerprint = (
-            _entitlement_fingerprint(entitlement)
-            if requesting_device_id else None
-        )
-        deleted_change_basis = _deleted_entitlement_change_basis(
-            tombstone.deleted_at,
-        )
+    deletion_candidates_scanned = 0
+    deletion_delivery_slots = 0
+    deletion_selection_exhausted = deletion_candidate_count == 0
+
+    for deletion_page in _bounded_query_pages(
+            pending_deletions, deletion_candidate_count, SYNC_ITEM_LIMIT):
+        deletion_page_uuids = [
+            str(tombstone.book_uuid) for tombstone in deletion_page
+        ]
         if replay_suppression_eligible:
-            (
-                entitlement_is_unchanged,
-                shape_reseed,
-                refresh_fingerprint_record,
-            ) = _entitlement_replay_decision(
-                prior_deleted_fingerprints.get(book_uuid),
-                fingerprint,
-                deleted_change_basis,
+            # This ledger read decides wire behavior and therefore must not use
+            # the diagnostic fail-open path. Exact acknowledged tombstones are
+            # suppressed for every token shape, including absent/partial.
+            known_deleted_fingerprints = \
+                kobo_sync_status.get_device_deleted_entitlement_fingerprints(
+                requesting_device_id,
+                deletion_page_uuids,
             )
         else:
-            entitlement_is_unchanged = False
-            shape_reseed = False
-            refresh_fingerprint_record = False
-        if entitlement_is_unchanged:
-            suppressed_deleted_entitlement_uuids.add(book_uuid)
-            if shape_reseed:
-                reseeded_shape_change_deleted_uuids.add(book_uuid)
-            if refresh_fingerprint_record:
-                deleted_fingerprint_updates[book_uuid] = fingerprint
-                deleted_change_basis_updates[book_uuid] = deleted_change_basis
-        else:
-            known_record = known_deleted_fingerprints.get(book_uuid)
-            if known_record is not None:
-                fingerprint_mismatch_reemitted += _observe_entitlement_reemit(
-                    reemit_reasons,
-                    known_record,
+            known_deleted_fingerprints = _diagnostic_ledger_lookup(
+                kobo_sync_status.get_device_deleted_entitlement_fingerprints,
+                requesting_device_id,
+                deletion_page_uuids,
+                scope="removed_non_suppressing",
+            )
+        prior_deleted_fingerprints = known_deleted_fingerprints
+        for tombstone in deletion_page:
+            book_uuid = str(tombstone.book_uuid)
+            entitlement = {
+                "BookEntitlement": create_deleted_book_entitlement(
+                    book_uuid, tombstone.deleted_at),
+                "BookMetadata": create_deleted_book_metadata(book_uuid),
+            }
+            fingerprint = (
+                _entitlement_fingerprint(entitlement)
+                if requesting_device_id else None
+            )
+            deleted_change_basis = _deleted_entitlement_change_basis(
+                tombstone.deleted_at,
+            )
+            if replay_suppression_eligible:
+                (
+                    entitlement_is_unchanged,
+                    shape_reseed,
+                    refresh_fingerprint_record,
+                ) = _entitlement_replay_decision(
+                    prior_deleted_fingerprints.get(book_uuid),
                     fingerprint,
                     deleted_change_basis,
-                    eligible=replay_suppression_eligible,
-                    is_cwng_token=sync_token.is_cwng_token,
-                    prefix="removed_",
                 )
-            sync_results.append({"ChangedEntitlement": entitlement})
-            if replay_suppression_enabled and requesting_device_id:
-                deleted_fingerprint_updates[book_uuid] = fingerprint
-                deleted_change_basis_updates[book_uuid] = deleted_change_basis
-        ta = tombstone.deleted_at
-        if hasattr(ta, "replace") and getattr(ta, "tzinfo", None) is not None:
-            ta = ta.replace(tzinfo=None)
-        new_archived_last_modified = max(ta, new_archived_last_modified)
+            else:
+                entitlement_is_unchanged = False
+                shape_reseed = False
+                refresh_fingerprint_record = False
+            if entitlement_is_unchanged:
+                suppressed_deleted_entitlement_uuids.add(book_uuid)
+                if shape_reseed:
+                    reseeded_shape_change_deleted_uuids.add(book_uuid)
+                if refresh_fingerprint_record:
+                    deleted_fingerprint_updates[book_uuid] = fingerprint
+                    deleted_change_basis_updates[book_uuid] = \
+                        deleted_change_basis
+            else:
+                known_record = known_deleted_fingerprints.get(book_uuid)
+                if known_record is not None:
+                    fingerprint_mismatch_reemitted += \
+                        _observe_entitlement_reemit(
+                            reemit_reasons,
+                            known_record,
+                            fingerprint,
+                            deleted_change_basis,
+                            eligible=replay_suppression_eligible,
+                            is_cwng_token=sync_token.is_cwng_token,
+                            prefix="removed_",
+                        )
+                sync_results.append({"ChangedEntitlement": entitlement})
+                deletion_delivery_slots += 1
+                if replay_suppression_enabled and requesting_device_id:
+                    deleted_fingerprint_updates[book_uuid] = fingerprint
+                    deleted_change_basis_updates[book_uuid] = \
+                        deleted_change_basis
+            ta = tombstone.deleted_at
+            if (hasattr(ta, "replace")
+                    and getattr(ta, "tzinfo", None) is not None):
+                ta = ta.replace(tzinfo=None)
+            new_archived_last_modified = max(
+                ta, new_archived_last_modified)
+            deletion_candidates_scanned += 1
+            if deletion_delivery_slots >= SYNC_ITEM_LIMIT:
+                break
+        if deletion_delivery_slots >= SYNC_ITEM_LIMIT:
+            break
+    else:
+        deletion_selection_exhausted = True
+
+    log.debug(
+        "Kobo Sync: deletion scan total=%d scanned=%d deliverable=%d "
+        "exhausted=%s",
+        deletion_candidate_count,
+        deletion_candidates_scanned,
+        deletion_delivery_slots,
+        deletion_selection_exhausted,
+    )
     # Two-way removals and repair-latch consumption are also delivery
     # acknowledgments.  They remain unchanged until the returned token comes
     # back, so a lost response can replay the same commands and repair states.

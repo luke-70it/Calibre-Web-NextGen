@@ -401,7 +401,10 @@ def test_partial_token_honours_book_cursor_but_suppresses_same_device_replays(
     held_book_ids = {book.id for book in books[:5]}
     assert len(held_book_ids) == 5
     assert any(
-        record.getMessage() == "Kobo Sync: selected to sync: 23"
+        record.getMessage() == (
+            "Kobo Sync: candidate scan total=23 scanned=23 "
+            "deliverable=0 exhausted=True"
+        )
         for record in caplog.records
     )
     assert _wire_counts(page) == {
