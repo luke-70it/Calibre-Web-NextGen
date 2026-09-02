@@ -622,24 +622,36 @@ def test_pending_observability_serialization_failure_preserves_response_bytes(
     )
 
 
-def test_diagnostic_reset_ledger_failure_preserves_response_bytes(
+def test_diagnostic_tombstone_ledger_failure_preserves_response_bytes(
     sync_harness, monkeypatch, caplog,
 ):
-    from cps import kobo, kobo_sync_status
+    from cps import kobo, kobo_sync_status, ub
 
     caplog.set_level(logging.WARNING, logger="cps.kobo")
+    monkeypatch.setattr(
+        kobo.config, "config_kobo_suppress_replayed_entitlements", True,
+    )
+    sync_harness.session.add(ub.KoboDeletedBook(
+        user_id=sync_harness.user.id,
+        book_uuid="00000000-0000-0000-0000-000000002128",
+        deleted_at=datetime(2026, 8, 31, 12, 0, 0),
+    ))
+    sync_harness.session.commit()
     sync_harness.sync()
+    monkeypatch.setattr(
+        kobo.config, "config_kobo_suppress_replayed_entitlements", False,
+    )
     monkeypatch.setattr(kobo.secrets, "token_hex", lambda _size: "c" * 32)
     baseline = sync_harness.sync("official.store-token", acknowledge=False)
     _discard_pending_page(sync_harness)
 
-    def fail_diagnostic_read(_device_id, _book_ids, *, _session=None):
+    def fail_diagnostic_read(_device_id, _book_uuids, *, _session=None):
         assert _session is not None
         raise RuntimeError("injected diagnostic ledger failure")
 
     monkeypatch.setattr(
         kobo_sync_status,
-        "get_device_entitlement_fingerprints",
+        "get_device_deleted_entitlement_fingerprints",
         fail_diagnostic_read,
     )
     observed = sync_harness.sync("official.store-token", acknowledge=False)
@@ -647,7 +659,7 @@ def test_diagnostic_reset_ledger_failure_preserves_response_bytes(
     assert _response_wire(observed) == _response_wire(baseline)
     assert any(
         "reason=diagnostic_ledger_read_failed "
-        "scope=live_non_cwng_reset" in record.getMessage()
+        "scope=removed_non_suppressing" in record.getMessage()
         for record in caplog.records
     )
 

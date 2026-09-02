@@ -342,13 +342,18 @@ def _establish_partial_cursor_shape(sync_harness, monkeypatch):
 
 
 def test_forensic_no_sync_token_suppresses_exact_same_device_rows(
-    sync_harness, monkeypatch,
+    sync_harness, monkeypatch, caplog,
 ):
     """An absent token cannot override acknowledged same-device evidence."""
     _establish_acknowledged_ledgers(sync_harness, monkeypatch)
     before = _snapshot(sync_harness)
 
+    caplog.set_level(logging.INFO, logger="cps.kobo")
     page = sync_harness.sync(None, acknowledge=False)
+    page_summaries = [
+        record.getMessage() for record in caplog.records
+        if record.getMessage().startswith("Kobo Sync summary:")
+    ]
     ack = sync_harness.sync(
         page.headers[sync_harness.token_header], acknowledge=False,
     )
@@ -367,6 +372,13 @@ def test_forensic_no_sync_token_suppresses_exact_same_device_rows(
         "ChangedEntitlement": 0,
         "IsRemoved": 0,
     }
+    assert any(
+        "suppressed_replay=19" in message
+        and "suppressed_removed=1" in message
+        and "reemit_reasons=none" in message
+        and "eligible=True" in message
+        for message in page_summaries
+    )
 
 
 def test_partial_token_honours_book_cursor_but_suppresses_same_device_replays(
@@ -389,6 +401,10 @@ def test_partial_token_honours_book_cursor_but_suppresses_same_device_replays(
 
     caplog.set_level(logging.DEBUG, logger="cps.kobo")
     page = sync_harness.sync(partial_token, acknowledge=False)
+    page_summaries = [
+        record.getMessage() for record in caplog.records
+        if record.getMessage().startswith("Kobo Sync summary:")
+    ]
     ack = sync_harness.sync(
         page.headers[sync_harness.token_header], acknowledge=False,
     )
@@ -417,6 +433,13 @@ def test_partial_token_honours_book_cursor_but_suppresses_same_device_replays(
         "ChangedEntitlement": 0,
         "IsRemoved": 0,
     }
+    assert any(
+        "suppressed_replay=26" in message
+        and "suppressed_removed=3" in message
+        and "reemit_reasons=none" in message
+        and "eligible=True" in message
+        for message in page_summaries
+    )
     assert after == before
 
 
