@@ -208,10 +208,24 @@ def _sync_token_hash(raw_token):
     return hashlib.sha256((raw_token or "").encode("utf-8")).hexdigest()
 
 
+def _rollback_after_sync_failure():
+    """Roll back a failed sync-state write without losing the retryable reply.
+
+    A rollback can itself fail when the database has gone away; the caller
+    is already on its failure path and must still reach abort(503).
+    """
+    try:
+        ub.session.rollback()
+    except Exception:  # noqa: BLE001 - failure-only boundary
+        pass
+
+
 def _pending_response(page):
     """Recreate a previously committed response without touching live state."""
     try:
         stored_headers = json.loads(page.response_headers_json or "{}")
+        if not isinstance(stored_headers, dict):
+            raise TypeError("pending response headers must decode to an object")
     except (TypeError, ValueError):
         log.exception(
             "Kobo Sync: pending response headers are corrupt for device %s",
@@ -317,7 +331,7 @@ def _acknowledge_pending_page(page, requesting_device_id):
         kobo_sync_status.delete_pending_sync_page(requesting_device_id)
         return True
     except Exception:
-        ub.session.rollback()
+        _rollback_after_sync_failure()
         try:
             log.exception(
                 "Kobo Sync: failed to acknowledge pending page for device %s",
@@ -348,7 +362,7 @@ def _seed_existing_device_entitlement_ledgers(user_id):
     try:
         kobo_sync_status.mark_device_entitlement_ledgers_seeded(device_ids)
     except Exception:
-        ub.session.rollback()
+        _rollback_after_sync_failure()
         log.exception(
             "Kobo Sync: failed to seed existing entitlement ledger for user %s",
             user_id,
@@ -422,7 +436,7 @@ def _migrate_device_entitlement_classification(user_id):
             device_ids, ENTITLEMENT_CLASSIFICATION_VERSION,
         )
     except Exception:
-        ub.session.rollback()
+        _rollback_after_sync_failure()
         log.exception(
             "Kobo Sync: failed to migrate entitlement classification for user %s",
             user_id,

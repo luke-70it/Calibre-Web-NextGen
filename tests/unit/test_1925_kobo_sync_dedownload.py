@@ -907,6 +907,53 @@ def test_page_commit_failure_with_failed_logging_backend_still_returns_503(
     ) is None
 
 
+def test_pending_page_with_wrong_shaped_headers_is_corrupt_not_a_500(
+    sync_harness, monkeypatch, caplog,
+):
+    from cps import kobo, kobo_sync_status
+
+    monkeypatch.setattr(
+        kobo.config, "config_kobo_suppress_replayed_entitlements", True,
+    )
+    first = sync_harness.sync(acknowledge=False)
+    assert len(_entitlements(first)) == 1
+    pending = kobo_sync_status.get_pending_sync_page(sync_harness.device.id)
+    # Valid JSON of the wrong shape: json.loads succeeds, .items() would not.
+    pending.response_headers_json = "[]"
+    sync_harness.session.commit()
+    caplog.set_level(logging.INFO, logger="cps.kobo")
+    # Replay is keyed on the incoming token; repeat the same tokenless request.
+    replayed = _sync_through_flask_error_pipeline(sync_harness)
+
+    assert replayed.status_code == 503
+    assert b"Entitlement" not in replayed.get_data()
+    assert any(
+        "response_mode=pending_response_corrupt" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_ledger_seed_failure_with_failed_rollback_still_returns_503(
+    sync_harness, monkeypatch,
+):
+    from cps import kobo_sync_status, ub
+
+    def fail_seed(*_args, **_kwargs):
+        raise RuntimeError("injected seed failure")
+
+    def fail_rollback(*_args, **_kwargs):
+        raise RuntimeError("injected rollback failure")
+
+    monkeypatch.setattr(
+        kobo_sync_status, "mark_device_entitlement_ledgers_seeded", fail_seed,
+    )
+    monkeypatch.setattr(ub.session, "rollback", fail_rollback)
+    failed = _sync_through_flask_error_pipeline(sync_harness)
+
+    assert failed.status_code == 503
+    assert b"Entitlement" not in failed.get_data()
+
+
 def test_deleted_entitlement_ledger_read_failure_returns_retryable_503(
     sync_harness, monkeypatch, caplog,
 ):
