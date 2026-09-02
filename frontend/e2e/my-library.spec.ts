@@ -236,6 +236,65 @@ test.describe('My Library', () => {
     }
   });
 
+  test('a non-member Global Library card opens read-only personal state with global editing', async ({ page }) => {
+    const me = (await page.request.get('/api/v1/auth/me').then((r) => r.json())) as MePayload;
+    const originalMode = me.library_mode;
+    const originalBrowseGlobal = !!me.role.browse_global;
+    let book: GlobalBook | undefined;
+
+    try {
+      expect(me.role.edit, 'the primary e2e account must exercise the editor gate').toBe(true);
+      expect(me.role.delete_books, 'the primary e2e account must exercise the combined delete gate').toBe(true);
+      await setManagedMode(page, me.id, 'personal_library');
+      [book] = await firstGlobalBooks(page);
+      test.skip(!book, 'seed library needs at least one book');
+      await removeMembership(page, book!.id);
+
+      await page.goto('/app/global');
+      await page.getByRole('link', { name: `Open details for ${book!.title}` }).click();
+      await expect(page).toHaveURL(new RegExp(`/app/book/${book!.id}$`));
+      await expect(page.getByRole('heading', { level: 1, name: book!.title })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Add to my library' })).toBeVisible();
+      await expect(page.getByRole('link', { name: 'Edit', exact: true })).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Delete from the global library' })).toBeVisible();
+
+      await expect(page.getByRole('button', { name: 'Remove from my library' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: 'Add to shelf' })).toHaveCount(0);
+      await expect(page.getByRole('button', { name: /Mark as (?:un)?read/ })).toHaveCount(0);
+      await expect(page.getByRole('progressbar', { name: 'Reading progress' })).toHaveCount(0);
+      await expect(page.getByRole('link', { name: /^Highlights/ })).toHaveCount(0);
+
+      const detailResponse = await page.request.get(`/api/v1/books/${book!.id}`);
+      expect(detailResponse.ok(), await detailResponse.text()).toBeTruthy();
+      const detail = (await detailResponse.json()) as BookDetailPayload & {
+        read: boolean;
+        archived: boolean;
+        favorited: boolean;
+        hidden: boolean;
+        in_progress: boolean;
+        annotation_count: number;
+        kosync_progress: number | null;
+      };
+      expect(detail).toMatchObject({
+        in_my_library: false,
+        read: false,
+        archived: false,
+        favorited: false,
+        hidden: false,
+        in_progress: false,
+        annotation_count: 0,
+        kosync_progress: null,
+      });
+
+      const metadata = await page.request.get(`/api/v1/books/${book!.id}/metadata`);
+      expect(metadata.ok(), await metadata.text()).toBeTruthy();
+      await expectNoSeriousAxeViolations(page);
+    } finally {
+      if (book) await addMembership(page, book.id).catch(() => undefined);
+      await setManagedMode(page, me.id, originalMode, originalBrowseGlobal);
+    }
+  });
+
   test('two real accounts see independent selections and can discover missing books', async ({
     page: adminPage,
     secondaryUser,
@@ -344,7 +403,7 @@ test.describe('My Library', () => {
     await freshPage.close();
   });
 
-  test('adding an unowned book to a shelf establishes membership first', async ({
+  test('shelf controls appear only after adding an unowned book to My Library', async ({
     page: adminPage,
     secondaryUser,
   }: { page: Page; secondaryUser: SecondaryUserSession }) => {
@@ -364,22 +423,23 @@ test.describe('My Library', () => {
 
     try {
       await page.goto(`/app/book/${book.id}`);
-      await expect(page.getByRole('button', { name: 'Add to my library' })).toBeVisible();
       const shelfTrigger = page.getByRole('button', { name: 'Add to shelf' });
+      const addButton = page.getByRole('button', { name: 'Add to my library' });
+      await expect(addButton).toBeVisible();
+      await expect(shelfTrigger).toHaveCount(0);
+      await addButton.click();
+      await expect.poll(async () => {
+        const response = await page.request.get(`/api/v1/books/${book.id}`);
+        return ((await response.json()) as BookDetailPayload).in_my_library;
+      }).toBe(true);
+      await expect(shelfTrigger).toBeVisible();
       await shelfTrigger.click();
-      await expect(page.getByText(
-        'Adding this book to a shelf also adds it to your library.',
-      )).toBeVisible();
 
       // The disclosure follows the shared popover keyboard contract.
       await page.keyboard.press('Escape');
       await expect(shelfTrigger).toBeFocused();
       await shelfTrigger.click();
       await page.getByRole('button', { name: shelfName }).click();
-      await expect(page.getByText(
-        `Added to your library and to ${shelfName}`,
-        { exact: true },
-      )).toBeAttached();
 
       const library = (await page.request.get('/api/v1/books?per_page=200').then((r) => r.json())) as {
         items: Array<{ id: number }>;

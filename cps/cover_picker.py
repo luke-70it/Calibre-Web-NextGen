@@ -75,9 +75,12 @@ def cover_source_required(f):
 def _load_book(book_id: int):
     """Fetch book + 404 if absent. Matches editbooks.py conventions."""
     personal = request.args.get("scope") == "personal"
+    global_editor = bool(current_user.role_edit() or current_user.role_admin())
     book = calibre_db.get_filtered_book(
         book_id,
-        allow_show_global=personal and bool(current_user.role_browse_global()),
+        allow_show_archived=True,
+        allow_show_hidden=True,
+        allow_show_global=(personal and bool(current_user.role_browse_global())) or global_editor,
     )
     if not book:
         abort(404)

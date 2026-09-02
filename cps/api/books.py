@@ -498,6 +498,17 @@ def book_detail(book_id):
 
     book, read_status, is_archived = result
 
+    personal_library = (
+        user_library.mode_for_user(current_user)
+        == constants.LIBRARY_MODE_PERSONAL
+    )
+    in_my_library = not personal_library
+    if personal_library and current_user.is_authenticated and not current_user.is_anonymous:
+        in_my_library = ub.session.query(ub.UserLibraryBook.id).filter(
+            ub.UserLibraryBook.user_id == int(current_user.id),
+            ub.UserLibraryBook.book_id == int(book_id),
+        ).first() is not None
+
     # Enrich language objects with display name so serialize_book_detail stays pure
     for lang in getattr(book, "languages", None) or []:
         lang.language_name = isoLanguages.get_language_name(get_locale(), lang.lang_code)
@@ -509,7 +520,7 @@ def book_detail(book_id):
     kosync_progress = None
     kosync_progress_timestamp = None
     kosync_progress_created_at = None
-    if current_user.is_authenticated and not current_user.is_anonymous:
+    if in_my_library and current_user.is_authenticated and not current_user.is_anonymous:
         uid = int(current_user.id)
         favorited = (ub.session.query(ub.FavoriteBook)
                      .filter(ub.FavoriteBook.user_id == uid, ub.FavoriteBook.book_id == book_id)
@@ -534,18 +545,20 @@ def book_detail(book_id):
     # With a custom read column, get_book_read_archived returns the column's value
     # (truthy = read); otherwise the built-in ub.ReadBook.read_status. Match the
     # list badge's logic (fork #579) so both surfaces agree.
-    read = bool(read_status) if config.config_read_column \
+    read = in_my_library and (
+        bool(read_status) if config.config_read_column
         else read_status == ub.ReadBook.STATUS_FINISHED
+    )
     # Sync-driven "currently reading" tri-state (fork #634). The classic detail
     # page renders this marker off read_status_raw == STATUS_IN_PROGRESS; the SPA
     # book page never received the flag, so the badge was missing in the new UI.
     # Derive it from the shared helper so both surfaces stay in agreement.
-    in_progress = book_is_in_progress(
+    in_progress = in_my_library and book_is_in_progress(
         book_id, read_status, config.config_read_column, current_user)
     body = serialize_book_detail(
         book,
         read=read,
-        archived=bool(is_archived),
+        archived=in_my_library and bool(is_archived),
         favorited=favorited,
         hidden=hidden,
         in_progress=in_progress,
@@ -554,14 +567,7 @@ def book_detail(book_id):
         original_filename=_original_filename(book_id),
         cover_override=user_cover.override_for_user(_real_user_id(), book_id),
     )
-    body["in_my_library"] = (
-        user_library.mode_for_user(current_user)
-        != constants.LIBRARY_MODE_PERSONAL
-        or ub.session.query(ub.UserLibraryBook.id).filter(
-            ub.UserLibraryBook.user_id == int(current_user.id),
-            ub.UserLibraryBook.book_id == int(book_id),
-        ).first() is not None
-    )
+    body["in_my_library"] = in_my_library
     source_formats, target_formats = get_convert_options(book)
     body["convert_options"] = {
         "sources": source_formats,
