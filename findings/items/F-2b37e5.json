@@ -7,8 +7,14 @@
     "F-e0843b",
     "#2131"
   ],
+  "resolution": {
+    "commit": "2fc59df2f1",
+    "date": "2026-09-02",
+    "note": "Preserve the incoming archive cursor as the outgoing floor while retaining the original incoming bound for tombstone selection.",
+    "release": ""
+  },
   "severity": "data-integrity",
   "source": "audit",
-  "status": "open",
+  "status": "resolved",
   "title": "Kobo archive cursor regresses on empty archive passes"
 }
