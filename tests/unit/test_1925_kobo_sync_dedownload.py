@@ -817,6 +817,72 @@ def test_ledger_read_failure_with_failed_logging_backend_still_returns_503(
     ).count() == 1
 
 
+def test_download_forbidden_with_failed_logging_backend_still_returns_403(
+    sync_harness, monkeypatch,
+):
+    from cps import kobo, kobo_sync_status
+
+    def broken_logging_backend(*_args, **_kwargs):
+        raise RuntimeError("injected persistent logging backend failure")
+
+    def deny_download():
+        for level in ("info", "warning", "error", "exception"):
+            monkeypatch.setattr(kobo.log, level, broken_logging_backend)
+        return False
+
+    monkeypatch.setattr(sync_harness.user, "role_download", deny_download)
+    failed = _sync_through_flask_error_pipeline(sync_harness)
+
+    assert failed.status_code == 403
+    assert b"Entitlement" not in failed.get_data()
+    assert kobo_sync_status.get_pending_sync_page(
+        sync_harness.device.id,
+    ) is None
+
+
+def test_pending_ack_failure_with_failed_logging_backend_still_returns_503(
+    sync_harness, monkeypatch,
+):
+    from cps import kobo, kobo_sync_status
+
+    monkeypatch.setattr(
+        kobo.config, "config_kobo_suppress_replayed_entitlements", True,
+    )
+    first = sync_harness.sync(acknowledge=False)
+    assert len(_entitlements(first)) == 1
+    pending = kobo_sync_status.get_pending_sync_page(sync_harness.device.id)
+    assert pending is not None
+    pending_state = (pending.outgoing_token, pending.confirmation_json)
+
+    def broken_logging_backend(*_args, **_kwargs):
+        raise RuntimeError("injected persistent logging backend failure")
+
+    def fail_staging(*_args, **_kwargs):
+        for level in ("info", "warning", "error", "exception"):
+            monkeypatch.setattr(kobo.log, level, broken_logging_backend)
+        raise RuntimeError("injected acknowledgment staging failure")
+
+    monkeypatch.setattr(
+        kobo_sync_status,
+        "stage_device_entitlement_fingerprints",
+        fail_staging,
+    )
+    failed = _sync_through_flask_error_pipeline(
+        sync_harness, token=pending.outgoing_token,
+    )
+
+    assert failed.status_code == 503
+    assert b"Entitlement" not in failed.get_data()
+    sync_harness.session.expire_all()
+    still_pending = kobo_sync_status.get_pending_sync_page(
+        sync_harness.device.id,
+    )
+    assert still_pending is not None
+    assert (
+        still_pending.outgoing_token, still_pending.confirmation_json,
+    ) == pending_state
+
+
 def test_deleted_entitlement_ledger_read_failure_returns_retryable_503(
     sync_harness, monkeypatch, caplog,
 ):

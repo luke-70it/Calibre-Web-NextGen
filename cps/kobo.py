@@ -318,10 +318,13 @@ def _acknowledge_pending_page(page, requesting_device_id):
         return True
     except Exception:
         ub.session.rollback()
-        log.exception(
-            "Kobo Sync: failed to acknowledge pending page for device %s",
-            requesting_device_id,
-        )
+        try:
+            log.exception(
+                "Kobo Sync: failed to acknowledge pending page for device %s",
+                requesting_device_id,
+            )
+        except Exception:  # noqa: BLE001 - the caller's 503 must not depend on logging
+            pass
         return False
 
 
@@ -1237,7 +1240,10 @@ def HandleSyncRequest():
         requesting_device_id, raw_sync_token,
     )
     if not current_user.role_download():
-        log.info("Users need download permissions for syncing library to Kobo reader")
+        try:
+            log.info("Users need download permissions for syncing library to Kobo reader")
+        except Exception:  # noqa: BLE001 - diagnostic only; the 403 below is the contract
+            pass
         return _abort_sync_with_observability(
             403,
             requesting_device_id,
