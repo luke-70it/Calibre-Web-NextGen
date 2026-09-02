@@ -404,7 +404,7 @@ def test_pending_echo_reset_does_not_cross_entitlement_removal(
     assert _changed_reading_states(terminal) == []
 
 
-def test_failure_after_pending_echo_reset_rolls_back_before_503(
+def test_query_failure_after_pending_echo_reset_restores_page_before_503(
         sync_harness, monkeypatch):
     from cps import kobo, kobo_sync_status, ub
 
@@ -434,10 +434,14 @@ def test_failure_after_pending_echo_reset_rolls_back_before_503(
         ub.DeviceReadingPosition.rehydrate_needed,
     ).scalar() is False
 
-    def fail_refresh():
-        raise RuntimeError("injected post-reset refresh failure")
+    original_capture = kobo._capture_query_identities
 
-    monkeypatch.setattr(kobo.calibre_db, "refresh_for_new_data", fail_refresh)
+    def fail_candidate_snapshot(*_args, **_kwargs):
+        raise RuntimeError("injected post-reset candidate query failure")
+
+    monkeypatch.setattr(
+        kobo, "_capture_query_identities", fail_candidate_snapshot,
+    )
     failed = _sync_through_flask_error_pipeline(
         sync_harness, token=partial,
     )
@@ -462,9 +466,7 @@ def test_failure_after_pending_echo_reset_rolls_back_before_503(
         ub.DeviceReadingPosition.rehydrate_needed,
     ).scalar() is False
 
-    monkeypatch.setattr(
-        kobo.calibre_db, "refresh_for_new_data", lambda: None,
-    )
+    monkeypatch.setattr(kobo, "_capture_query_identities", original_capture)
     recovered = sync_harness.sync(partial, acknowledge=False)
     assert recovered.status_code == 200
     assert _entitlements(recovered) == []
@@ -477,3 +479,18 @@ def test_failure_after_pending_echo_reset_rolls_back_before_503(
     )
     assert replacement is not None
     assert replacement.outgoing_token != pending_token
+
+
+def test_query_failure_without_pending_reset_keeps_http_500(
+        sync_harness, monkeypatch):
+    from cps import kobo
+
+    def fail_candidate_snapshot(*_args, **_kwargs):
+        raise RuntimeError("injected ordinary candidate query failure")
+
+    monkeypatch.setattr(
+        kobo, "_capture_query_identities", fail_candidate_snapshot,
+    )
+    failed = _sync_through_flask_error_pipeline(sync_harness)
+
+    assert failed.status_code == 500

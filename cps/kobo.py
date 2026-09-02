@@ -220,6 +220,19 @@ def _rollback_after_sync_failure():
         pass
 
 
+def _mark_pending_page_reset_staged(staged):
+    """Track the narrow request window that owns a non-CWNG page reset."""
+    if has_request_context():
+        g.kobo_pending_page_reset_staged = bool(staged)
+
+
+def _pending_page_reset_is_staged():
+    return bool(
+        has_request_context()
+        and getattr(g, "kobo_pending_page_reset_staged", False)
+    )
+
+
 def _pending_response(page):
     """Recreate a previously committed response without touching live state."""
     try:
@@ -371,9 +384,10 @@ def _reset_pending_page_for_non_cwng_token(page, requesting_device_id):
     bounded rehydrate path.
 
     The re-arm and pending-page deletion remain staged in the caller's
-    transaction. Every explicit failure exit from HandleSyncRequest reaches
-    ``_abort_sync_with_observability``, which rolls that transaction back; a
-    successful request commits these writes with the replacement page.
+    transaction. The request boundary rolls them back on both explicit aborts
+    and exceptions that escape later query/render work. A successful request
+    clears that boundary only after its checked commit durably replaces the
+    page.
     """
     try:
         confirmation = json.loads(page.confirmation_json or "{}")
@@ -384,6 +398,7 @@ def _reset_pending_page_for_non_cwng_token(page, requesting_device_id):
             requesting_device_id, confirmation_echo_book_ids,
         )
         kobo_sync_status.delete_pending_sync_page(requesting_device_id)
+        _mark_pending_page_reset_staged(True)
         return True
     except Exception:
         _rollback_after_sync_failure()
@@ -998,6 +1013,7 @@ def _abort_sync_with_observability(
     otherwise escape as an HTTP 500).
     """
     _rollback_after_sync_failure()
+    _mark_pending_page_reset_staged(False)
     try:
         _log_sync_observability(
             requesting_device_id,
@@ -1305,7 +1321,34 @@ def get_magic_shelf_membership_added_at(user_id):
     return max_created_at
 
 
-@kobo.route("/v1/library/sync")
+def _run_sync_with_pending_page_reset_boundary(handler):
+    """Contain failures only while this request owns a staged page reset.
+
+    Most unexpected handler exceptions retain Flask's established HTTP 500
+    behavior. Once a non-CWNG token has staged a pending-page reset, however,
+    letting an exception escape would expose those uncommitted mutations to
+    the next request because the user-database session has no teardown
+    rollback. Log that exception, restore the old page and latch, and return
+    the same retryable 503 used by checked sync-generation failures.
+    """
+    _mark_pending_page_reset_staged(False)
+    try:
+        return handler()
+    except Exception:
+        if not _pending_page_reset_is_staged():
+            raise
+        _rollback_after_sync_failure()
+        _mark_pending_page_reset_staged(False)
+        try:
+            log.exception(
+                "Kobo Sync failed "
+                "reason=pending_page_reset_response_generation_failed",
+            )
+        except Exception:  # noqa: BLE001 - preserve retryable 503
+            pass
+        return abort(503)
+
+
 @requires_kobo_auth
 # @download_required
 def HandleSyncRequest():
@@ -2707,6 +2750,7 @@ def HandleSyncRequest():
             outgoing_cursor=sync_cursor_out,
             observability=observability,
         )
+    _mark_pending_page_reset_staged(False)
     _log_sync_observability(
         requesting_device_id,
         sync_cursor_in,
@@ -2716,6 +2760,17 @@ def HandleSyncRequest():
         capture_session=capture_session,
     )
     return response
+
+
+def _dispatch_sync_request():
+    return _run_sync_with_pending_page_reset_boundary(HandleSyncRequest)
+
+
+kobo.add_url_rule(
+    "/v1/library/sync",
+    endpoint="HandleSyncRequest",
+    view_func=_dispatch_sync_request,
+)
 
 
 def generate_sync_response(sync_token, sync_results):
