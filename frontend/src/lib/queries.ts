@@ -374,6 +374,19 @@ export function useRemoveFromMyLibrary() {
   });
 }
 
+export function useClearMyCover(bookId: string | number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiDelete(`/api/v1/books/${bookId}/my-cover`),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['book', String(bookId)] });
+      void qc.invalidateQueries({ queryKey: ['books'] });
+      void qc.invalidateQueries({ queryKey: ['global-library'] });
+      void qc.invalidateQueries({ queryKey: ['cover-state', String(bookId)] });
+    },
+  });
+}
+
 export function useUpdateLibraryMode() {
   const qc = useQueryClient();
   return useMutation({

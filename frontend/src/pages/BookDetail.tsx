@@ -6,7 +6,7 @@ import {
   useSendToEreader, useMe, useAccount, useUpdateMetadata, useDeleteBook, useReloadMetadata,
   useBookShelves, useShelves, useKoboTwoWayAnnotations, selectKoboTwoWayBook,
   useAddToMyLibrary, useMyLibraryRemovalImpact, useRemoveFromMyLibrary,
-  useActiveDeliveryDevices, useQueueDeviceDelivery,
+  useActiveDeliveryDevices, useQueueDeviceDelivery, useClearMyCover,
 } from '../lib/queries';
 import { authorityLabel, opaqueLabel } from '../lib/koboTwoWay';
 import { MetadataTypeahead } from '../components/MetadataTypeahead';
@@ -321,6 +321,7 @@ export function BookDetail() {
   const addToLibrary = useAddToMyLibrary();
   const removalImpact = useMyLibraryRemovalImpact();
   const removeFromLibrary = useRemoveFromMyLibrary();
+  const clearMyCover = useClearMyCover(id);
   const [location, navigate] = useLocation();
   const me = useMe().data;
   const deliveryDevices = useActiveDeliveryDevices(
@@ -458,12 +459,29 @@ export function BookDetail() {
                 <span className={styles.coverFallbackMark} aria-hidden="true">NextGen</span>
               </div>
             )}
-            {me?.role?.edit && (
-              <Link href={`/book/${book.id}/cover`} className={styles.changeCover}>
-                <ImageIcon size={15} /> {t('Change cover')}
-              </Link>
-            )}
           </div>
+          {!me?.role?.anonymous && (
+            <div className={styles.coverPreferences}>
+              <p>{t('Your own cover is private to you and your e-reader deliveries. The library cover stays unchanged for everyone else.')}</p>
+              <div className={styles.coverPreferenceActions}>
+                <Link href={`/book/${book.id}/cover?personal=1`}>
+                  <ImageIcon size={15} aria-hidden="true" focusable={false} />
+                  {book.using_my_cover ? t('Change my cover') : t('Use my own cover')}
+                </Link>
+                {book.using_my_cover && (
+                  <button type="button" disabled={clearMyCover.isPending}
+                    onClick={() => clearMyCover.mutate()}>
+                    {clearMyCover.isPending ? t('Restoring…') : t('Use the library cover')}
+                  </button>
+                )}
+                {me?.role?.edit && (
+                  <Link href={`/book/${book.id}/cover`}>
+                    {t('Change library cover')}
+                  </Link>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* RIGHT: info */}

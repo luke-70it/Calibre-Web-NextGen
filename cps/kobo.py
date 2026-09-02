@@ -2757,15 +2757,25 @@ def _current_padding_settings():
 def _get_cover_image_id(book):
     base_id = str(book.uuid)
     try:
-        cover_path = None
-        if not config.config_use_google_drive:
-            cover_path = os.path.join(config.get_book_path(), book.path, "cover.jpg")
-        image_id = build_cover_image_id(
-            base_id,
-            use_google_drive=config.config_use_google_drive,
-            last_modified=book.last_modified,
-            cover_path=cover_path,
-        )
+        from .services import user_cover
+
+        override = user_cover.override_for_user(
+            getattr(current_user, "id", None), book.id)
+        if override is not None:
+            # The numeric suffix is intentionally compatible with
+            # normalize_cover_uuid(), while the microsecond token makes two
+            # users' independently selected covers distinct Kobo resources.
+            image_id = f"{base_id}-{user_cover.version_token(override)}"
+        else:
+            cover_path = None
+            if not config.config_use_google_drive:
+                cover_path = os.path.join(config.get_book_path(), book.path, "cover.jpg")
+            image_id = build_cover_image_id(
+                base_id,
+                use_google_drive=config.config_use_google_drive,
+                last_modified=book.last_modified,
+                cover_path=cover_path,
+            )
         # When server-side padding is on, append its settings hash so a
         # device whose cached cover was rendered with old settings
         # re-fetches after the admin changes the aspect or fill style.
@@ -3642,7 +3652,9 @@ def _serve_padded_cover_if_enabled(book_uuid, resolution):
     src_dir, src_filename, src_full = source
 
     try:
-        src_mtime = int(os.path.getmtime(src_full))
+        # Nanoseconds avoid two users sharing a stale padded cache entry when
+        # their personal files are published in the same second.
+        src_mtime = os.stat(src_full).st_mtime_ns
     except OSError:
         return None
 

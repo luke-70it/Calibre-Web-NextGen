@@ -16,6 +16,7 @@ from .. import (
 )
 from ..annotations import count_user_annotations
 from ..cw_login import current_user
+from ..services import user_cover
 from ..helper import edit_book_read_status, book_in_progress_ids, book_is_in_progress, \
     get_convert_options, get_kosync_progress_display, \
     SQLITE_IN_CHUNK_SIZE as _SQLITE_IN_CHUNK
@@ -126,7 +127,7 @@ def _row_read_status(e):
     return getattr(e, "read_status", None)
 
 
-def _row_to_item(e, in_progress_ids, hidden_ids=None):
+def _row_to_item(e, in_progress_ids, hidden_ids=None, cover_override=None):
     """Unwrap a SQLAlchemy Row (Books, is_archived, read_status) or plain Books object."""
     book = getattr(e, "Books", e)
     read_status = _row_read_status(e)
@@ -145,6 +146,7 @@ def _row_to_item(e, in_progress_ids, hidden_ids=None):
         in_progress=book.id in (in_progress_ids or set()),
         archived=archived,
         hidden=book.id in (hidden_ids or set()),
+        cover_override=cover_override,
     )
 
 
@@ -157,7 +159,16 @@ def _rows_to_items(entries, hidden_ids=None):
     ]
     in_progress_ids = book_in_progress_ids(
         statuses, config.config_read_column, current_user)
-    return [_row_to_item(entry, in_progress_ids, hidden_ids) for entry in entries]
+    books = [getattr(entry, "Books", entry) for entry in entries]
+    overrides = user_cover.overrides_for_user(
+        _real_user_id(), [book.id for book in books])
+    return [
+        _row_to_item(
+            entry, in_progress_ids, hidden_ids,
+            cover_override=overrides.get(int(book.id)),
+        )
+        for entry, book in zip(entries, books)
+    ]
 
 
 def _build_entity_filter(author, series, tag, publisher, language, rating=None, book_format=None):
@@ -541,6 +552,7 @@ def book_detail(book_id):
         annotation_count=annotation_count,
         custom_column_definitions=_detail_custom_columns(),
         original_filename=_original_filename(book_id),
+        cover_override=user_cover.override_for_user(_real_user_id(), book_id),
     )
     body["in_my_library"] = (
         user_library.mode_for_user(current_user)

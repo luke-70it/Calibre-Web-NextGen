@@ -2446,7 +2446,12 @@ def save_cover(img, book_path):
 def scavenge_staged_cover_files():
     """Log and remove orphan cover stages without attempting publication."""
     roots = []
-    for root in (config.get_book_path(), get_temp_dir()):
+    # Global covers stage beside the Calibre file (or in the temporary Drive
+    # upload directory). Per-user covers use the same StagedCoverWrite
+    # primitive below CONFIG_DIR, so an interrupted personal write needs the
+    # same startup cleanup without ever scanning or changing its live JPEG.
+    personal_cover_root = os.path.join(constants.CONFIG_DIR, "user-covers")
+    for root in (config.get_book_path(), get_temp_dir(), personal_cover_root):
         if root and os.path.isdir(root) and root not in roots:
             roots.append(root)
 
@@ -2454,7 +2459,13 @@ def scavenge_staged_cover_files():
     for root in roots:
         for directory, _subdirs, filenames in os.walk(root):
             for filename in filenames:
-                if not (filename.startswith(".cover.jpg.cwng-") and filename.endswith(".stage")):
+                global_stage = (
+                    filename.startswith(".cover.jpg.cwng-")
+                    and filename.endswith(".stage")
+                )
+                personal_stage = re.fullmatch(
+                    r"\.\d+\.jpg\.cwng-.+\.stage", filename) is not None
+                if not (global_stage or personal_stage):
                     continue
                 staged_path = os.path.join(directory, filename)
                 log.warning(
