@@ -110,12 +110,20 @@ def _hook_counts(application):
         "before": sum(len(items) for items in application.before_request_funcs.values()),
         "after": sum(len(items) for items in application.after_request_funcs.values()),
         "teardown_appcontext": len(application.teardown_appcontext_funcs),
+        "teardown_request": len(application.teardown_request_funcs.get(None, [])),
+        "error_handlers": sum(
+            len(exception_map)
+            for code_map in application.error_handler_spec.values()
+            for exception_map in code_map.values()
+        ),
     }
 
 
 @pytest.mark.unit
 def test_factory_constructs_two_independent_apps_without_process_job_duplication(monkeypatch):
     """A second factory call gets its own app but cannot restart process jobs."""
+    from cps import web
+
     services, updater_start, scheduled, startup = _stub_real_bootstrap(monkeypatch)
 
     first = cps.create_app(cps.config, services)
@@ -130,6 +138,11 @@ def test_factory_constructs_two_independent_apps_without_process_job_duplication
     assert first_counts == second_counts
     assert len(first.after_request_funcs[None]) == len(set(first.after_request_funcs[None]))
     assert len(second.after_request_funcs[None]) == len(set(second.after_request_funcs[None]))
+    for application in (first, second):
+        after_hooks = application.after_request_funcs[None]
+        assert after_hooks.count(cps.protect_user_specific_catalog_responses) == 1
+        assert after_hooks.count(web.add_security_headers) == 1
+        assert after_hooks.count(web.add_static_asset_cache_headers) == 1
     assert _middleware_names(first).count("ProxyFix") == 1
     assert _middleware_names(second).count("ProxyFix") == 1
     assert first_jobs == (1, 1, 1)
