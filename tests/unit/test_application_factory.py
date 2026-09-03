@@ -268,6 +268,12 @@ def test_incompatible_process_limiter_config_fails_before_mutating_first_app(mon
         services,
     )
     first_storage = process_limiter.storage
+    compatible = cps.create_app(
+        _factory_config(config_ratelimiter=True, config_limiter_uri="memory://"),
+        services,
+    )
+    assert compatible.extensions["limiter"] == {process_limiter}
+    assert process_limiter.storage is first_storage
 
     with pytest.raises(RuntimeError, match="process-scoped"):
         cps.create_app(
@@ -442,7 +448,10 @@ def test_first_apps_oauth_receiver_keeps_its_provider_after_app_two(monkeypatch)
     first_receiver = list(oauth_authorized.receivers_for(first_blueprint))[0]
 
     second = Flask("oauth-signal-second")
+    second.secret_key = "test"
     oauth_bb.init_oauth_blueprints(second)
+    second_blueprint = second.blueprints["github_200"]
+    second_receiver = list(oauth_authorized.receivers_for(second_blueprint))[0]
     assert oauth_bb.oauthblueprints[0]["id"] == 100
     with first.app_context():
         assert oauth_bb.get_oauth_blueprints()[0]["id"] == 100
@@ -453,8 +462,16 @@ def test_first_apps_oauth_receiver_keeps_its_provider_after_app_two(monkeypatch)
     sender = SimpleNamespace(name="github_100", session=SimpleNamespace(get=lambda *_: response))
     with first.test_request_context("/"):
         assert first_receiver(sender, {"access_token": "token"}) is False
+    second_sender = SimpleNamespace(
+        name="github_200", session=SimpleNamespace(get=lambda *_: response)
+    )
+    with second.test_request_context("/"):
+        assert second_receiver(second_sender, {"access_token": "token"}) is False
 
-    update_token.assert_called_once_with("100", {"access_token": "token"}, "account-1")
+    assert update_token.call_args_list == [
+        (("100", {"access_token": "token"}, "account-1"), {}),
+        (("200", {"access_token": "token"}, "account-1"), {}),
+    ]
 
 
 @pytest.mark.unit
