@@ -76,7 +76,7 @@ def _preload_real_constants() -> None:
         "cps.constants", str(constants_path)
     )
     if spec is None or spec.loader is None:
-        return
+        raise ImportError(f"cannot preload real cps.constants from {constants_path}")
     module = importlib.util.module_from_spec(spec)
     # Carry over stub-set attributes (STATIC_DIR, USER_AGENT) that test
     # files added before us, so loading the real module is purely additive.
@@ -100,13 +100,10 @@ def _preload_real_cps_package() -> None:
     `from cps.editbooks import ...` or `from cps import config, db, app, lm,
     cli_param, calibre_db` fail with ImportError (unknown location).
 
-    cps/__init__.py is heavyweight (Flask app, blueprints, SQLAlchemy
-    engines, scheduler) but only ~0.5s — acceptable as a one-time pytest
-    collection cost so the rest of tests/unit/ can collect cleanly.
-
-    Skips silently if anything goes wrong (cwa_db not on path in some
-    minimal test runs, etc.) so this doesn't itself become a collection
-    blocker."""
+    cps/__init__.py is heavyweight (Flask app, SQLAlchemy objects) but only
+    ~0.5s — acceptable as a one-time pytest collection cost so the rest of
+    tests/unit/ can collect cleanly. A failed preload is deliberately fatal:
+    continuing would let later files grade hand-built stubs as the real app."""
     cps_pkg = sys.modules.get("cps")
     if cps_pkg is not None and hasattr(cps_pkg, "cli_param") and hasattr(cps_pkg, "app"):
         return  # already fully loaded
@@ -119,18 +116,12 @@ def _preload_real_cps_package() -> None:
                 mod = sys.modules[name]
                 if not hasattr(mod, "__file__") or mod.__file__ is None:
                     sys.modules.pop(name, None)
-        try:
-            import cps as _real_cps  # noqa: F401
-            if stashed_constants is not None and not hasattr(_real_cps, "constants"):
-                _real_cps.constants = stashed_constants
-        except Exception:
-            pass
+        import cps as _real_cps  # noqa: F401
+        if stashed_constants is not None and not hasattr(_real_cps, "constants"):
+            _real_cps.constants = stashed_constants
         return
 
-    try:
-        import cps as _real_cps  # noqa: F401
-    except Exception:
-        pass
+    import cps as _real_cps  # noqa: F401
 
 
 def _preload_cps_services() -> None:
@@ -143,10 +134,7 @@ def _preload_cps_services() -> None:
         return
     if existing is not None and not hasattr(existing, "ldap"):
         sys.modules.pop("cps.services", None)
-    try:
-        import cps.services  # noqa: F401
-    except Exception:
-        pass
+    import cps.services  # noqa: F401
 
 
 _preload_real_constants()

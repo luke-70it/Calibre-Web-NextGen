@@ -57,7 +57,7 @@ from .cw_login import login_user, current_user
 from sqlalchemy.orm.exc import NoResultFound
 from .usermanagement import user_login_required
 
-from . import app, config, constants, logger, oauth_auto_redirect, ub
+from . import config, constants, logger, oauth_auto_redirect, ub
 from .ui_themes import config_theme_code
 
 try:
@@ -728,7 +728,7 @@ def unlink_oauth(provider):
     return redirect(url_for('web.profile'))
 
 
-def generate_oauth_blueprints():
+def generate_oauth_blueprints(application):
     if not ub.session.query(ub.OAuthProvider).count():
         for provider in ("github", "google"):
             oauthProvider = ub.OAuthProvider()
@@ -919,7 +919,7 @@ def generate_oauth_blueprints():
         element['blueprint'] = blueprint
         element['blueprint'].backend = OAuthBackend(ub.OAuth, ub.session, str(element['id']),
                                                     user=current_user, user_required=True)
-        app.register_blueprint(blueprint, url_prefix="/login")
+        application.register_blueprint(blueprint, url_prefix="/login")
         if element['active']:
             register_oauth_blueprint(element['id'], element['provider_name'])
     return oauthblueprints
@@ -1009,7 +1009,7 @@ def _oauth_success_redirect(provider_name):
     return next_url
 
 
-def _register_auto_redirect_hooks(blueprints):
+def _register_auto_redirect_hooks(blueprints, application):
     """Attach state tracking and callback recovery to OAuth blueprints."""
     for element in blueprints:
         oauth_before_login.connect_via(element['blueprint'])(
@@ -1017,12 +1017,12 @@ def _register_auto_redirect_hooks(blueprints):
         )
 
     guard_key = "cwa_oauth_auto_redirect_callback_guard"
-    if not app.extensions.get(guard_key):
-        app.before_request(_prepare_oauth_callback)
-        app.extensions[guard_key] = True
+    if not application.extensions.get(guard_key):
+        application.before_request(_prepare_oauth_callback)
+        application.extensions[guard_key] = True
 
 
-def init_oauth_blueprints():
+def init_oauth_blueprints(application=None):
     """
     Initialize OAuth blueprints and register signal handlers.
     
@@ -1035,11 +1035,18 @@ def init_oauth_blueprints():
     """
     if not ub.oauth_support:
         return []
-    
-    global oauthblueprints
-    oauthblueprints = generate_oauth_blueprints()
 
-    _register_auto_redirect_hooks(oauthblueprints)
+    if application is None:
+        # Compatibility for callers predating the factory seam.
+        from . import app as application
+
+    global oauthblueprints
+    # Each app needs fresh Flask-Dance blueprint objects. Reusing the prior
+    # list registers duplicate provider names on the second factory product.
+    oauthblueprints = []
+    oauthblueprints = generate_oauth_blueprints(application)
+
+    _register_auto_redirect_hooks(oauthblueprints, application)
 
     @oauth_authorized.connect_via(oauthblueprints[0]['blueprint'])
     def github_logged_in(blueprint, token):

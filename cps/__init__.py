@@ -9,7 +9,7 @@ import sys
 import os
 import mimetypes
 
-from flask import Flask, g, session
+from flask import Flask, current_app, g, has_app_context, session
 from .MyLoginManager import MyLoginManager
 from flask_principal import Principal
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -70,19 +70,7 @@ mimetypes.add_type('application/zip', '.kfx-zip')
 
 log = logger.create()
 
-app = Flask(__name__)
-app.config.update(
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', 'False').lower() == 'true',
-    SESSION_COOKIE_SAMESITE='Lax',
-    REMEMBER_COOKIE_SAMESITE='Strict',
-    WTF_CSRF_SSL_STRICT=False,
-    SESSION_COOKIE_NAME=os.environ.get('COOKIE_PREFIX', "") + "session",
-    REMEMBER_COOKIE_NAME=os.environ.get('COOKIE_PREFIX', "") + "remember_token"
-)
 
-
-@app.after_request
 def protect_user_specific_catalog_responses(response):
     """Prevent a shared cache from crossing account-specific catalog views."""
     if not getattr(g, "_common_filters_user_specific", False):
@@ -90,39 +78,76 @@ def protect_user_specific_catalog_responses(response):
     response.headers["Cache-Control"] = "private, no-store"
     response.vary.add("Cookie")
     response.vary.add("Authorization")
-    if getattr(config, "config_allow_reverse_proxy_header_login", False):
-        header_name = getattr(config, "config_reverse_proxy_login_header_name", "")
+    runtime_config = current_app.extensions.get("cps_config", config)
+    if getattr(runtime_config, "config_allow_reverse_proxy_header_login", False):
+        header_name = getattr(runtime_config, "config_reverse_proxy_login_header_name", "")
         if header_name:
             response.vary.add(header_name)
     return response
 
-# Fix for running behind reverse proxy (e.g. nginx, apache, caddy, ...)
-# Without it, url_for will generate http:// urls even if https:// is used
-# Set TRUSTED_PROXY_COUNT to the number of proxies in your chain (default: 1).
-# PROXYFIX_X_FOR / _X_PROTO / _X_HOST override it for header-specific chains.
+
+_BASE_HOOK_MARKER = "cps_base_after_request_registered"
+_PROXY_FIX_MARKER = "cps_proxy_fix_registered"
+
+
+def _configure_base_app(application, runtime_config=None):
+    """Install import-time Flask defaults exactly once on one app object."""
+    application.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', 'False').lower() == 'true',
+        SESSION_COOKIE_SAMESITE='Lax',
+        REMEMBER_COOKIE_SAMESITE='Strict',
+        WTF_CSRF_SSL_STRICT=False,
+        SESSION_COOKIE_NAME=os.environ.get('COOKIE_PREFIX', "") + "session",
+        REMEMBER_COOKIE_NAME=os.environ.get('COOKIE_PREFIX', "") + "remember_token"
+    )
+    if runtime_config is not None:
+        application.extensions["cps_config"] = runtime_config
+
+    if not application.extensions.get(_BASE_HOOK_MARKER):
+        application.after_request(protect_user_specific_catalog_responses)
+        application.extensions[_BASE_HOOK_MARKER] = True
+
+    if application.extensions.get(_PROXY_FIX_MARKER):
+        return application
+
+    # Fix for running behind reverse proxy (e.g. nginx, apache, caddy, ...)
+    # Without it, url_for will generate http:// urls even if https:// is used.
+    # Preserve the existing defaults exactly; PROXY-01 changes them in P2.02.
+    application.wsgi_app = ProxyFix(application.wsgi_app, **proxyfix_hops)
+    application.extensions[_PROXY_FIX_MARKER] = True
+    if len(set(proxyfix_hops.values())) == 1:
+        log.info(f'ProxyFix configured to trust {num_proxies} proxy(ies) for X-Forwarded-* headers')
+    else:
+        log.info(
+            'ProxyFix configured with trusted proxy hops: '
+            f'x_for={proxyfix_hops["x_for"]}, x_proto={proxyfix_hops["x_proto"]}, '
+            f'x_host={proxyfix_hops["x_host"]}, x_prefix={proxyfix_hops["x_prefix"]}'
+        )
+    return application
+
+
+# These values intentionally remain import-time environment reads. Moving the
+# read to saved configuration would alter PROXY-01 rather than expose a seam.
 num_proxies = int(os.environ.get('TRUSTED_PROXY_COUNT', '1'))
 proxyfix_hops = {
     'x_for': int(os.environ.get('PROXYFIX_X_FOR', num_proxies)),
     'x_proto': int(os.environ.get('PROXYFIX_X_PROTO', num_proxies)),
     'x_host': int(os.environ.get('PROXYFIX_X_HOST', num_proxies)),
-    # Preserve the existing shared-count behavior for X-Forwarded-Prefix.
     'x_prefix': num_proxies,
 }
-app.wsgi_app = ProxyFix(app.wsgi_app, **proxyfix_hops)
-if len(set(proxyfix_hops.values())) == 1:
-    log.info(f'ProxyFix configured to trust {num_proxies} proxy(ies) for X-Forwarded-* headers')
-else:
-    log.info(
-        'ProxyFix configured with trusted proxy hops: '
-        f'x_for={proxyfix_hops["x_for"]}, x_proto={proxyfix_hops["x_proto"]}, '
-        f'x_host={proxyfix_hops["x_host"]}, x_prefix={proxyfix_hops["x_prefix"]}'
-    )
+
+# Compatibility singleton: imports of ``cps.app`` keep the same hook and
+# middleware they had before the factory seam. Explicit factory callers use
+# the object returned by create_app(config, services).
+app = _configure_base_app(Flask(__name__))
 
 lm = MyLoginManager()
 
 cli_param = CliParameter()
 
 config = config_sql.ConfigSQL()
+app.extensions["cps_config"] = config
 
 if wtf_present:
     csrf = CSRFProtect()
@@ -141,15 +166,18 @@ else:
     limiter = None
 
 
-def apply_https_runtime_config():
+def apply_https_runtime_config(application=None, runtime_config=None):
     """Refresh cookie security flags from the current saved config."""
-    if config.config_login_type == constants.LOGIN_OAUTH or getattr(config, 'config_use_https', False):
-        app.config['SESSION_COOKIE_SECURE'] = True
-        app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+    application = application or (current_app._get_current_object() if has_app_context() else app)
+    runtime_config = runtime_config or application.extensions.get("cps_config", config)
+    if (runtime_config.config_login_type == constants.LOGIN_OAUTH
+            or getattr(runtime_config, 'config_use_https', False)):
+        application.config['SESSION_COOKIE_SECURE'] = True
+        application.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
         log.info("Enforcing SESSION_COOKIE_SECURE=True (OAuth enabled or HTTPS enforced)")
     else:
-        app.config['SESSION_COOKIE_SECURE'] = os.environ.get('SESSION_COOKIE_SECURE', 'False').lower() == 'true'
-        log.info(f"SESSION_COOKIE_SECURE set to {app.config['SESSION_COOKIE_SECURE']} (Standard/LDAP login)")
+        application.config['SESSION_COOKIE_SECURE'] = os.environ.get('SESSION_COOKIE_SECURE', 'False').lower() == 'true'
+        log.info(f"SESSION_COOKIE_SECURE set to {application.config['SESSION_COOKIE_SECURE']} (Standard/LDAP login)")
 
 
 # Last-logged magic-shelf filter snapshot per user_id; the before_request
@@ -189,9 +217,38 @@ def _log_magic_shelf_counts(user_id, total_shelves, visible_shelves,
         log.debug(msg)
 
 
-def create_app():
+def create_app(config=None, services=None):
+    """Build one Flask application while preserving the legacy no-arg path.
+
+    Explicit callers receive a fresh app. The no-argument form remains the
+    compatibility route used by the current console entry point and the pinned
+    runtime-manifest oracle.
+    """
+    if (config is None) != (services is None):
+        raise TypeError("create_app() requires both config and services, or neither")
+
+    runtime_config = config if config is not None else globals()["config"]
+    if services is None:
+        from . import services as runtime_services
+    else:
+        runtime_services = services
+
+    if config is None:
+        application = globals()["app"]
+        _configure_base_app(application, runtime_config)
+    else:
+        application = _configure_base_app(Flask(__name__), runtime_config)
+        # Modules imported by the legacy bootstrap resolve cps.app. Keep that
+        # compatibility name on the newest factory product; callers that need
+        # either instance retain the returned object directly.
+        globals()["app"] = application
+
+    process_startup_required = not getattr(
+        runtime_services, "_cps_process_startup_complete", False
+    )
+
     if csrf:
-        csrf.init_app(app)
+        csrf.init_app(application)
 
     cli_param.init()
 
@@ -200,18 +257,22 @@ def create_app():
     encrypt_key, error = config_sql.get_encryption_key(os.path.dirname(cli_param.settings_path))
 
     config_sql.load_configuration(ub.session, encrypt_key)
-    config.init_config(ub.session, encrypt_key, cli_param)
+    runtime_config.init_config(ub.session, encrypt_key, cli_param)
 
     # Intelligent Security Configuration
     # Force SESSION_COOKIE_SECURE if OAuth is enabled OR if "Use via HTTPS" is checked.
-    apply_https_runtime_config()
+    if config is None:
+        apply_https_runtime_config()
+    else:
+        apply_https_runtime_config(application, runtime_config)
 
     # Set OAuth redirect host consistency
-    if hasattr(config, 'config_oauth_redirect_host') and config.config_oauth_redirect_host:
+    if (hasattr(runtime_config, 'config_oauth_redirect_host')
+            and runtime_config.config_oauth_redirect_host):
         from urllib.parse import urlparse
-        parsed = urlparse(config.config_oauth_redirect_host)
+        parsed = urlparse(runtime_config.config_oauth_redirect_host)
         if parsed.netloc:
-            app.config['FORCE_HOST_FOR_REDIRECTS'] = parsed.netloc
+            application.config['FORCE_HOST_FOR_REDIRECTS'] = parsed.netloc
 
     if error:
         log.error(error)
@@ -230,12 +291,12 @@ def create_app():
 
     lm.login_view = 'web.login'
     lm.anonymous_user = ub.Anonymous
-    lm.session_protection = 'strong' if config.config_session == 1 else "basic"
+    lm.session_protection = 'strong' if runtime_config.config_session == 1 else "basic"
 
     _ensure_user_profiles_json()
 
     from .calibre_init import init_calibre_db_from_config
-    init_calibre_db_from_config(config, cli_param.settings_path)
+    init_calibre_db_from_config(runtime_config, cli_param.settings_path)
     calibre_db.init_db()
     # A process can die after staging or after committing cover metadata but
     # before publication. The stage alone cannot tell us which occurred, so
@@ -253,28 +314,31 @@ def create_app():
         lambda book_id: getattr(calibre_db.get_book(book_id), "uuid", None),
     )
 
-    updater_thread.init_updater(config, web_server)
+    updater_thread.init_updater(runtime_config, web_server)
     # Perform dry run of updater and exit afterward
     if cli_param.dry_run:
         updater_thread.dry_run()
         sys.exit(0)
-    updater_thread.start()
-    app.wsgi_app = ReverseProxied(app.wsgi_app)
+    if process_startup_required:
+        updater_thread.start()
+    if not application.extensions.get("cps_reverse_proxy_registered"):
+        application.wsgi_app = ReverseProxied(application.wsgi_app)
+        application.extensions["cps_reverse_proxy_registered"] = True
 
     if os.environ.get('FLASK_DEBUG'):
-        cache_buster.init_cache_busting(app)
+        cache_buster.init_cache_busting(application)
     log.info('Starting Calibre Web...')
-    Principal(app)
-    lm.init_app(app)
-    app.secret_key = os.getenv('SECRET_KEY', config_sql.get_flask_session_key(ub.session))
+    Principal(application)
+    lm.init_app(application)
+    application.secret_key = os.getenv('SECRET_KEY', config_sql.get_flask_session_key(ub.session))
 
-    web_server.init_app(app, config)
+    web_server.init_app(application, runtime_config)
     from .cw_babel import babel, get_locale
     if hasattr(babel, "localeselector"):
-        babel.init_app(app)
+        babel.init_app(application)
         babel.localeselector(get_locale)
     else:
-        babel.init_app(app, locale_selector=get_locale)
+        babel.init_app(application, locale_selector=get_locale)
 
     # Initialize OAuth blueprints AFTER babel to ensure translations are loaded
     # Issue: OAuth blueprint generation was happening during module import (before babel init),
@@ -282,26 +346,24 @@ def create_app():
     if ub.oauth_support:
         try:
             from . import oauth_bb
-            oauth_bb.init_oauth_blueprints()
+            oauth_bb.init_oauth_blueprints(application)
             log.info("OAuth blueprints initialized successfully")
         except Exception as e:
             log.error("Failed to initialize OAuth blueprints: %s", e)
 
-    from . import services
-
-    if services.ldap:
-        services.ldap.init_app(app, config)
-    if services.goodreads_support:
-        services.goodreads_support.connect(config.config_goodreads_api_key,
-                                           config.config_use_goodreads)
-    config.store_calibre_uuid(calibre_db, db.Library_Id)
+    if runtime_services.ldap:
+        runtime_services.ldap.init_app(application, runtime_config)
+    if runtime_services.goodreads_support:
+        runtime_services.goodreads_support.connect(runtime_config.config_goodreads_api_key,
+                                                   runtime_config.config_use_goodreads)
+    runtime_config.store_calibre_uuid(calibre_db, db.Library_Id)
     # Configure rate limiter
     # https://limits.readthedocs.io/en/stable/storage.html
-    app.config.update(RATELIMIT_ENABLED=config.config_ratelimiter)
-    if config.config_limiter_uri != "" and not cli_param.memory_backend:
-        app.config.update(RATELIMIT_STORAGE_URI=config.config_limiter_uri)
-        if config.config_limiter_options != "":
-            app.config.update(RATELIMIT_STORAGE_OPTIONS=config.config_limiter_options)
+    application.config.update(RATELIMIT_ENABLED=runtime_config.config_ratelimiter)
+    if runtime_config.config_limiter_uri != "" and not cli_param.memory_backend:
+        application.config.update(RATELIMIT_STORAGE_URI=runtime_config.config_limiter_uri)
+        if runtime_config.config_limiter_options != "":
+            application.config.update(RATELIMIT_STORAGE_OPTIONS=runtime_config.config_limiter_options)
     else:
         # No backend configured, so we get the in-memory one. Say so rather
         # than leaving the key unset: flask_limiter warns on every startup
@@ -314,24 +376,24 @@ def create_app():
         # constructor storage_uri outranks app.config, so it would quietly
         # override the admin's own "Limiter Backend" setting above and drop
         # them onto memory storage with no error.
-        app.config.update(RATELIMIT_STORAGE_URI="memory://")
+        application.config.update(RATELIMIT_STORAGE_URI="memory://")
     try:
-        limiter.init_app(app)
+        limiter.init_app(application)
     except Exception as e:
         log.error('Wrong Flask Limiter configuration, falling back to default: {}'.format(e))
-        app.config.update(RATELIMIT_STORAGE_URI="memory://")
-        limiter.init_app(app)
+        application.config.update(RATELIMIT_STORAGE_URI="memory://")
+        limiter.init_app(application)
 
     # Register scheduled tasks
     # Ensure a valid calibre_db session exists before handling each request
-    @app.before_request
+    @application.before_request
     def _cwa_ensure_db_session():
         from flask import g, request
         from .cw_login import current_user
         from sqlalchemy import or_
         import time
 
-        if config.config_allow_reverse_proxy_header_login:
+        if runtime_config.config_allow_reverse_proxy_header_login:
             """
             Load user from reverse proxy authentication header if configured.
             Sets g.flask_httpauth_user early so that current_user proxy resolves correctly
@@ -465,7 +527,7 @@ def create_app():
             # Failsafe: let route-level code handle specific DB errors
             pass
 
-    @app.before_request
+    @application.before_request
     def _clear_pending_app_password():
         """Drop a just-created app-password cleartext from session when
         the user navigates away from the profile page. Fork issue #223:
@@ -504,7 +566,7 @@ def create_app():
         if request.endpoint not in keep_endpoints:
             session.pop("pending_app_password", None)
 
-    @app.before_request
+    @application.before_request
     def _desktop_compat_fresh_snapshot():
         from flask import request
         # Rollback ends the SERIALIZABLE snapshot so the next query sees Calibre desktop's writes.
@@ -519,7 +581,7 @@ def create_app():
         # Clear the Flask-session shelf count cache so sidebar counts stay fresh.
         session.pop('magic_shelf_counts', None)
 
-    @app.teardown_appcontext
+    @application.teardown_appcontext
     def shutdown_session(exception=None):
         # Close before session_factory.remove(): they operate on different objects (concrete
         # Session vs scoped proxy), and NullPool needs an explicit close to drop the connection.
@@ -535,8 +597,17 @@ def create_app():
         if calibre_db.session_factory:
             calibre_db.session_factory.remove()
 
-    from .schedule import register_scheduled_tasks, register_startup_tasks
-    register_scheduled_tasks(config.schedule_reconnect)
-    register_startup_tasks()
+    if process_startup_required:
+        from .schedule import register_scheduled_tasks, register_startup_tasks
+        register_scheduled_tasks(runtime_config.schedule_reconnect)
+        register_startup_tasks()
+        runtime_services._cps_process_startup_complete = True
 
-    return app
+    # cps.web historically binds two app-wide response hooks when the module is
+    # imported. If it predates this factory call, copy those hooks to the fresh
+    # app; if it does not, its first import will bind them to globals()["app"].
+    web_module = sys.modules.get("cps.web")
+    if web_module is not None:
+        web_module.register_app_hooks(application)
+
+    return application
