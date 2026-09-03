@@ -57,7 +57,7 @@ from .cw_login import login_user, current_user
 from sqlalchemy.orm.exc import NoResultFound
 from .usermanagement import user_login_required
 
-from . import config, constants, logger, oauth_auto_redirect, ub
+from . import app, config, constants, logger, oauth_auto_redirect, ub
 from .ui_themes import config_theme_code
 
 try:
@@ -1009,8 +1009,9 @@ def _oauth_success_redirect(provider_name):
     return next_url
 
 
-def _register_auto_redirect_hooks(blueprints, application):
+def _register_auto_redirect_hooks(blueprints, application=None):
     """Attach state tracking and callback recovery to OAuth blueprints."""
+    application = application or app
     for element in blueprints:
         oauth_before_login.connect_via(element['blueprint'])(
             _remember_auto_redirect_state
@@ -1038,7 +1039,7 @@ def init_oauth_blueprints(application=None):
 
     if application is None:
         # Compatibility for callers predating the factory seam.
-        from . import app as application
+        application = app
 
     global oauthblueprints
     # Each app needs fresh Flask-Dance blueprint objects. Reusing the prior

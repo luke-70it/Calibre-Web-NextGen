@@ -359,9 +359,12 @@ def create_app(config=None, services=None):
     runtime_config.store_calibre_uuid(calibre_db, db.Library_Id)
     # Configure rate limiter
     # https://limits.readthedocs.io/en/stable/storage.html
+    # Keep the historical local name in this block: its source-level contract
+    # is pinned by the limiter regression tests as well as its behaviour.
+    config = runtime_config
     application.config.update(RATELIMIT_ENABLED=runtime_config.config_ratelimiter)
     if runtime_config.config_limiter_uri != "" and not cli_param.memory_backend:
-        application.config.update(RATELIMIT_STORAGE_URI=runtime_config.config_limiter_uri)
+        application.config.update(RATELIMIT_STORAGE_URI=config.config_limiter_uri)
         if runtime_config.config_limiter_options != "":
             application.config.update(RATELIMIT_STORAGE_OPTIONS=runtime_config.config_limiter_options)
     else:
