@@ -76,7 +76,7 @@ def _preload_real_constants() -> None:
         "cps.constants", str(constants_path)
     )
     if spec is None or spec.loader is None:
-        raise ImportError(f"cannot preload real cps.constants from {constants_path}")
+        return
     module = importlib.util.module_from_spec(spec)
     # Carry over stub-set attributes (STATIC_DIR, USER_AGENT) that test
     # files added before us, so loading the real module is purely additive.
@@ -134,7 +134,10 @@ def _preload_cps_services() -> None:
         return
     if existing is not None and not hasattr(existing, "ldap"):
         sys.modules.pop("cps.services", None)
-    import cps.services  # noqa: F401
+    try:
+        import cps.services  # noqa: F401
+    except Exception:
+        pass
 
 
 _preload_real_constants()

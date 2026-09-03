@@ -2952,7 +2952,7 @@ def login():
             and feature_support['oauth']):
         oauth_endpoint, next_url = oauth_auto_redirect.auto_redirect_decision(
             request.args,
-            oauth_bb.oauthblueprints,
+            oauth_bb.get_oauth_blueprints(),
             flask_session,
         )
         if oauth_endpoint:

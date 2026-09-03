@@ -41,7 +41,10 @@ def hide_console_windows():
 
 
 def register_blueprints(app):
-    """Register the production blueprint set in its historical order."""
+    """Register the production blueprint set once, in its historical order."""
+    marker = "cps_production_blueprints_registered"
+    if app.extensions.get(marker):
+        raise RuntimeError("production blueprints are already registered on this app")
     from .cwa_functions import switch_theme, library_refresh, convert_library, epub_fixer, cover_enforcer_ui, cwa_stats, cwa_check_status, cwa_settings, cwa_logs, profile_pictures, cwa_internal
     from .web import register_app_hooks, web
     from .opds import opds
@@ -126,18 +129,26 @@ def register_blueprints(app):
             kobo._cps_rate_limit_registered = True
         app.register_blueprint(readingservices_api_v3)
         app.register_blueprint(readingservices_userstorage)
+        from .services import kobo_patch_spool
+        kobo_patch_spool.start_retention_maintenance()
     if oauth_available:
         app.register_blueprint(oauth)
 
+    # kobo_auth historically decorates the compatibility login manager while
+    # it is imported. Factory apps own their manager, so copy the completed
+    # per-blueprint policy without sharing the mutable mapping.
+    if app.login_manager is not None and app.login_manager is not getattr(
+        sys.modules.get("cps"), "lm", None
+    ):
+        from . import lm
+        app.login_manager.blueprint_login_views.update(lm.blueprint_login_views)
+
     app.extensions["cps_kobo_available"] = kobo_available
+    app.extensions[marker] = True
     return app
 
 
 def _start_runtime_tasks(app):
-    if app.extensions.get("cps_kobo_available"):
-        from .services import kobo_patch_spool
-        kobo_patch_spool.start_retention_maintenance()
-
     # Annotation sync-target pushes are blocking HTTPS calls; on the request
     # greenlet they freeze the whole (unpatched-gevent) app, so hand them to
     # the WorkerThread instead (#920).

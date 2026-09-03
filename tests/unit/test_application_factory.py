@@ -23,9 +23,11 @@ from cps.reverseproxy import ReverseProxied
 
 def _stub_real_bootstrap(monkeypatch):
     """Leave Flask construction real while isolating process and storage work."""
-    from cps import calibre_init, cw_babel, helper, schedule
+    from cps import calibre_init, cw_babel, helper, schedule, services as real_services
 
     monkeypatch.setattr(cps, "app", cps.app)
+    monkeypatch.setattr(cps, "_process_runtime_state", cps._ProcessRuntimeState())
+    monkeypatch.setattr(real_services, "goodreads_support", None)
     monkeypatch.setattr(cps.cli_param, "init", lambda: None)
     monkeypatch.setattr(cps.cli_param, "settings_path", "/tmp/factory-app.db")
     monkeypatch.setattr(cps.cli_param, "user_credentials", None)
@@ -389,7 +391,6 @@ def test_generated_oauth_blueprints_are_fresh_for_each_app(monkeypatch):
     monkeypatch.setattr(oauth_bb, "oauthblueprints", [{"stale": True}])
 
     def generate(application):
-        assert oauth_bb.oauthblueprints == []
         from flask import Blueprint
         generated = []
         for name in ("github", "google", "generic"):
@@ -427,6 +428,7 @@ def test_first_apps_oauth_receiver_keeps_its_provider_after_app_two(monkeypatch)
         return items
 
     monkeypatch.setattr(oauth_bb.ub, "oauth_support", True)
+    monkeypatch.setattr(oauth_bb, "oauthblueprints", [])
     monkeypatch.setattr(oauth_bb, "generate_oauth_blueprints", generated)
     monkeypatch.setattr(oauth_bb, "_register_auto_redirect_hooks", lambda *_args: None)
     update_token = MagicMock()

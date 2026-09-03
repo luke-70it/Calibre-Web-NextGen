@@ -8,6 +8,7 @@
 import sys
 import os
 import mimetypes
+import threading
 
 from flask import Flask, current_app, g, has_app_context, session
 from .MyLoginManager import MyLoginManager
@@ -166,6 +167,149 @@ else:
     limiter = None
 
 
+class _ProcessRuntimeState:
+    """State owned by this Python process, never by an injected service bundle."""
+
+    def __init__(self):
+        self.initialized = False
+        self.config_fingerprint = None
+        self.goodreads_support = None
+        self.limiter_initialized = False
+        self.limiter_registered = False
+        self.limiter_before_hooks = []
+        self.limiter_after_hooks = []
+        self.limiter_teardown_hooks = []
+        self.limiter_used_fallback = False
+
+
+_process_runtime_state = _ProcessRuntimeState()
+_process_runtime_lock = threading.RLock()
+_FACTORY_COMPLETE_MARKER = "cps_factory_complete"
+
+
+def _frozen_process_value(value):
+    if isinstance(value, dict):
+        return tuple(sorted((key, _frozen_process_value(item)) for key, item in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_frozen_process_value(item) for item in value)
+    if isinstance(value, set):
+        return tuple(sorted(_frozen_process_value(item) for item in value))
+    try:
+        hash(value)
+    except TypeError:
+        return repr(value)
+    return value
+
+
+def _process_config_fingerprint(runtime_config):
+    """Return only settings consumed by process-scoped runtime objects."""
+    values = []
+    for name in (
+        "config_ratelimiter",
+        "config_limiter_uri",
+        "config_limiter_options",
+        "config_updatechannel",
+        "config_access_log",
+        "config_access_logfile",
+        "schedule_reconnect",
+        "config_use_goodreads",
+        "config_goodreads_api_key",
+    ):
+        values.append((name, _frozen_process_value(getattr(runtime_config, name, None))))
+    for name in ("get_config_ipaddress", "get_config_certfile", "get_config_keyfile"):
+        getter = getattr(runtime_config, name, None)
+        try:
+            value = getter() if callable(getter) else None
+        except AttributeError:
+            # Minimal factory test configs may deliberately omit server-only
+            # fields; two such omissions are compatible with one another.
+            value = None
+        values.append((name, _frozen_process_value(value)))
+    values.append(("memory_backend", bool(cli_param.memory_backend)))
+    return tuple(values)
+
+
+def _assert_process_runtime_compatible(runtime_config, runtime_services):
+    state = _process_runtime_state
+    candidate = _process_config_fingerprint(runtime_config)
+    changed = [
+        name
+        for (name, existing), (_, requested) in zip(state.config_fingerprint, candidate)
+        if existing != requested
+    ]
+    candidate_goodreads = getattr(runtime_services, "goodreads_support", None)
+    if state.goodreads_support is not candidate_goodreads:
+        changed.append("goodreads_support")
+    if changed:
+        raise RuntimeError(
+            "create_app() cannot reconfigure process-scoped runtime settings: "
+            + ", ".join(changed)
+        )
+
+
+def _new_app_login_manager(runtime_config, compatibility_app):
+    manager = lm if compatibility_app else MyLoginManager()
+    manager.login_view = 'web.login'
+    manager.anonymous_user = ub.Anonymous
+    manager.session_protection = 'strong' if runtime_config.config_session == 1 else "basic"
+    if manager is not lm:
+        # Blueprint modules still register the historical loader on ``cps.lm``.
+        # Resolve it at request time so imports after construction remain valid,
+        # while keeping all mutable policy on this app's own manager.
+        def load_user(*args):
+            callback = lm.user_callback
+            if callback is None:
+                raise RuntimeError("The compatibility login manager has no user loader")
+            return callback(*args)
+
+        manager.user_loader(load_user)
+    return manager
+
+
+def _configure_process_limiter(application, runtime_config, first_process_initialization):
+    """Initialize the decorated global limiter once, then attach it without mutation."""
+    state = _process_runtime_state
+    config = runtime_config
+    application.config.update(RATELIMIT_ENABLED=runtime_config.config_ratelimiter)
+    if runtime_config.config_limiter_uri != "" and not cli_param.memory_backend:
+        application.config.update(RATELIMIT_STORAGE_URI=config.config_limiter_uri)
+        if runtime_config.config_limiter_options != "":
+            application.config.update(RATELIMIT_STORAGE_OPTIONS=config.config_limiter_options)
+    else:
+        # Flask-Limiter warns when storage is implicit. This process is single-
+        # process, so one explicit in-memory backend is shared by every app.
+        application.config.update(RATELIMIT_STORAGE_URI="memory://")
+
+    if not first_process_initialization:
+        if state.limiter_used_fallback:
+            application.config.update(RATELIMIT_STORAGE_URI="memory://")
+        if state.limiter_registered:
+            application.extensions.setdefault("limiter", set()).add(limiter)
+        for hook in state.limiter_before_hooks:
+            application.before_request(hook)
+        for hook in state.limiter_after_hooks:
+            application.after_request(hook)
+        for hook in state.limiter_teardown_hooks:
+            application.teardown_request(hook)
+        return
+
+    before_count = len(application.before_request_funcs.get(None, []))
+    after_count = len(application.after_request_funcs.get(None, []))
+    teardown_count = len(application.teardown_request_funcs.get(None, []))
+    try:
+        limiter.init_app(application)
+    except Exception as e:
+        log.error('Wrong Flask Limiter configuration, falling back to default: {}'.format(e))
+        application.config.update(RATELIMIT_STORAGE_URI="memory://")
+        limiter.init_app(application)
+        state.limiter_used_fallback = True
+    state.limiter_before_hooks = application.before_request_funcs.get(None, [])[before_count:]
+    state.limiter_after_hooks = application.after_request_funcs.get(None, [])[after_count:]
+    state.limiter_teardown_hooks = application.teardown_request_funcs.get(None, [])[teardown_count:]
+    state.limiter_registered = limiter in application.extensions.get("limiter", set())
+    state.limiter_initialized = True
+
+
 def apply_https_runtime_config(application=None, runtime_config=None):
     """Refresh cookie security flags from the current saved config."""
     application = application or (current_app._get_current_object() if has_app_context() else app)
@@ -218,12 +362,25 @@ def _log_magic_shelf_counts(user_id, total_shelves, visible_shelves,
 
 
 def create_app(config=None, services=None):
-    """Build one Flask application while preserving the legacy no-arg path.
+    """Build an app without reconfiguring an app that is already live.
 
-    Explicit callers receive a fresh app. The no-argument form remains the
-    compatibility route used by the current console entry point and the pinned
-    runtime-manifest oracle.
+    The no-argument form initializes and returns the stable module-level
+    compatibility app. Explicit callers receive a fresh Flask object. Their
+    ``config`` controls app-local cookie, login-session, request-hook and LDAP
+    setup; the first call also selects the process-scoped server, updater,
+    scheduler, Goodreads and limiter settings. Later calls must match those
+    process settings and otherwise fail before changing them.
+
+    This seam does not yet make injection authoritative throughout the legacy
+    package: Kobo availability, web security headers, OAuth generation, error
+    handlers and runtime-task modules still read ``cps.config``/``cps.services``.
+    That module-by-module cutover belongs to P0.0b.
     """
+    with _process_runtime_lock:
+        return _create_app(config, services)
+
+
+def _create_app(config=None, services=None):
     if (config is None) != (services is None):
         raise TypeError("create_app() requires both config and services, or neither")
 
@@ -233,31 +390,35 @@ def create_app(config=None, services=None):
     else:
         runtime_services = services
 
-    if config is None:
+    compatibility_app = config is None
+    if compatibility_app:
         application = globals()["app"]
         _configure_base_app(application, runtime_config)
+        if application.extensions.get(_FACTORY_COMPLETE_MARKER):
+            return application
     else:
         application = _configure_base_app(Flask(__name__), runtime_config)
-        # Modules imported by the legacy bootstrap resolve cps.app. Keep that
-        # compatibility name on the newest factory product; callers that need
-        # either instance retain the returned object directly.
-        globals()["app"] = application
 
-    process_startup_required = not getattr(
-        runtime_services, "_cps_process_startup_complete", False
-    )
+    state = _process_runtime_state
+    first_process_initialization = not state.initialized
+    if not first_process_initialization:
+        _assert_process_runtime_compatible(runtime_config, runtime_services)
 
     if csrf:
         csrf.init_app(application)
 
-    cli_param.init()
+    error = None
+    if first_process_initialization:
+        cli_param.init()
 
-    ub.init_db(cli_param.settings_path)
-    # pylint: disable=no-member
-    encrypt_key, error = config_sql.get_encryption_key(os.path.dirname(cli_param.settings_path))
+        ub.init_db(cli_param.settings_path)
+        # pylint: disable=no-member
+        encrypt_key, error = config_sql.get_encryption_key(os.path.dirname(cli_param.settings_path))
 
-    config_sql.load_configuration(ub.session, encrypt_key)
-    runtime_config.init_config(ub.session, encrypt_key, cli_param)
+        config_sql.load_configuration(ub.session, encrypt_key)
+        runtime_config.init_config(ub.session, encrypt_key, cli_param)
+        state.config_fingerprint = _process_config_fingerprint(runtime_config)
+        state.goodreads_support = getattr(runtime_services, "goodreads_support", None)
 
     # Intelligent Security Configuration
     # Force SESSION_COOKIE_SECURE if OAuth is enabled OR if "Use via HTTPS" is checked.
@@ -277,7 +438,8 @@ def create_app(config=None, services=None):
     if error:
         log.error(error)
 
-    ub.password_change(cli_param.user_credentials)
+    if first_process_initialization:
+        ub.password_change(cli_param.user_credentials)
 
     if sys.version_info < (3, 0):
         log.info(
@@ -289,37 +451,35 @@ def create_app(config=None, services=None):
         web_server.stop(True)
         sys.exit(5)
 
-    lm.login_view = 'web.login'
-    lm.anonymous_user = ub.Anonymous
-    lm.session_protection = 'strong' if runtime_config.config_session == 1 else "basic"
+    app_login_manager = _new_app_login_manager(runtime_config, compatibility_app)
 
-    _ensure_user_profiles_json()
+    if first_process_initialization:
+        _ensure_user_profiles_json()
 
-    from .calibre_init import init_calibre_db_from_config
-    init_calibre_db_from_config(runtime_config, cli_param.settings_path)
-    calibre_db.init_db()
-    # A process can die after staging or after committing cover metadata but
-    # before publication. The stage alone cannot tell us which occurred, so
-    # startup logs and removes it rather than guessing at publication.
-    try:
-        from . import helper
-        helper.scavenge_staged_cover_files()
-    except Exception as ex:
-        log.error("Cover stage startup scavenging failed: %s", ex)
-    # The annotation content-id backfill needs both databases: app.db owns the
-    # annotation, while metadata.db is authoritative for book UUID. Running it
-    # earlier would let a filename choose the book and can cross-link rows.
-    ub.backfill_annotation_content_ids(
-        ub.session.bind,
-        lambda book_id: getattr(calibre_db.get_book(book_id), "uuid", None),
-    )
+        from .calibre_init import init_calibre_db_from_config
+        init_calibre_db_from_config(runtime_config, cli_param.settings_path)
+        calibre_db.init_db()
+        # A process can die after staging or after committing cover metadata but
+        # before publication. The stage alone cannot tell us which occurred, so
+        # startup logs and removes it rather than guessing at publication.
+        try:
+            from . import helper
+            helper.scavenge_staged_cover_files()
+        except Exception as ex:
+            log.error("Cover stage startup scavenging failed: %s", ex)
+        # The annotation content-id backfill needs both databases: app.db owns the
+        # annotation, while metadata.db is authoritative for book UUID.
+        ub.backfill_annotation_content_ids(
+            ub.session.bind,
+            lambda book_id: getattr(calibre_db.get_book(book_id), "uuid", None),
+        )
 
-    updater_thread.init_updater(runtime_config, web_server)
+        updater_thread.init_updater(runtime_config, web_server)
     # Perform dry run of updater and exit afterward
     if cli_param.dry_run:
         updater_thread.dry_run()
         sys.exit(0)
-    if process_startup_required:
+    if first_process_initialization:
         updater_thread.start()
     if not application.extensions.get("cps_reverse_proxy_registered"):
         application.wsgi_app = ReverseProxied(application.wsgi_app)
@@ -329,16 +489,21 @@ def create_app(config=None, services=None):
         cache_buster.init_cache_busting(application)
     log.info('Starting Calibre Web...')
     Principal(application)
-    lm.init_app(application)
+    app_login_manager.init_app(application)
     application.secret_key = os.getenv('SECRET_KEY', config_sql.get_flask_session_key(ub.session))
 
-    web_server.init_app(application, runtime_config)
-    from .cw_babel import babel, get_locale
-    if hasattr(babel, "localeselector"):
-        babel.init_app(application)
-        babel.localeselector(get_locale)
+    if first_process_initialization:
+        web_server.init_app(application, runtime_config)
+    from .cw_babel import babel as compatibility_babel, get_locale
+    if compatibility_app:
+        app_babel = compatibility_babel
     else:
-        babel.init_app(application, locale_selector=get_locale)
+        app_babel = type(compatibility_babel)()
+    if hasattr(app_babel, "localeselector"):
+        app_babel.init_app(application)
+        app_babel.localeselector(get_locale)
+    else:
+        app_babel.init_app(application, locale_selector=get_locale)
 
     # Initialize OAuth blueprints AFTER babel to ensure translations are loaded
     # Issue: OAuth blueprint generation was happening during module import (before babel init),
@@ -353,39 +518,12 @@ def create_app(config=None, services=None):
 
     if runtime_services.ldap:
         runtime_services.ldap.init_app(application, runtime_config)
-    if runtime_services.goodreads_support:
+    if first_process_initialization and runtime_services.goodreads_support:
         runtime_services.goodreads_support.connect(runtime_config.config_goodreads_api_key,
                                                    runtime_config.config_use_goodreads)
-    runtime_config.store_calibre_uuid(calibre_db, db.Library_Id)
-    # Configure rate limiter
-    # https://limits.readthedocs.io/en/stable/storage.html
-    # Keep the historical local name in this block: its source-level contract
-    # is pinned by the limiter regression tests as well as its behaviour.
-    config = runtime_config
-    application.config.update(RATELIMIT_ENABLED=runtime_config.config_ratelimiter)
-    if runtime_config.config_limiter_uri != "" and not cli_param.memory_backend:
-        application.config.update(RATELIMIT_STORAGE_URI=config.config_limiter_uri)
-        if runtime_config.config_limiter_options != "":
-            application.config.update(RATELIMIT_STORAGE_OPTIONS=runtime_config.config_limiter_options)
-    else:
-        # No backend configured, so we get the in-memory one. Say so rather
-        # than leaving the key unset: flask_limiter warns on every startup
-        # when nothing is specified, because an implicit in-memory backend is
-        # wrong for the multi-worker deployments it usually sees. This server
-        # is single-process, so those counters are shared by every handler
-        # that reads them and the backend is right.
-        #
-        # This belongs here and not on the Limiter(...) constructor. A
-        # constructor storage_uri outranks app.config, so it would quietly
-        # override the admin's own "Limiter Backend" setting above and drop
-        # them onto memory storage with no error.
-        application.config.update(RATELIMIT_STORAGE_URI="memory://")
-    try:
-        limiter.init_app(application)
-    except Exception as e:
-        log.error('Wrong Flask Limiter configuration, falling back to default: {}'.format(e))
-        application.config.update(RATELIMIT_STORAGE_URI="memory://")
-        limiter.init_app(application)
+    if first_process_initialization:
+        runtime_config.store_calibre_uuid(calibre_db, db.Library_Id)
+    _configure_process_limiter(application, runtime_config, first_process_initialization)
 
     # Register scheduled tasks
     # Ensure a valid calibre_db session exists before handling each request
@@ -600,11 +738,11 @@ def create_app(config=None, services=None):
         if calibre_db.session_factory:
             calibre_db.session_factory.remove()
 
-    if process_startup_required:
+    if first_process_initialization:
         from .schedule import register_scheduled_tasks, register_startup_tasks
         register_scheduled_tasks(runtime_config.schedule_reconnect)
         register_startup_tasks()
-        runtime_services._cps_process_startup_complete = True
+        state.initialized = True
 
     # cps.web historically binds two app-wide response hooks when the module is
     # imported. If it predates this factory call, copy those hooks to the fresh
@@ -613,4 +751,5 @@ def create_app(config=None, services=None):
     if web_module is not None:
         web_module.register_app_hooks(application)
 
+    application.extensions[_FACTORY_COMPLETE_MARKER] = True
     return application
