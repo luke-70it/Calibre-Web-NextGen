@@ -142,7 +142,10 @@ def test_factory_constructs_two_independent_apps_without_process_job_duplication
 
 
 @pytest.mark.unit
-def test_register_blueprints_preserves_order_on_each_factory_product(monkeypatch):
+@pytest.mark.parametrize("kobo_available", [False, True])
+def test_register_blueprints_preserves_order_on_each_factory_product(
+    monkeypatch, kobo_available
+):
     """The extracted seam registers the same ordered route surface on both apps."""
     services, _, _, _ = _stub_real_bootstrap(monkeypatch)
     first = cps.create_app(cps.config, services)
@@ -151,7 +154,7 @@ def test_register_blueprints_preserves_order_on_each_factory_product(monkeypatch
     from cps import kobo as kobo_module
     from cps.main import register_blueprints
 
-    monkeypatch.setattr(kobo_module, "get_kobo_activated", lambda: False)
+    monkeypatch.setattr(kobo_module, "get_kobo_activated", lambda: kobo_available)
     register_blueprints(first)
     register_blueprints(second)
 
@@ -163,9 +166,45 @@ def test_register_blueprints_preserves_order_on_each_factory_product(monkeypatch
         "metadata", "gdrive", "edit-book", "cover_picker", "cover_preview_bp",
         "annotations", "kosync", "duplicates", "api_v1", "spa", "oauth",
     ]
-    assert list(first.blueprints) == expected_without_generated_oauth
-    assert list(second.blueprints) == expected_without_generated_oauth
+    expected = list(expected_without_generated_oauth)
+    if kobo_available:
+        expected[-1:-1] = [
+            "kobo", "kobo_auth", "readingservices_api_v3",
+            "readingservices_userstorage",
+        ]
+    assert list(first.blueprints) == expected
+    assert list(second.blueprints) == expected
     assert len(list(first.url_map.iter_rules())) == len(list(second.url_map.iter_rules()))
+
+
+@pytest.mark.unit
+def test_generated_oauth_blueprints_are_fresh_for_each_app(monkeypatch):
+    """Provider blueprints cannot be carried from one factory product to the next."""
+    from cps import oauth_bb
+
+    monkeypatch.setattr(oauth_bb.ub, "oauth_support", True)
+    monkeypatch.setattr(oauth_bb, "oauthblueprints", [{"stale": True}])
+
+    def generate(application):
+        assert oauth_bb.oauthblueprints == []
+        from flask import Blueprint
+        generated = []
+        for name in ("github", "google", "generic"):
+            blueprint = Blueprint(name, __name__)
+            application.register_blueprint(blueprint, url_prefix="/login")
+            generated.append({"blueprint": blueprint})
+        return generated
+
+    monkeypatch.setattr(oauth_bb, "generate_oauth_blueprints", generate)
+    monkeypatch.setattr(oauth_bb, "_register_auto_redirect_hooks", lambda *_args: None)
+
+    first = Flask("oauth-first")
+    second = Flask("oauth-second")
+    oauth_bb.init_oauth_blueprints(first)
+    oauth_bb.init_oauth_blueprints(second)
+
+    assert list(first.blueprints) == ["github", "google", "generic"]
+    assert list(second.blueprints) == ["github", "google", "generic"]
 
 
 @pytest.mark.unit
