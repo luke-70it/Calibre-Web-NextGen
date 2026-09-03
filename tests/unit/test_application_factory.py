@@ -188,6 +188,8 @@ def test_register_blueprints_preserves_order_on_each_factory_product(
     assert list(first.blueprints) == expected
     assert list(second.blueprints) == expected
     assert len(list(first.url_map.iter_rules())) == len(list(second.url_map.iter_rules()))
+    assert _hook_counts(first) == _hook_counts(second)
+    assert _hook_counts(first)["error_handlers"] == 36
 
 
 @pytest.mark.unit
