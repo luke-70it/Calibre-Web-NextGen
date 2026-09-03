@@ -9,6 +9,7 @@ import sys
 import os
 import mimetypes
 import threading
+from functools import wraps
 
 from flask import Flask, current_app, g, has_app_context, session
 from .MyLoginManager import MyLoginManager
@@ -361,6 +362,16 @@ def _log_magic_shelf_counts(user_id, total_shelves, visible_shelves,
         log.debug(msg)
 
 
+def _serialized_factory(factory):
+    @wraps(factory)
+    def locked(*args, **kwargs):
+        with _process_runtime_lock:
+            return factory(*args, **kwargs)
+
+    return locked
+
+
+@_serialized_factory
 def create_app(config=None, services=None):
     """Build an app without reconfiguring an app that is already live.
 
@@ -376,11 +387,6 @@ def create_app(config=None, services=None):
     handlers and runtime-task modules still read ``cps.config``/``cps.services``.
     That module-by-module cutover belongs to P0.0b.
     """
-    with _process_runtime_lock:
-        return _create_app(config, services)
-
-
-def _create_app(config=None, services=None):
     if (config is None) != (services is None):
         raise TypeError("create_app() requires both config and services, or neither")
 
