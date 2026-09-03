@@ -443,6 +443,11 @@ def test_first_apps_oauth_receiver_keeps_its_provider_after_app_two(monkeypatch)
 
     second = Flask("oauth-signal-second")
     oauth_bb.init_oauth_blueprints(second)
+    assert oauth_bb.oauthblueprints[0]["id"] == 100
+    with first.app_context():
+        assert oauth_bb.get_oauth_blueprints()[0]["id"] == 100
+    with second.app_context():
+        assert oauth_bb.get_oauth_blueprints()[0]["id"] == 200
 
     response = SimpleNamespace(ok=True, json=lambda: {"id": "account-1"})
     sender = SimpleNamespace(name="github_100", session=SimpleNamespace(get=lambda *_: response))
