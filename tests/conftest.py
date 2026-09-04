@@ -420,6 +420,14 @@ def mock_calibre_tools(mocker):
 # Skip Markers for Conditional Tests
 # ============================================================================
 
+_PYTEST_EXTERNAL_VOLUME_ROOT = "/Volumes/Crucial X8"
+
+
+def _pytest_external_volume_is_mounted(volume_root):
+    """Return whether ``volume_root`` is an available mounted directory."""
+    return os.path.isdir(volume_root) and os.path.ismount(volume_root)
+
+
 def _isolate_pytest_tempdir():
     """Give every pytest process its own tempdir.
 
@@ -463,8 +471,42 @@ def _isolate_pytest_tempdir():
     to a private directory so `cover_enforcer`'s module-scope lock cannot race
     `test_802`'s. This promotes that workaround to the harness, and the local one
     can go once this has settled.
+
+    Scratch lives on the external volume when it is mounted and writable, with
+    ``CWNG_PYTEST_TMP_BASE`` as an explicit override. Otherwise it remains under
+    the system tempdir, and the selected location and reason are reported.
     """
-    base = os.path.join(tempfile.gettempdir(), "cwng-pytest")
+    fallback_base = os.path.join(tempfile.gettempdir(), "cwng-pytest")
+    override_base = os.environ.get("CWNG_PYTEST_TMP_BASE")
+    if override_base is not None:
+        base = override_base
+        reason = "CWNG_PYTEST_TMP_BASE is set"
+    else:
+        volume_root = _PYTEST_EXTERNAL_VOLUME_ROOT
+        external_base = os.path.join(volume_root, "agent-scratch", "cwng-pytest")
+        if _pytest_external_volume_is_mounted(volume_root):
+            try:
+                os.makedirs(external_base, exist_ok=True)
+            except OSError as error:
+                base = fallback_base
+                reason = (
+                    f"{volume_root} is mounted but the external base could not "
+                    f"be created: {error}"
+                )
+            else:
+                if os.access(external_base, os.W_OK):
+                    base = external_base
+                    reason = f"{volume_root} is mounted and writable"
+                else:
+                    base = fallback_base
+                    reason = (
+                        f"{volume_root} is mounted but {external_base} is not writable"
+                    )
+        else:
+            base = fallback_base
+            reason = f"{volume_root} is not mounted"
+
+    print(f"pytest temp base: {base} ({reason})", file=sys.stderr)
     _reap_stale_pytest_tempdirs(base)
     root = os.path.join(base, str(os.getpid()))
     os.makedirs(root, exist_ok=True)
