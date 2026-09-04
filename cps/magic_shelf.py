@@ -934,7 +934,7 @@ def rules_reference_read_status(rules_json):
 
 
 def get_book_ids_for_magic_shelf(shelf_id, sort_order=None, sort_param='stored', bypass_cache=False,
-                                 raise_on_error=False):
+                                 raise_on_error=False, sort_join=()):
     """Return ordered book IDs for a magic shelf without loading book objects.
 
     raise_on_error=True re-raises a DB error instead of masking it as an empty
@@ -961,7 +961,9 @@ def get_book_ids_for_magic_shelf(shelf_id, sort_order=None, sort_param='stored',
                     log.debug(f"Magic shelf {shelf_id} ID list served from cache ({cache.total_count} books)")
                     return cache.book_ids, cache.total_count
 
-        query, magic_shelf = build_book_query_for_magic_shelf(shelf_id, sort_order=sort_order)
+        query, magic_shelf = build_book_query_for_magic_shelf(
+            shelf_id, sort_order=sort_order, sort_join=sort_join
+        )
         if query is None:
             return [], 0
 
@@ -1018,7 +1020,7 @@ def get_book_ids_for_magic_shelf(shelf_id, sort_order=None, sort_param='stored',
         return [], 0
 
 
-def build_book_query_for_magic_shelf(shelf_id, sort_order=None, extra_filter=None):
+def build_book_query_for_magic_shelf(shelf_id, sort_order=None, extra_filter=None, sort_join=()):
     """Build a Books query for a magic shelf.
 
     Returns:
@@ -1052,6 +1054,8 @@ def build_book_query_for_magic_shelf(shelf_id, sort_order=None, extra_filter=Non
     query = cdb.session.query(db.Books).filter(query_filter).filter(
         cdb.common_filters(return_all_languages=bypass_language, extra_filter=extra_filter)
     )
+    if sort_join:
+        query = query.outerjoin(*sort_join)
     # Fork-specific (#38, backport of CWA #1233): outerjoin Series when the
     # sort references Series-derived columns. Without this, ORDER BY
     # series.name produces empty results.
@@ -1071,7 +1075,7 @@ def build_book_query_for_magic_shelf(shelf_id, sort_order=None, extra_filter=Non
     return query, magic_shelf
 
 def get_books_for_magic_shelf(shelf_id, page=1, page_size=None, sort_order=None, sort_param='stored', bypass_cache=False,
-                              raise_on_error=False):
+                              raise_on_error=False, sort_join=()):
     """
     Takes a MagicShelf ID and returns a paginated list of book objects that match its rules.
 
@@ -1097,6 +1101,7 @@ def get_books_for_magic_shelf(shelf_id, page=1, page_size=None, sort_order=None,
             sort_param=sort_param,
             bypass_cache=bypass_cache,
             raise_on_error=raise_on_error,
+            sort_join=sort_join,
         )
         
         # Apply pagination to the list of IDs we just fetched
