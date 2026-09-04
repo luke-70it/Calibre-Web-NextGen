@@ -4,7 +4,7 @@ msgstr ""
 "Report-Msgid-Bugs-To: https://github.com/crocodilestick/Calibre-Web-"
 "Automated\n"
 "POT-Creation-Date: 2026-07-17 21:21-0400\n"
-"PO-Revision-Date: 2026-09-03 15:50+0200\n"
+"PO-Revision-Date: 2026-09-04 16:54+0200\n"
 "Last-Translator: luke_70it <luke_70it@yahoo.it>\n"
 "Language-Team: Italian\n"
 "Language: it\n"
@@ -2225,7 +2225,7 @@ msgstr "Scaffali"
 msgid "Books organized in shelves"
 msgstr "Libri organizzati in scaffali"
 
-#: cps/opds.py
+#: cps/opds.py cps/templates/config_view_edit.html
 msgid "Magic Shelves"
 msgstr "Scaffali magici"
 
@@ -3147,9 +3147,9 @@ msgid ""
 msgstr ""
 "Configurare la Biblioteca Personale per tutti gli utenti non anonimi? Ogni "
 "account inizierà con tutti i libri che può attualmente visualizzare (non "
-"solo quelli inseriti negli scaffali o scaricati). Gli utenti potranno poi "
-"personalizzare la selezione rimuovendo i libri. Gli account già configurati "
-"non verranno mai ripristinati."
+"solo quelli inseriti negli scaffali, letti o scaricati). Gli utenti potranno "
+"poi personalizzare la selezione rimuovendo i libri. Gli account già "
+"configurati non verranno mai ripopolati."
 
 #: cps/spa_strings.py
 msgid ""
@@ -5352,7 +5352,7 @@ msgstr "In lettura"
 msgid "Custom border colour"
 msgstr "Colore del bordo personalizzato"
 
-#: cps/spa_strings.py
+#: cps/spa_strings.py cps/templates/config_view_edit.html
 msgid "Custom columns"
 msgstr "Colonne personalizzate"
 
@@ -11091,6 +11091,10 @@ msgstr ""
 "Pattern Regex per nascondere le colonne personalizzate dalla visualizzazione "
 "nell'interfaccia utente."
 
+#: cps/templates/config_view_edit.html cps/templates/shelf_reorder.html
+msgid "Sort by"
+msgstr "Ordina per"
+
 #: cps/templates/config_view_edit.html
 msgid "Link Read/Unread Status to Calibre Column"
 msgstr "Collega lo stato letto/da leggere nella colonna di Calibre"
@@ -14363,10 +14367,6 @@ msgstr "Ordine dello scaffale"
 #: cps/templates/shelf_order.html
 msgid "Hidden Book"
 msgstr "Libro nascosto"
-
-#: cps/templates/shelf_reorder.html
-msgid "Sort by"
-msgstr "Ordina per"
 
 #: cps/templates/shelf_reorder.html
 msgid "You do not have any shelves to reorder yet."
