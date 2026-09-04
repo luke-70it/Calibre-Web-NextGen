@@ -971,11 +971,10 @@ def get_book_ids_for_magic_shelf(shelf_id, sort_order=None, sort_param='stored',
         total_count = len(all_ids)
 
         if current_user.is_authenticated and not bypass_cache:
-            existing = ub.session.query(ub.MagicShelfCache).filter_by(
+            existing_rows = ub.session.query(ub.MagicShelfCache).filter_by(
                 shelf_id=shelf_id,
                 user_id=current_user.id,
-                sort_param=sort_param,
-            ).first()
+            ).all()
             # Preserve created_at when the rebuilt membership SET is
             # unchanged (fork #468). created_at doubles as the Kobo sync's
             # "membership added" timestamp: get_magic_shelf_membership_added_at
@@ -987,13 +986,18 @@ def get_book_ids_for_magic_shelf(shelf_id, sort_order=None, sort_param='stored',
             # ChangedEntitlement and the Kobo drops the local copies back to
             # "Download"/"Unread" — except on a back-to-back sync inside the
             # TTL window, which is exactly the reporter's symptom. Comparing
-            # as sets keeps the timestamp tied to membership, not to sort
-            # order (browse re-sorts must not re-fire the device).
-            preserved_created_at = (
-                existing.created_at
-                if existing is not None and set(existing.book_ids or []) == set(all_ids)
-                else None
-            )
+            # as sets across every sort-key row keeps the timestamp tied to
+            # membership, not to sort order (browse re-sorts must not re-fire
+            # the device). If an older installation already stamped duplicate
+            # rows differently, retaining the latest match also retains the
+            # Kobo-facing high-water mark.
+            matching_created_at = [
+                cache_row.created_at
+                for cache_row in existing_rows
+                if cache_row.created_at is not None
+                and set(cache_row.book_ids or []) == set(all_ids)
+            ]
+            preserved_created_at = max(matching_created_at, default=None)
             ub.session.query(ub.MagicShelfCache).filter_by(
                 shelf_id=shelf_id,
                 user_id=current_user.id,

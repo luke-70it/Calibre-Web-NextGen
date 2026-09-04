@@ -22,19 +22,26 @@ class ColumnDefinition:
 
 @pytest.fixture()
 def sortable_library(monkeypatch):
-    """A real Books table and the direct-per-book shape Calibre uses for ints."""
+    """Two direct-per-book columns whose decimal IDs have a prefix relation."""
     from cps import db
 
     custom_base = declarative_base()
 
+    class Decoy(custom_base):
+        __tablename__ = "custom_column_1"
+        id = Column(Integer, primary_key=True)
+        book = Column(Integer)
+        value = Column(Integer)
+
     class Difficulty(custom_base):
-        __tablename__ = "custom_column_2086"
+        __tablename__ = "custom_column_12"
         id = Column(Integer, primary_key=True)
         book = Column(Integer)
         value = Column(Integer)
 
     engine = create_engine("sqlite://")
     db.Books.__table__.create(engine)
+    Decoy.__table__.create(engine)
     Difficulty.__table__.create(engine)
     with engine.begin() as connection:
         for book_id in range(1, 7):
@@ -54,6 +61,13 @@ def sortable_library(monkeypatch):
                 },
             )
         connection.execute(
+            Decoy.__table__.insert(),
+            [
+                {"id": book_id, "book": book_id, "value": 7 - book_id}
+                for book_id in range(1, 7)
+            ],
+        )
+        connection.execute(
             Difficulty.__table__.insert(),
             [
                 {"id": 1, "book": 1, "value": 20},
@@ -64,9 +78,11 @@ def sortable_library(monkeypatch):
                 {"id": 6, "book": 6, "value": 20},
             ],
         )
-    monkeypatch.setattr(db, "cc_classes", {2086: Difficulty})
+    # Keep the shorter ID first. A substring lookup for custom_column_1 in
+    # custom_column_12 will select Decoy instead of the exact target.
+    monkeypatch.setattr(db, "cc_classes", {1: Decoy, 12: Difficulty})
     try:
-        yield engine, Difficulty
+        yield engine, Difficulty, Decoy
     finally:
         engine.dispose()
 
@@ -87,24 +103,27 @@ def test_configured_integer_sort_is_total_and_keeps_empties_last_across_pages(
     from cps import db
     from cps.custom_column_sort import resolve_magic_shelf_sort
 
-    engine, difficulty = sortable_library
-    config = SimpleNamespace(config_sortable_custom_columns="2086")
-    columns = [ColumnDefinition(2086, name="Difficulty")]
+    engine, difficulty, decoy = sortable_library
+    config = SimpleNamespace(config_sortable_custom_columns="12")
+    columns = [ColumnDefinition(12, name="Difficulty")]
     session = sessionmaker(bind=engine)()
     try:
-        ascending = resolve_magic_shelf_sort("cc-2086-asc", config, columns)
-        descending = resolve_magic_shelf_sort("cc-2086-desc", config, columns)
+        ascending = resolve_magic_shelf_sort("cc-12-asc", config, columns)
+        descending = resolve_magic_shelf_sort("cc-12-desc", config, columns)
 
-        assert ascending.key == "cc-2086-asc"
-        assert descending.key == "cc-2086-desc"
-        assert len(ascending.join) == 2 and ascending.join[0] is difficulty
-        assert len(descending.join) == 2 and descending.join[0] is difficulty
+        assert ascending.key == "cc-12-asc"
+        assert descending.key == "cc-12-desc"
 
         base = session.query(db.Books.id).outerjoin(*ascending.join)
         assert _paged_ids(session, base, ascending.order_by) == [[4, 1], [2, 6], [3, 5]]
 
         base = session.query(db.Books.id).outerjoin(*descending.join)
         assert _paged_ids(session, base, descending.order_by) == [[6, 2], [1, 4], [5, 3]]
+
+        assert len(ascending.join) == 2 and ascending.join[0] is difficulty
+        assert len(descending.join) == 2 and descending.join[0] is difficulty
+        assert ascending.join[0] is not decoy
+        assert descending.join[0] is not decoy
     finally:
         session.close()
 
@@ -114,16 +133,16 @@ def test_hostile_unknown_and_deleted_keys_execute_only_the_default_order(sortabl
     from cps import db
     from cps.custom_column_sort import resolve_magic_shelf_sort
 
-    engine, _difficulty = sortable_library
-    config = SimpleNamespace(config_sortable_custom_columns="2086,999")
+    engine, _difficulty, _decoy = sortable_library
+    config = SimpleNamespace(config_sortable_custom_columns="12,999")
     rejected = (
-        ("id; DROP TABLE books", [ColumnDefinition(2086)]),
-        ("1) OR (1=1", [ColumnDefinition(2086)]),
-        ("cc-٢٠٨٦-asc", [ColumnDefinition(2086)]),
-        ("cc-999-asc", [ColumnDefinition(2086)]),
-        ("cc-2086-desc", [ColumnDefinition(2086, deleted=True)]),
-        ("cc-2086-asc", [ColumnDefinition(2086, "text")]),
-        ("cc-2086-desc", [ColumnDefinition(2086, multiple=True)]),
+        ("id; DROP TABLE books", [ColumnDefinition(12)]),
+        ("1) OR (1=1", [ColumnDefinition(12)]),
+        ("cc-١٢-asc", [ColumnDefinition(12)]),
+        ("cc-999-asc", [ColumnDefinition(12)]),
+        ("cc-12-desc", [ColumnDefinition(12, deleted=True)]),
+        ("cc-12-asc", [ColumnDefinition(12, "text")]),
+        ("cc-12-desc", [ColumnDefinition(12, multiple=True)]),
     )
     statements = []
 
@@ -186,6 +205,48 @@ def test_only_scalar_numeric_and_datetime_columns_can_be_persisted(tmp_path):
         assert session.execute(text(
             "SELECT config_sortable_custom_columns FROM settings WHERE id = 1"
         )).scalar_one() == "2"
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def test_failed_column_load_preserves_selection_but_a_real_clear_is_persisted(monkeypatch):
+    """Unavailable definitions are not equivalent to an empty admin selection."""
+    from cps import custom_column_sort
+    from cps.config_sql import _Settings
+
+    class DefinitionQuery:
+        def filter(self, *_criteria):
+            return self
+
+        def order_by(self, *_columns):
+            return self
+
+    calibre_session = SimpleNamespace(query=lambda _model: DefinitionQuery())
+    monkeypatch.setattr(custom_column_sort.calibre_db, "session", calibre_session)
+
+    def fail_column_query(_query):
+        raise custom_column_sort.SQLAlchemyError("library unavailable")
+
+    monkeypatch.setattr(custom_column_sort, "_query_columns", fail_column_query)
+    engine = create_engine("sqlite://")
+    _Settings.__table__.create(engine)
+    session = sessionmaker(bind=engine)()
+    try:
+        config = _Settings(id=1, config_sortable_custom_columns="12")
+        session.add(config)
+        session.commit()
+
+        unavailable_columns = custom_column_sort.load_eligible_columns()
+        custom_column_sort.persist_configured_columns(config, [], unavailable_columns)
+        session.commit()
+        session.expire_all()
+        assert session.query(_Settings.config_sortable_custom_columns).scalar() == "12"
+
+        custom_column_sort.persist_configured_columns(config, [], [ColumnDefinition(12)])
+        session.commit()
+        session.expire_all()
+        assert session.query(_Settings.config_sortable_custom_columns).scalar() == ""
     finally:
         session.close()
         engine.dispose()

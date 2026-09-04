@@ -74,8 +74,8 @@ def _query_columns(query):
         return query.all()
 
 
-def load_eligible_columns() -> list[Any]:
-    """Load every live definition the admin is allowed to select."""
+def load_eligible_columns() -> list[Any] | None:
+    """Load selectable definitions, or ``None`` when the library is unavailable."""
     try:
         query = calibre_db.session.query(db.CustomColumns).filter(
             db.CustomColumns.datatype.in_(ELIGIBLE_DATATYPES),
@@ -85,7 +85,7 @@ def load_eligible_columns() -> list[Any]:
         return eligible_columns(_query_columns(query))
     except (SQLAlchemyError, AttributeError):
         log.warning("Sortable custom-column definitions unavailable", exc_info=True)
-        return []
+        return None
 
 
 def load_configured_columns(config) -> list[Any]:
@@ -103,8 +103,11 @@ def load_configured_columns(config) -> list[Any]:
         return []
 
 
-def persist_configured_columns(config, requested_ids: Iterable[Any], columns: Iterable[Any]) -> str:
-    """Persist the requested IDs after intersecting them with the live allowlist."""
+def persist_configured_columns(
+        config, requested_ids: Iterable[Any], columns: Iterable[Any] | None) -> str:
+    """Persist requested IDs, preserving state if the allowlist could not load."""
+    if columns is None:
+        return getattr(config, "config_sortable_custom_columns", "") or ""
     allowed = {column.id for column in eligible_columns(columns)}
     selected = sorted({
         int(value)
