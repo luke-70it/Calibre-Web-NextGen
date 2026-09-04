@@ -24,6 +24,8 @@ _CUSTOM_SORT_KEY = re.compile(r"cc-([0-9]+)-(asc|desc)\Z")
 _MAGIC_SHELF_BUILTIN_SORTS = frozenset(BOOK_SORT_ORDERS).difference(
     ("hotasc", "hotdesc")
 )
+_MAX_COLUMN_ID = (1 << 63) - 1
+_COLUMNS_NOT_PROVIDED = object()
 
 
 @dataclass(frozen=True)
@@ -33,16 +35,23 @@ class ResolvedMagicShelfSort:
     key: str
     order_by: tuple[Any, ...]
     join: tuple[Any, ...] = ()
+    persistable: bool = True
+
+
+def _parse_column_id(value: Any) -> int | None:
+    """Parse only IDs that can fit in Calibre's signed SQLite INTEGER key."""
+    text = str(value)
+    if not text.isascii() or not text.isdecimal() or len(text) > 19:
+        return None
+    column_id = int(text)
+    return column_id if column_id <= _MAX_COLUMN_ID else None
 
 
 def configured_column_ids(config) -> frozenset[int]:
     """Read the persisted comma-separated IDs, ignoring malformed old values."""
     raw = getattr(config, "config_sortable_custom_columns", "") or ""
-    return frozenset(
-        int(value)
-        for value in raw.split(",")
-        if value.isascii() and value.isdecimal()
-    )
+    parsed = (_parse_column_id(value) for value in raw.split(","))
+    return frozenset(column_id for column_id in parsed if column_id is not None)
 
 
 def _is_eligible(column) -> bool:
@@ -88,8 +97,8 @@ def load_eligible_columns() -> list[Any] | None:
         return None
 
 
-def load_configured_columns(config) -> list[Any]:
-    """Load only configured definitions, rechecking their current schema shape."""
+def load_configured_columns(config) -> list[Any] | None:
+    """Load configured definitions, or ``None`` when the library is unavailable."""
     configured = configured_column_ids(config)
     if not configured:
         return []
@@ -100,7 +109,7 @@ def load_configured_columns(config) -> list[Any]:
         return configured_columns(_query_columns(query), config)
     except (SQLAlchemyError, AttributeError):
         log.warning("Configured custom-column definitions unavailable", exc_info=True)
-        return []
+        return None
 
 
 def persist_configured_columns(
@@ -109,21 +118,23 @@ def persist_configured_columns(
     if columns is None:
         return getattr(config, "config_sortable_custom_columns", "") or ""
     allowed = {column.id for column in eligible_columns(columns)}
-    selected = sorted({
-        int(value)
-        for raw_value in requested_ids
-        for value in (str(raw_value),)
-        if value.isascii() and value.isdecimal() and int(value) in allowed
-    })
+    selected = set()
+    for raw_value in requested_ids:
+        column_id = _parse_column_id(raw_value)
+        if column_id is not None and column_id in allowed:
+            selected.add(column_id)
+    selected = sorted(selected)
     serialized = ",".join(str(column_id) for column_id in selected)
     config.config_sortable_custom_columns = serialized
     return serialized
 
 
-def custom_sort_options(config, columns=None) -> list[dict[str, str]]:
+def custom_sort_options(config, columns=_COLUMNS_NOT_PROVIDED) -> list[dict[str, str]]:
     """Build the server-owned custom choices consumed by both frontends."""
-    if columns is None:
+    if columns is _COLUMNS_NOT_PROVIDED:
         columns = load_configured_columns(config)
+    if columns is None:
+        return []
     options = []
     for column in configured_columns(columns, config):
         options.extend((
@@ -133,14 +144,16 @@ def custom_sort_options(config, columns=None) -> list[dict[str, str]]:
     return options
 
 
-def _default_sort() -> ResolvedMagicShelfSort:
+def _default_sort(*, persistable=True) -> ResolvedMagicShelfSort:
     return ResolvedMagicShelfSort(
         DEFAULT_SORT,
         tuple(BOOK_SORT_ORDERS[DEFAULT_SORT]),
+        persistable=persistable,
     )
 
 
-def resolve_magic_shelf_sort(sort_key, config, columns=None) -> ResolvedMagicShelfSort:
+def resolve_magic_shelf_sort(
+        sort_key, config, columns=_COLUMNS_NOT_PROVIDED) -> ResolvedMagicShelfSort:
     """Map a request key to trusted SQLAlchemy ordering, or the safe default.
 
     Custom keys must name an admin-enabled ID, a currently live eligible
@@ -155,13 +168,17 @@ def resolve_magic_shelf_sort(sort_key, config, columns=None) -> ResolvedMagicShe
     match = _CUSTOM_SORT_KEY.fullmatch(sort_key)
     if match is None:
         return _default_sort()
-    column_id = int(match.group(1))
+    column_id = _parse_column_id(match.group(1))
+    if column_id is None:
+        return _default_sort()
     direction = match.group(2)
     if column_id not in configured_column_ids(config):
         return _default_sort()
 
-    if columns is None:
+    if columns is _COLUMNS_NOT_PROVIDED:
         columns = load_configured_columns(config)
+    if columns is None:
+        return _default_sort(persistable=False)
     live_column = next(
         (column for column in columns if getattr(column, "id", None) == column_id),
         None,

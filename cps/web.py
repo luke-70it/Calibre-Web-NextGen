@@ -1265,7 +1265,7 @@ def render_magic_shelf(shelf_id, sort_param, page):
     resolved_sort = resolve_magic_shelf_sort(
         requested_sort, config, custom_sort_columns
     )
-    if sort_param != "stored":
+    if sort_param != "stored" and resolved_sort.persistable:
         current_user.set_view_property("magicshelf", "stored", resolved_sort.key)
     order = (list(resolved_sort.order_by), resolved_sort.key)
     

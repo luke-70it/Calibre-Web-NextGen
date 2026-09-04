@@ -975,9 +975,10 @@ def get_book_ids_for_magic_shelf(shelf_id, sort_order=None, sort_param='stored',
                 shelf_id=shelf_id,
                 user_id=current_user.id,
             ).all()
-            # Preserve created_at when the rebuilt membership SET is
-            # unchanged (fork #468). created_at doubles as the Kobo sync's
-            # "membership added" timestamp: get_magic_shelf_membership_added_at
+            # Preserve created_at only when every sort-key row belongs to the
+            # same membership generation (fork #468). created_at supplies the
+            # Kobo sync's "membership added" timestamp:
+            # get_magic_shelf_membership_added_at
             # takes max(created_at) across the user's kobo_sync magic shelves,
             # and the Kobo sync arm re-emits the whole shelf whenever that
             # timestamp advances past the device cursor. If a 30-minute TTL
@@ -986,23 +987,28 @@ def get_book_ids_for_magic_shelf(shelf_id, sort_order=None, sort_param='stored',
             # ChangedEntitlement and the Kobo drops the local copies back to
             # "Download"/"Unread" — except on a back-to-back sync inside the
             # TTL window, which is exactly the reporter's symptom. Comparing
-            # as sets across every sort-key row keeps the timestamp tied to
+            # as sets across every current row keeps the timestamp tied to
             # membership, not to sort order (browse re-sorts must not re-fire
-            # the device). If an older installation already stamped duplicate
-            # rows differently, retaining the latest match also retains the
-            # Kobo-facing high-water mark.
-            matching_created_at = [
+            # the device). One differing row proves that membership changed;
+            # all other rows are then a superseded generation and must be
+            # removed so a later oscillation cannot resurrect their timestamp.
+            rebuilt_membership = set(all_ids)
+            membership_unchanged = bool(existing_rows) and all(
+                set(cache_row.book_ids or []) == rebuilt_membership
+                for cache_row in existing_rows
+            )
+            preserved_created_at = max((
                 cache_row.created_at
                 for cache_row in existing_rows
                 if cache_row.created_at is not None
-                and set(cache_row.book_ids or []) == set(all_ids)
-            ]
-            preserved_created_at = max(matching_created_at, default=None)
-            ub.session.query(ub.MagicShelfCache).filter_by(
+            ), default=None) if membership_unchanged else None
+            stale_cache_query = ub.session.query(ub.MagicShelfCache).filter_by(
                 shelf_id=shelf_id,
                 user_id=current_user.id,
-                sort_param=sort_param,
-            ).delete()
+            )
+            if membership_unchanged:
+                stale_cache_query = stale_cache_query.filter_by(sort_param=sort_param)
+            stale_cache_query.delete()
             new_cache = ub.MagicShelfCache(
                 shelf_id=shelf_id,
                 user_id=current_user.id,

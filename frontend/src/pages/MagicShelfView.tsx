@@ -14,6 +14,10 @@ import type { Book } from '../lib/api';
 import { ApiError } from '../lib/api';
 import styles from './Shelf.module.css';
 import { useCardActionsHidden } from '../lib/useCardActionsHidden';
+import {
+  canonicalMagicShelfSortAdoption,
+  customMagicShelfSortOptions,
+} from '../lib/magicShelfSort';
 
 function magicShelfSortKey(id: string) {
   return `cwng:magic-shelf-sort:${id}`;
@@ -42,6 +46,7 @@ export function MagicShelfView({ id }: { id: string }) {
   const [sortState, setSortState] = useState(() => ({
     shelfId: id,
     value: savedMagicShelfSort(id),
+    persist: true,
   }));
   // Route reuse can render once before its reset effect. Resolve that render
   // against the new shelf's own saved value, never the prior shelf's value.
@@ -67,11 +72,11 @@ export function MagicShelfView({ id }: { id: string }) {
   // Keep sort state paired with its shelf so the old value is never written
   // into the new shelf's storage key during route reuse.
   useEffect(() => {
-    setSortState({ shelfId: id, value: savedMagicShelfSort(id) });
+    setSortState({ shelfId: id, value: savedMagicShelfSort(id), persist: true });
   }, [id]);
 
   useEffect(() => {
-    if (sortState.shelfId !== id) return;
+    if (sortState.shelfId !== id || !sortState.persist) return;
     try {
       localStorage.setItem(magicShelfSortKey(id), sortState.value);
     } catch {
@@ -81,10 +86,16 @@ export function MagicShelfView({ id }: { id: string }) {
 
   // A deleted, disabled, or type-changed custom column is normalized by the
   // server. Adopt that canonical fallback in the control and saved setting.
+  // A transient library outage also serves a fallback, but marks it as unsafe
+  // to persist so the administrator's configured choice survives recovery.
   useEffect(() => {
-    if (!data || isPlaceholderData || !data.sort || data.sort === sort) return;
+    if (!data) return;
+    const adoption = canonicalMagicShelfSortAdoption(
+      sort, data.sort, isPlaceholderData, data.sort_persistable,
+    );
+    if (!adoption) return;
     setPage(1);
-    setSortState({ shelfId: id, value: data.sort });
+    setSortState({ shelfId: id, ...adoption });
   }, [data, id, isPlaceholderData, sort]);
 
   // Skip placeholder data — accumulating the previous shelf's briefly-served
@@ -119,7 +130,7 @@ export function MagicShelfView({ id }: { id: string }) {
     { value: 'old', label: t('Oldest') },
     { value: 'abc', label: t('Title A–Z') },
     { value: 'zyx', label: t('Title Z–A') },
-    ...data.custom_sort_options,
+    ...customMagicShelfSortOptions(data.custom_sort_options),
   ];
 
   // #870 (@auspex, umbrella #867): ordinary shelves have had this button since
@@ -171,7 +182,7 @@ export function MagicShelfView({ id }: { id: string }) {
             value={sort}
             onChange={(event) => {
               setPage(1);
-              setSortState({ shelfId: id, value: event.target.value });
+              setSortState({ shelfId: id, value: event.target.value, persist: true });
             }}
             aria-label={t('Sort order')}
           >

@@ -1587,7 +1587,8 @@ export interface MagicShelfSortOption {
 export function useMagicShelfBooks(id: string | number, page = 1, sort = 'new') {
   return useQuery<MagicShelfItem & BooksPage & {
     sort: string;
-    custom_sort_options: MagicShelfSortOption[];
+    sort_persistable?: boolean;
+    custom_sort_options?: MagicShelfSortOption[];
   }>({
     queryKey: ['magicshelf', String(id), page, sort],
     queryFn: () => apiGet(
